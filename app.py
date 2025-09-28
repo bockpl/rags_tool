@@ -1,5 +1,5 @@
 """
-SummRAG — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
+RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
 Version: 0.1.2
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
