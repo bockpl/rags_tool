@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>rags_tool Admin Console</title>
+    <style>
+        :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+        body { margin: 0; padding: 24px; background: #f5f5f5; }
+        .container { max-width: 900px; margin: 0 auto; background: #ffffff; padding: 24px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
+        h1 { margin-top: 0; }
+        label { font-weight: 600; display: block; margin-bottom: 8px; }
+        select, textarea, button { width: 100%; font-size: 15px; }
+        select { padding: 10px; border-radius: 8px; border: 1px solid #ccc; margin-bottom: 16px; }
+        textarea { min-height: 200px; padding: 12px; border-radius: 8px; border: 1px solid #ccc; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; }
+        button { padding: 12px; border: none; border-radius: 8px; background: #0060df; color: #fff; font-weight: 600; cursor: pointer; margin-top: 16px; }
+        button:disabled { background: #9ca3af; cursor: not-allowed; }
+        .meta { display: flex; gap: 12px; margin-bottom: 16px; font-size: 14px; color: #4b5563; flex-wrap: wrap; }
+        .meta span { background: #f3f4f6; padding: 6px 10px; border-radius: 999px; }
+        pre { background: #0f172a; color: #f8fafc; padding: 16px; border-radius: 10px; overflow: auto; margin-top: 24px; white-space: pre-wrap; word-wrap: break-word; }
+        .note { font-size: 14px; color: #6b7280; margin-bottom: 16px; }
+        .doc { background: #fef3c7; color: #78350f; border-radius: 10px; padding: 12px 16px; margin-bottom: 18px; font-size: 14px; line-height: 1.5; white-space: pre-line; }
+    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="robots" content="noindex" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="description" content="Admin console for rags_tool" />
+    <meta name="generator" content="rags_tool" />
+</head>
+<body>
+    <div class="container">
+        <h1>rags_tool Admin Console</h1>
+        <p class="note">Operacje wysyłają nagłówek <code>X-Admin-UI: 1</code>, aby wymusić tryb debug na serwerze.</p>
+        <label for="operation">Wybierz operację</label>
+        <select id="operation"></select>
+        <div class="meta">
+            <span id="method"></span>
+            <span id="path"></span>
+        </div>
+        <div class="doc" id="doc"></div>
+        <div id="body-wrapper">
+            <label for="payload">Treść żądania (JSON)</label>
+            <textarea id="payload" spellcheck="false"></textarea>
+        </div>
+        <button id="send">Wyślij żądanie</button>
+        <pre id="result">Odpowiedź pojawi się tutaj.</pre>
+    </div>
+    <script>
+        const operations = __OPERATIONS__;
+
+        const selectEl = document.getElementById("operation");
+        const methodEl = document.getElementById("method");
+        const pathEl = document.getElementById("path");
+        const bodyWrapper = document.getElementById("body-wrapper");
+        const docEl = document.getElementById("doc");
+        const payloadEl = document.getElementById("payload");
+        const resultEl = document.getElementById("result");
+        const sendBtn = document.getElementById("send");
+
+        function populateOptions() {
+            operations.forEach((op, idx) => {
+                const option = document.createElement("option");
+                option.value = op.id;
+                option.textContent = op.label;
+                if (idx === 0) option.selected = true;
+                selectEl.appendChild(option);
+            });
+        }
+
+        function renderOperation(id) {
+            const op = operations.find(item => item.id === id);
+            if (!op) return;
+            methodEl.textContent = op.method;
+            pathEl.textContent = op.path;
+            docEl.textContent = op.doc || "Brak dokumentacji dla tej operacji.";
+            const hasBody = op.method !== "GET";
+            if (hasBody) {
+                bodyWrapper.style.display = "block";
+                payloadEl.value = op.body && op.body.length ? op.body : "{}";
+            } else {
+                bodyWrapper.style.display = "none";
+                payloadEl.value = "";
+            }
+            resultEl.textContent = "Odpowiedź pojawi się tutaj.";
+            sendBtn.disabled = false;
+            sendBtn.dataset.op = op.id;
+        }
+
+        async function runRequest() {
+            const opId = sendBtn.dataset.op;
+            const op = operations.find(item => item.id === opId);
+            if (!op) return;
+            sendBtn.disabled = true;
+            resultEl.textContent = "Wysyłanie...";
+
+            let bodyPayload = undefined;
+            if (op.method !== "GET") {
+                const raw = payloadEl.value.trim();
+                if (raw.length) {
+                    try {
+                        bodyPayload = JSON.stringify(JSON.parse(raw));
+                    } catch (err) {
+                        resultEl.textContent = `Błąd parsowania JSON: ${err}`;
+                        sendBtn.disabled = false;
+                        return;
+                    }
+                } else {
+                    bodyPayload = "{}";
+                }
+            }
+
+            try {
+                const response = await fetch(op.path, {
+                    method: op.method,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-Admin-UI": "1"
+                    },
+                    body: op.method === "GET" ? undefined : bodyPayload
+                });
+
+                const ct = response.headers.get("content-type") || "";
+                if (ct.includes("application/json")) {
+                    const data = await response.json();
+                    resultEl.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    const text = await response.text();
+                    resultEl.textContent = text;
+                }
+                if (!response.ok) {
+                    resultEl.textContent = `HTTP ${response.status}\n\n${resultEl.textContent}`;
+                }
+            } catch (err) {
+                resultEl.textContent = `Błąd wywołania: ${err}`;
+            }
+
+            sendBtn.disabled = false;
+        }
+
+        populateOptions();
+        renderOperation(selectEl.value);
+        selectEl.addEventListener("change", event => renderOperation(event.target.value));
+        sendBtn.addEventListener("click", runRequest);
+    </script>
+</body>
+</html>
+

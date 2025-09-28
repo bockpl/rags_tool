@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir \
     PyPDF2
 
 COPY app.py settings.py ./
+COPY templates ./templates
 
 EXPOSE 8080
 

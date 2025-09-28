@@ -1,6 +1,15 @@
-# rags_tool (0.6.1)
+# rags_tool (0.6.3)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.6.3
+
+- Poprawka startu: uniknięto błędu `NameError: SearchQuery` poprzez użycie forward refs w typach helperów.
+
+## Nowości w 0.6.2
+
+- Refaktor: podział długich funkcji (`ingest_build`, `search_query`) na mniejsze helpery ułatwiające utrzymanie i testowanie.
+- Panel Admin UI: szablon przeniesiony do pliku `templates/admin.html` (łatwiejsza edycja). Serwer wczytuje szablon z pliku i wstrzykuje operacje przez prostą podmianę tokenu `__OPERATIONS__`.
 
 ## Nowości w 0.6.1
 

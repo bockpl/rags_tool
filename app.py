@@ -1,6 +1,6 @@
 """
 RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
-Version: 0.6.1
+Version: 0.6.3
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
 
@@ -115,148 +115,170 @@ logger.propagate = False
 ADMIN_UI_REQUEST_HEADER = "x-admin-ui"
 _admin_debug_activated = False
 
-ADMIN_UI_HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"utf-8\" />
-    <title>rags_tool Admin Console</title>
-    <style>
-        :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-        body { margin: 0; padding: 24px; background: #f5f5f5; }
-        .container { max-width: 900px; margin: 0 auto; background: #ffffff; padding: 24px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
-        h1 { margin-top: 0; }
-        label { font-weight: 600; display: block; margin-bottom: 8px; }
-        select, textarea, button { width: 100%; font-size: 15px; }
-        select { padding: 10px; border-radius: 8px; border: 1px solid #ccc; margin-bottom: 16px; }
-        textarea { min-height: 200px; padding: 12px; border-radius: 8px; border: 1px solid #ccc; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, \"Liberation Mono\", Menlo, monospace; }
-        button { padding: 12px; border: none; border-radius: 8px; background: #0060df; color: #fff; font-weight: 600; cursor: pointer; margin-top: 16px; }
-        button:disabled { background: #9ca3af; cursor: not-allowed; }
-        .meta { display: flex; gap: 12px; margin-bottom: 16px; font-size: 14px; color: #4b5563; flex-wrap: wrap; }
-        .meta span { background: #f3f4f6; padding: 6px 10px; border-radius: 999px; }
-        pre { background: #0f172a; color: #f8fafc; padding: 16px; border-radius: 10px; overflow: auto; margin-top: 24px; white-space: pre-wrap; word-wrap: break-word; }
-        .note { font-size: 14px; color: #6b7280; margin-bottom: 16px; }
-        .doc { background: #fef3c7; color: #78350f; border-radius: 10px; padding: 12px 16px; margin-bottom: 18px; font-size: 14px; line-height: 1.5; white-space: pre-line; }
-    </style>
-</head>
-<body>
-    <div class=\"container\">
-        <h1>rags_tool Admin Console</h1>
-        <p class=\"note\">Operacje wysyłają nagłówek <code>X-Admin-UI: 1</code>, aby wymusić tryb debug na serwerze.</p>
-        <label for=\"operation\">Wybierz operację</label>
-        <select id=\"operation\"></select>
-        <div class=\"meta\">
-            <span id=\"method\"></span>
-            <span id=\"path\"></span>
-        </div>
-        <div class=\"doc\" id=\"doc\"></div>
-        <div id=\"body-wrapper\">
-            <label for=\"payload\">Treść żądania (JSON)</label>
-            <textarea id=\"payload\" spellcheck=\"false\"></textarea>
-        </div>
-        <button id=\"send\">Wyślij żądanie</button>
-        <pre id=\"result\">Odpowiedź pojawi się tutaj.</pre>
-    </div>
-    <script>
-        const operations = __OPERATIONS__;
+## Admin UI template moved to templates/admin.html
 
-        const selectEl = document.getElementById("operation");
-        const methodEl = document.getElementById("method");
-        const pathEl = document.getElementById("path");
-        const bodyWrapper = document.getElementById("body-wrapper");
-        const docEl = document.getElementById("doc");
-        const payloadEl = document.getElementById("payload");
-        const resultEl = document.getElementById("result");
-        const sendBtn = document.getElementById("send");
+def _collect_documents(file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
+    """Parse files, split into chunks, summarize and prepare corpora."""
+    all_chunks: List[str] = []
+    summary_corpus: List[str] = []
+    doc_records: List[Dict[str, Any]] = []
 
-        function populateOptions() {
-            operations.forEach((op, idx) => {
-                const option = document.createElement("option");
-                option.value = op.id;
-                option.textContent = op.label;
-                if (idx === 0) option.selected = true;
-                selectEl.appendChild(option);
-            });
+    for path in file_paths:
+        logger.debug("Processing document %s", path)
+        raw = extract_text(path)
+        chunks = chunk_text(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap)
+        if not chunks:
+            logger.debug("Document %s produced no chunks; skipping", path)
+            continue
+        doc_sum = llm_summary(raw[:12000])
+        doc_id = sha1(str(path.resolve()))
+        summary_signature = doc_sum.get("signature", [])
+        summary_sparse_text = " ".join([doc_sum.get("summary", ""), " ".join(summary_signature)]).strip()
+        rec = {
+            "doc_id": doc_id,
+            "path": str(path.resolve()),
+            "chunks": chunks,
+            "doc_summary": doc_sum.get("summary", ""),
+            "doc_signature": summary_signature,
+            "summary_sparse_text": summary_sparse_text,
         }
+        doc_records.append(rec)
+        all_chunks.extend(chunks)
+        if summary_sparse_text:
+            summary_corpus.append(summary_sparse_text)
+        logger.debug(
+            "Document %s parsed | chunks=%d summary_len=%d",
+            path,
+            len(chunks),
+            len(rec["doc_summary"] or ""),
+        )
 
-        function renderOperation(id) {
-            const op = operations.find(item => item.id === id);
-            if (!op) return;
-            methodEl.textContent = op.method;
-            pathEl.textContent = op.path;
-            docEl.textContent = op.doc || "Brak dokumentacji dla tej operacji.";
-            const hasBody = op.method !== "GET";
-            if (hasBody) {
-                bodyWrapper.style.display = "block";
-                payloadEl.value = op.body && op.body.length ? op.body : "{}";
-            } else {
-                bodyWrapper.style.display = "none";
-                payloadEl.value = "";
+    return doc_records, all_chunks, summary_corpus
+
+
+def _prepare_tfidf(
+    all_chunks: List[str],
+    summary_corpus: List[str],
+    enable_sparse: bool,
+    rebuild_tfidf: bool,
+) -> Tuple[Optional[TfidfVectorizer], Optional[TfidfVectorizer]]:
+    """Fit or load TF-IDF vectorizers for content and summaries."""
+    if not enable_sparse:
+        return None, None
+    content_vec: Optional[TfidfVectorizer] = None
+    summary_vec: Optional[TfidfVectorizer] = None
+    logger.debug("Sparse mode enabled; rebuild=%s", rebuild_tfidf)
+    if all_chunks:
+        if rebuild_tfidf or not VECTORIZER_PATH.exists():
+            content_vec = fit_vectorizer(all_chunks)
+            logger.debug("Fitted new TF-IDF vectorizer over %d chunks", len(all_chunks))
+        else:
+            content_vec = load_vectorizer()
+            if content_vec is None:
+                content_vec = fit_vectorizer(all_chunks)
+                logger.debug("Rebuilt TF-IDF vectorizer (cache missing) over %d chunks", len(all_chunks))
+            else:
+                logger.debug("Loaded existing TF-IDF vectorizer")
+    else:
+        logger.debug("No chunks available for TF-IDF fitting; reusing existing vectorizer if present")
+        content_vec = load_vectorizer()
+
+    if summary_corpus:
+        if rebuild_tfidf or not SUMMARY_VECTORIZER_PATH.exists():
+            summary_vec = fit_vectorizer(summary_corpus, path=SUMMARY_VECTORIZER_PATH)
+            logger.debug("Fitted new summary TF-IDF vectorizer over %d summaries", len(summary_corpus))
+        else:
+            summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
+            if summary_vec is None:
+                summary_vec = fit_vectorizer(summary_corpus, path=SUMMARY_VECTORIZER_PATH)
+                logger.debug(
+                    "Rebuilt summary TF-IDF vectorizer (cache missing) over %d summaries",
+                    len(summary_corpus),
+                )
+            else:
+                logger.debug("Loaded existing summary TF-IDF vectorizer")
+    else:
+        logger.debug("No summaries available for TF-IDF fitting; reusing existing summary vectorizer if present")
+        summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
+
+    return content_vec, summary_vec
+
+
+def _build_and_upsert_points(
+    doc_records: List[Dict[str, Any]],
+    content_vec: Optional[TfidfVectorizer],
+    summary_vec: Optional[TfidfVectorizer],
+    *,
+    enable_sparse: bool,
+    collection_name: str,
+) -> int:
+    """Create Qdrant points for all documents and upsert in batches."""
+    points: List[qm.PointStruct] = []
+    point_count = 0
+
+    for rec in doc_records:
+        doc_id = rec["doc_id"]
+        path = rec["path"]
+        chunks = rec["chunks"]
+        doc_summary = rec["doc_summary"]
+        doc_signature = rec["doc_signature"]
+        summary_sparse_text = rec["summary_sparse_text"]
+
+        summary_dense_vec = embed_text([doc_summary])[0]
+        content_vecs = embed_text(chunks)
+
+        if enable_sparse:
+            sparse_chunks = tfidf_vector(chunks, content_vec)
+            if summary_vec is not None and summary_sparse_text:
+                summary_sparse = tfidf_vector([summary_sparse_text], summary_vec, path=SUMMARY_VECTORIZER_PATH)[0]
+            else:
+                summary_sparse = ([], [])
+        else:
+            sparse_chunks = [([], []) for _ in chunks]
+            summary_sparse = ([], [])
+
+        for i, chunk in enumerate(chunks):
+            pid = int(str(int(sha1(f"{doc_id}:{i}")[0:12], 16))[:12])
+            payload = {
+                "doc_id": doc_id,
+                "path": path,
+                "chunk_id": i,
+                "is_active": True,
+                "summary": doc_summary,
+                "text": chunk,
+                "signature": doc_signature,
             }
-            resultEl.textContent = "Odpowiedź pojawi się tutaj.";
-            sendBtn.disabled = false;
-            sendBtn.dataset.op = op.id;
-        }
 
-        async function runRequest() {
-            const opId = sendBtn.dataset.op;
-            const op = operations.find(item => item.id === opId);
-            if (!op) return;
-            sendBtn.disabled = true;
-            resultEl.textContent = "Wysyłanie...";
-
-            let bodyPayload = undefined;
-            if (op.method !== "GET") {
-                const raw = payloadEl.value.trim();
-                if (raw.length) {
-                    try {
-                        bodyPayload = JSON.stringify(JSON.parse(raw));
-                    } catch (err) {
-                        resultEl.textContent = `Błąd parsowania JSON: ${err}`;
-                        sendBtn.disabled = false;
-                        return;
-                    }
-                } else {
-                    bodyPayload = "{}";
-                }
+            vectors: Dict[str, Any] = {
+                CONTENT_VECTOR_NAME: content_vecs[i],
+                SUMMARY_VECTOR_NAME: summary_dense_vec,
             }
 
-            try {
-                const response = await fetch(op.path, {
-                    method: op.method,
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-Admin-UI": "1"
-                    },
-                    body: op.method === "GET" ? undefined : bodyPayload
-                });
+            if SPARSE_ENABLED and enable_sparse:
+                indices, values = sparse_chunks[i]
+                if indices:
+                    vectors[CONTENT_SPARSE_NAME] = qm.SparseVector(indices=indices, values=values)
+                    payload["content_sparse_indices"] = indices
+                    payload["content_sparse_values"] = values
+                if summary_sparse[0]:
+                    vectors[SUMMARY_SPARSE_NAME] = qm.SparseVector(indices=summary_sparse[0], values=summary_sparse[1])
+                    payload["summary_sparse_indices"] = summary_sparse[0]
+                    payload["summary_sparse_values"] = summary_sparse[1]
 
-                const ct = response.headers.get("content-type") || "";
-                if (ct.includes("application/json")) {
-                    const data = await response.json();
-                    resultEl.textContent = JSON.stringify(data, null, 2);
-                } else {
-                    const text = await response.text();
-                    resultEl.textContent = text;
-                }
-                if (!response.ok) {
-                    resultEl.textContent = `HTTP ${response.status}\n\n${resultEl.textContent}`;
-                }
-            } catch (err) {
-                resultEl.textContent = `Błąd wywołania: ${err}`;
-            }
+            points.append(qm.PointStruct(id=pid, vector=vectors, payload=payload))
+            point_count += 1
 
-            sendBtn.disabled = false;
-        }
+        if len(points) >= 1024:
+            qdrant.upsert(collection_name=collection_name, points=points)
+            logger.debug("Upserted batch of %d points into %s", len(points), collection_name)
+            points = []
 
-        populateOptions();
-        renderOperation(selectEl.value);
-        selectEl.addEventListener("change", event => renderOperation(event.target.value));
-        sendBtn.addEventListener("click", runRequest);
-    </script>
-</body>
-</html>
-"""
+    if points:
+        qdrant.upsert(collection_name=collection_name, points=points)
+        logger.debug("Upserted final batch of %d points into %s", len(points), collection_name)
+
+    return point_count
+
 
 ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
     {"id": "about", "path": "/about", "method": "GET"},
@@ -654,6 +676,167 @@ def _cosine_dense(a: List[float], b: List[float]) -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# SEARCH HELPERS — stage-1 and stage-2 decomposition
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _build_sparse_queries_for_query(query: str, use_hybrid: bool) -> Tuple[
+    Optional[Tuple[List[int], List[float]]], Optional[Tuple[List[int], List[float]]]
+]:
+    if not (use_hybrid and SPARSE_ENABLED):
+        return None, None
+    content_sparse_query: Optional[Tuple[List[int], List[float]]] = None
+    summary_sparse_query: Optional[Tuple[List[int], List[float]]] = None
+    content_vec = load_vectorizer()
+    if content_vec is not None:
+        idx, val = tfidf_vector([query], content_vec)[0]
+        if idx:
+            content_sparse_query = (idx, val)
+    summary_vec_model = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
+    if summary_vec_model is not None:
+        s_idx, s_val = tfidf_vector([query], summary_vec_model, path=SUMMARY_VECTORIZER_PATH)[0]
+        if s_idx:
+            summary_sparse_query = (s_idx, s_val)
+    return content_sparse_query, summary_sparse_query
+
+
+def _stage1_select_documents(
+    q_vec: List[float],
+    flt: Optional[qm.Filter],
+    summary_sparse_query: Optional[Tuple[List[int], List[float]]],
+    req: "SearchQuery",
+) -> Tuple[List[str], Dict[str, Any]]:
+    sum_search = qdrant.search(
+        collection_name=settings.collection_name,
+        query_vector=(SUMMARY_VECTOR_NAME, q_vec),
+        query_filter=flt,
+        limit=max(50, req.top_m),
+        with_payload=True,
+        with_vectors=[SUMMARY_VECTOR_NAME] if req.mmr_stage1 else False,
+        score_threshold=None,
+        search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+    )
+    summary_sparse_lookup: Dict[int, float] = {}
+    if summary_sparse_query is not None:
+        summary_sparse_lookup = dict(zip(summary_sparse_query[0], summary_sparse_query[1]))
+
+    doc_map: Dict[str, Dict[str, Any]] = {}
+    for r in sum_search:
+        payload = r.payload or {}
+        did = payload.get("doc_id")
+        if not did or did in doc_map:
+            continue
+        dense_score = float(r.score or 0.0)
+        sparse_dot = 0.0
+        if summary_sparse_lookup and payload.get("summary_sparse_indices") and payload.get("summary_sparse_values"):
+            sparse_dot = _sparse_dot(summary_sparse_lookup, payload.get("summary_sparse_indices", []), payload.get("summary_sparse_values", []))
+        vec_map = r.vector or {}
+        dense_vec = vec_map.get(SUMMARY_VECTOR_NAME) or []
+        doc_map[did] = {
+            "doc_id": did,
+            "dense_vec": dense_vec,
+            "sparse_idx": payload.get("summary_sparse_indices", []) or [],
+            "sparse_val": payload.get("summary_sparse_values", []) or [],
+            "dense_score": dense_score,
+            "sparse_score": sparse_dot,
+            "path": payload.get("path"),
+        }
+
+    if not doc_map:
+        return [], {}
+
+    doc_items = list(doc_map.values())
+    dense_scores = [float(x["dense_score"]) for x in doc_items]
+    sparse_scores = [float(x["sparse_score"]) for x in doc_items]
+    dense_norm = _normalize(dense_scores, req.score_norm)
+    sparse_norm = _normalize(sparse_scores, req.score_norm)
+    hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
+
+    if req.mmr_stage1 and len(doc_items) > 1:
+        rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
+        dense_vecs = [x["dense_vec"] for x in doc_items]
+        sparse_vecs = [(x["sparse_idx"], x["sparse_val"]) for x in doc_items]
+        mmr_idx = mmr_diversify_hybrid(dense_vecs, sparse_vecs, hybrid_rel, min(req.top_m, len(doc_items)), req.mmr_lambda, rep_alpha)
+        cand_doc_ids = [doc_items[i]["doc_id"] for i in mmr_idx]
+    else:
+        order = sorted(range(len(doc_items)), key=lambda i: hybrid_rel[i], reverse=True)
+        order = order[: min(req.top_m, len(order))]
+        cand_doc_ids = [doc_items[i]["doc_id"] for i in order]
+
+    return cand_doc_ids, doc_map
+
+
+def _stage2_select_chunks(
+    cand_doc_ids: List[str],
+    q_vec: List[float],
+    content_sparse_query: Optional[Tuple[List[int], List[float]]],
+    req: "SearchQuery",
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[float]]:
+    flt2 = qm.Filter(must=[qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=cand_doc_ids))])
+    cont_search = qdrant.search(
+        collection_name=settings.collection_name,
+        query_vector=(CONTENT_VECTOR_NAME, q_vec),
+        query_filter=flt2,
+        limit=req.top_m,
+        with_payload=True,
+        with_vectors=[CONTENT_VECTOR_NAME],
+        search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+    )
+    mmr_pool: List[Dict[str, Any]] = []
+    for hit in cont_search:
+        payload = hit.payload or {}
+        dense_score = float(hit.score or 0.0)
+        sparse_dot = 0.0
+        if content_sparse_query is not None and payload.get("content_sparse_indices") and payload.get("content_sparse_values"):
+            q_lookup = dict(zip(content_sparse_query[0], content_sparse_query[1]))
+            sparse_dot = _sparse_dot(q_lookup, payload.get("content_sparse_indices", []), payload.get("content_sparse_values", []))
+        mmr_pool.append({
+            "hit": hit,
+            "doc_id": payload.get("doc_id", ""),
+            "dense_vec": (hit.vector or {}).get(CONTENT_VECTOR_NAME) or [],
+            "sparse_idx": payload.get("content_sparse_indices", []) or [],
+            "sparse_val": payload.get("content_sparse_values", []) or [],
+            "dense_score": dense_score,
+            "sparse_score": sparse_dot,
+        })
+
+    if not mmr_pool:
+        return [], [], []
+
+    dense_scores2 = [x["dense_score"] for x in mmr_pool]
+    sparse_scores2 = [x["sparse_score"] for x in mmr_pool]
+    dense_norm2 = _normalize(dense_scores2, req.score_norm)
+    sparse_norm2 = _normalize(sparse_scores2, req.score_norm)
+    rel2 = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm2, sparse_norm2)]
+
+    rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
+    dense_vecs2 = [x["dense_vec"] for x in mmr_pool]
+    sparse_vecs2 = [(x["sparse_idx"], x["sparse_val"]) for x in mmr_pool]
+    doc_ids2 = [x["doc_id"] for x in mmr_pool]
+
+    sel_idx = mmr_diversify_hybrid(
+        dense_vecs2,
+        sparse_vecs2,
+        rel2,
+        min(req.top_k, len(mmr_pool)),
+        req.mmr_lambda,
+        rep_alpha,
+        per_doc_ids=doc_ids2,
+        per_doc_limit=max(1, int(req.per_doc_limit)) if req.per_doc_limit and req.per_doc_limit > 0 else None,
+    )
+
+    selected = [mmr_pool[i] for i in sel_idx]
+    final_hits: List[Dict[str, Any]] = []
+    for idx, item in zip(sel_idx, selected):
+        hit = item["hit"]
+        payload = hit.payload or {}
+        final_score = float(rel2[idx])
+        final_hits.append({"hit": hit, "score": float(final_score), "payload": payload})
+    final_hits.sort(key=lambda x: x["score"], reverse=True)
+    return final_hits, mmr_pool, rel2
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # MERGING HELPERS — build merged blocks from contiguous chunks
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1015,10 +1198,14 @@ async def admin_ui_debug_middleware(request: Request, call_next):
 )
 def admin_console():
     operations = build_admin_operations()
-    html = ADMIN_UI_HTML_TEMPLATE.replace(
-        "__OPERATIONS__", json.dumps(operations, ensure_ascii=False)
-    )
-    return html
+    tpl_path = pathlib.Path(__file__).parent / "templates" / "admin.html"
+    try:
+        html = tpl_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.error("Failed to load admin template: %s", exc)
+        return HTMLResponse(content="<html><body><p>Admin UI unavailable.</p></body></html>")
+    html = html.replace("__OPERATIONS__", json.dumps(operations, ensure_ascii=False))
+    return HTMLResponse(content=html)
 
 
 @app.get(
@@ -1127,154 +1314,20 @@ def ingest_build(req: IngestBuildRequest):
     if not file_paths:
         return {"ok": True, "indexed": 0, "took_ms": int((time.time() - t0) * 1000)}
 
-    # Parsowanie i chunking
-    all_chunks: List[str] = []
-    summary_corpus: List[str] = []
-    doc_records: List[Dict[str, Any]] = []
+    # 1) Parse and chunk
+    doc_records, all_chunks, summary_corpus = _collect_documents(file_paths, req.chunk_tokens, req.chunk_overlap)
 
-    for path in file_paths:
-        logger.debug("Processing document %s", path)
-        raw = extract_text(path)
-        chunks = chunk_text(raw, target_tokens=req.chunk_tokens, overlap_tokens=req.chunk_overlap)
-        if not chunks:
-            logger.debug("Document %s produced no chunks; skipping", path)
-            continue
-        # streszczenie całości (dla indeksu streszczeń dokumentu)
-        doc_sum = llm_summary(raw[:12000])  # limit ochronny
-        doc_id = sha1(str(path.resolve()))
-        summary_signature = doc_sum.get("signature", [])
-        summary_sparse_text = " ".join(
-            [doc_sum.get("summary", ""), " ".join(summary_signature)]
-        ).strip()
-        rec = {
-            "doc_id": doc_id,
-            "path": str(path.resolve()),
-            "chunks": chunks,
-            "doc_summary": doc_sum["summary"],
-            "doc_signature": summary_signature,
-            "summary_sparse_text": summary_sparse_text,
-        }
-        doc_records.append(rec)
-        all_chunks.extend(chunks)
-        if summary_sparse_text:
-            summary_corpus.append(summary_sparse_text)
-        logger.debug(
-            "Document %s parsed | chunks=%d summary_len=%d",
-            path,
-            len(chunks),
-            len(doc_sum["summary"] or ""),
-        )
+    # 2) TF-IDF vectorizers (optional)
+    content_vec, summary_vec = _prepare_tfidf(all_chunks, summary_corpus, req.enable_sparse, req.rebuild_tfidf)
 
-    # TF‑IDF (globalny)
-    content_vec: Optional[TfidfVectorizer] = None
-    summary_vec: Optional[TfidfVectorizer] = None
-    if req.enable_sparse:
-        logger.debug("Sparse mode enabled; rebuild=%s", req.rebuild_tfidf)
-        if all_chunks:
-            if req.rebuild_tfidf or not VECTORIZER_PATH.exists():
-                content_vec = fit_vectorizer(all_chunks)
-                logger.debug("Fitted new TF-IDF vectorizer over %d chunks", len(all_chunks))
-            else:
-                content_vec = load_vectorizer()
-                if content_vec is None:
-                    content_vec = fit_vectorizer(all_chunks)
-                    logger.debug("Rebuilt TF-IDF vectorizer (cache missing) over %d chunks", len(all_chunks))
-                else:
-                    logger.debug("Loaded existing TF-IDF vectorizer")
-        else:
-            logger.debug("No chunks available for TF-IDF fitting; reusing existing vectorizer if present")
-            content_vec = load_vectorizer()
-
-        if summary_corpus:
-            if req.rebuild_tfidf or not SUMMARY_VECTORIZER_PATH.exists():
-                summary_vec = fit_vectorizer(summary_corpus, path=SUMMARY_VECTORIZER_PATH)
-                logger.debug("Fitted new summary TF-IDF vectorizer over %d summaries", len(summary_corpus))
-            else:
-                summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
-                if summary_vec is None:
-                    summary_vec = fit_vectorizer(summary_corpus, path=SUMMARY_VECTORIZER_PATH)
-                    logger.debug(
-                        "Rebuilt summary TF-IDF vectorizer (cache missing) over %d summaries",
-                        len(summary_corpus),
-                    )
-                else:
-                    logger.debug("Loaded existing summary TF-IDF vectorizer")
-        else:
-            logger.debug("No summaries available for TF-IDF fitting; reusing existing summary vectorizer if present")
-            summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
-
-    # Budowa punktów Qdrant
-    points: List[qm.PointStruct] = []
-    point_count = 0
-
-    for rec in doc_records:
-        doc_id = rec["doc_id"]
-        path = rec["path"]
-        chunks = rec["chunks"]
-        doc_summary = rec["doc_summary"]
-        doc_signature = rec["doc_signature"]
-        summary_sparse_text = rec["summary_sparse_text"]
-
-        # Embedding streszczenia dokumentu (użyjemy go też jako wektor sekcji głównej)
-        summary_dense_vec = embed_text([doc_summary])[0]
-
-        # Embedding chunków
-        content_vecs = embed_text(chunks)
-        # TF‑IDF sparse
-        if req.enable_sparse:
-            sparse_chunks = tfidf_vector(chunks, content_vec)
-            if summary_vec is not None and summary_sparse_text:
-                summary_sparse = tfidf_vector(
-                    [summary_sparse_text], summary_vec, path=SUMMARY_VECTORIZER_PATH
-                )[0]
-            else:
-                summary_sparse = ([], [])
-        else:
-            sparse_chunks = [([], []) for _ in chunks]
-            summary_sparse = ([], [])
-
-        for i, chunk in enumerate(chunks):
-            pid = int(str(int(sha1(f"{doc_id}:{i}")[0:12], 16))[:12])  # stabilny int z sha1
-            payload = {
-                "doc_id": doc_id,
-                "path": path,
-                "chunk_id": i,
-                "is_active": True,
-                "summary": doc_summary,
-                "text": chunk,
-                "signature": doc_signature,
-            }
-
-            vectors = {
-                CONTENT_VECTOR_NAME: content_vecs[i],
-                SUMMARY_VECTOR_NAME: summary_dense_vec,
-            }
-
-            if SPARSE_ENABLED and req.enable_sparse:
-                indices, values = sparse_chunks[i]
-                if indices:
-                    vectors[CONTENT_SPARSE_NAME] = qm.SparseVector(indices=indices, values=values)
-                    payload["content_sparse_indices"] = indices
-                    payload["content_sparse_values"] = values
-                if summary_sparse[0]:
-                    vectors[SUMMARY_SPARSE_NAME] = qm.SparseVector(
-                        indices=summary_sparse[0], values=summary_sparse[1]
-                    )
-                    payload["summary_sparse_indices"] = summary_sparse[0]
-                    payload["summary_sparse_values"] = summary_sparse[1]
-
-            points.append(qm.PointStruct(id=pid, vector=vectors, payload=payload))
-            point_count += 1
-
-        # Upsert w partiach, by nie trzymać wszystkiego w RAM
-        if len(points) >= 1024:
-            qdrant.upsert(collection_name=req.collection_name, points=points)
-            logger.debug("Upserted batch of %d points into %s", len(points), req.collection_name)
-            points = []
-
-    if points:
-        qdrant.upsert(collection_name=req.collection_name, points=points)
-        logger.debug("Upserted final batch of %d points into %s", len(points), req.collection_name)
+    # 3) Build and upsert points
+    point_count = _build_and_upsert_points(
+        doc_records,
+        content_vec,
+        summary_vec,
+        enable_sparse=req.enable_sparse,
+        collection_name=req.collection_name,
+    )
 
     took_ms = int((time.time() - t0) * 1000)
     logger.debug(
@@ -1409,7 +1462,7 @@ def search_query(req: SearchQuery):
     t0 = time.time()
     ensure_collection()
 
-    # 0) Klasyfikacja trybu (uproszczona)
+    # 0) Tryb
     mode = req.mode
     if mode == "auto":
         q = req.query.lower()
@@ -1420,180 +1473,32 @@ def search_query(req: SearchQuery):
         else:
             mode = "all"
 
-    # 1) Etap streszczeń — embedding zapytania
+    # 1) Query embedding
     q_vec = embed_text([req.query])[0]
 
-    # Hybryda: dense + tfidf
-    content_sparse_query: Optional[Tuple[List[int], List[float]]] = None
-    summary_sparse_query: Optional[Tuple[List[int], List[float]]] = None
-    if req.use_hybrid and SPARSE_ENABLED:
-        content_vec = load_vectorizer()
-        if content_vec is not None:
-            idx, val = tfidf_vector([req.query], content_vec)[0]
-            if idx:
-                content_sparse_query = (idx, val)
-        summary_vec_model = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
-        if summary_vec_model is not None:
-            s_idx, s_val = tfidf_vector([req.query], summary_vec_model, path=SUMMARY_VECTORIZER_PATH)[0]
-            if s_idx:
-                summary_sparse_query = (s_idx, s_val)
+    # 1a) Sparse queries
+    content_sparse_query, summary_sparse_query = _build_sparse_queries_for_query(req.query, req.use_hybrid)
 
-    # Filtry payload
+    # 1b) Filter
     flt = None
     if mode in ("current", "archival"):
-        flt = qm.Filter(
-            must=[
-                qm.FieldCondition(key="is_active", match=qm.MatchValue(value=(mode == "current")))
-            ]
-        )
+        flt = qm.Filter(must=[qm.FieldCondition(key="is_active", match=qm.MatchValue(value=(mode == "current")))])
 
-    # Search w Qdrant po summary_dense (opcjonalnie z hybrydą)
-    sum_search = qdrant.search(
-        collection_name=settings.collection_name,
-        query_vector=(SUMMARY_VECTOR_NAME, q_vec),
-        query_filter=flt,
-        limit=max(50, req.top_m),
-        with_payload=True,
-        with_vectors=[SUMMARY_VECTOR_NAME] if req.mmr_stage1 else False,
-        score_threshold=None,
-        search_params=qm.SearchParams(exact=False, hnsw_ef=128),
-    )
-    summary_sparse_lookup: Dict[int, float] = {}
-    if summary_sparse_query is not None:
-        summary_sparse_lookup = dict(zip(summary_sparse_query[0], summary_sparse_query[1]))
-
-    # Zbierz kandydatów po doc_id (unikalne) i przygotuj dane do hybrydowego MMR
-    doc_map: Dict[str, Dict[str, Any]] = {}
-    for r in sum_search:
-        payload = r.payload or {}
-        did = payload.get("doc_id")
-        if not did:
-            continue
-        if did in doc_map:
-            continue
-        dense_score = float(r.score or 0.0)
-        sparse_dot = 0.0
-        if summary_sparse_lookup and payload.get("summary_sparse_indices") and payload.get("summary_sparse_values"):
-            sparse_dot = _sparse_dot(summary_sparse_lookup, payload.get("summary_sparse_indices", []), payload.get("summary_sparse_values", []))
-        vec_map = r.vector or {}
-        dense_vec = vec_map.get(SUMMARY_VECTOR_NAME)
-        if dense_vec is None:
-            dense_vec = []
-        doc_map[did] = {
-            "doc_id": did,
-            "dense_vec": dense_vec,
-            "sparse_idx": payload.get("summary_sparse_indices", []) or [],
-            "sparse_val": payload.get("summary_sparse_values", []) or [],
-            "dense_score": dense_score,
-            "sparse_score": sparse_dot,
-            "path": payload.get("path"),
-        }
-
-    if not doc_map:
-        return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
-
-    doc_items = list(doc_map.values())
-    dense_scores = [float(x["dense_score"]) for x in doc_items]
-    sparse_scores = [float(x["sparse_score"]) for x in doc_items]
-    dense_norm = _normalize(dense_scores, req.score_norm)
-    sparse_norm = _normalize(sparse_scores, req.score_norm)
-    hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
-
-    # Opcjonalny hybrydowy MMR na Etapie 1
-    if req.mmr_stage1 and len(doc_items) > 1:
-        rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
-        dense_vecs = [x["dense_vec"] for x in doc_items]
-        sparse_vecs = [(x["sparse_idx"], x["sparse_val"]) for x in doc_items]
-        mmr_idx = mmr_diversify_hybrid(dense_vecs, sparse_vecs, hybrid_rel, min(req.top_m, len(doc_items)), req.mmr_lambda, rep_alpha)
-        cand_doc_ids = [doc_items[i]["doc_id"] for i in mmr_idx]
-    else:
-        order = sorted(range(len(doc_items)), key=lambda i: hybrid_rel[i], reverse=True)
-        order = order[: min(req.top_m, len(order))]
-        cand_doc_ids = [doc_items[i]["doc_id"] for i in order]
-
+    # 1c) Stage-1 selection
+    cand_doc_ids, doc_map = _stage1_select_documents(q_vec, flt, summary_sparse_query, req)
     if not cand_doc_ids:
         return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
 
-    # 2) Etap pełnego tekstu — ograniczamy do kandydackich doc_id
-    flt2 = qm.Filter(
-        must=[qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=cand_doc_ids))]
-    )
-
-    cont_search = qdrant.search(
-        collection_name=settings.collection_name,
-        query_vector=(CONTENT_VECTOR_NAME, q_vec),
-        query_filter=flt2,
-        limit=req.top_m,
-        with_payload=True,
-        with_vectors=[CONTENT_VECTOR_NAME],
-        search_params=qm.SearchParams(exact=False, hnsw_ef=128),
-    )
-
-    # Przygotuj kandydatów do hybrydowego MMR z limitem per-doc
-    mmr_pool = []
-    for hit in cont_search:
-        payload = hit.payload or {}
-        dense_score = float(hit.score or 0.0)
-        sparse_dot = 0.0
-        if content_sparse_query is not None and payload.get("content_sparse_indices") and payload.get("content_sparse_values"):
-            q_lookup = dict(zip(content_sparse_query[0], content_sparse_query[1]))
-            sparse_dot = _sparse_dot(q_lookup, payload.get("content_sparse_indices", []), payload.get("content_sparse_values", []))
-        mmr_pool.append({
-            "hit": hit,
-            "doc_id": payload.get("doc_id", ""),
-            "dense_vec": (hit.vector or {}).get(CONTENT_VECTOR_NAME) or [],
-            "sparse_idx": payload.get("content_sparse_indices", []) or [],
-            "sparse_val": payload.get("content_sparse_values", []) or [],
-            "dense_score": dense_score,
-            "sparse_score": sparse_dot,
-        })
-
-    if not mmr_pool:
+    # 2) Stage-2 re-rank
+    final_hits, mmr_pool, rel2 = _stage2_select_chunks(cand_doc_ids, q_vec, content_sparse_query, req)
+    if not final_hits:
         return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
-
-    # normalizacja i hybrydowy relevance
-    dense_scores2 = [x["dense_score"] for x in mmr_pool]
-    sparse_scores2 = [x["sparse_score"] for x in mmr_pool]
-    dense_norm2 = _normalize(dense_scores2, req.score_norm)
-    sparse_norm2 = _normalize(sparse_scores2, req.score_norm)
-    rel2 = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm2, sparse_norm2)]
-
-    rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
-    dense_vecs2 = [x["dense_vec"] for x in mmr_pool]
-    sparse_vecs2 = [(x["sparse_idx"], x["sparse_val"]) for x in mmr_pool]
-    doc_ids2 = [x["doc_id"] for x in mmr_pool]
-
-    sel_idx = mmr_diversify_hybrid(
-        dense_vecs2,
-        sparse_vecs2,
-        rel2,
-        min(req.top_k, len(mmr_pool)),
-        req.mmr_lambda,
-        rep_alpha,
-        per_doc_ids=doc_ids2,
-        per_doc_limit=max(1, int(req.per_doc_limit)) if req.per_doc_limit and req.per_doc_limit > 0 else None,
-    )
-
-    selected = [mmr_pool[i] for i in sel_idx]
-    # finalne przeliczenie hybrydowego score i sortowanie malejąco
-    final_hits = []
-    for idx, item in zip(sel_idx, selected):
-        hit = item["hit"]
-        payload = hit.payload or {}
-        final_score = float(rel2[idx])
-        final_hits.append({
-            "hit": hit,
-            "score": float(final_score),
-            "payload": payload,
-        })
-    final_hits.sort(key=lambda x: x["score"], reverse=True)
 
     # Optional: build merged blocks before shaping final response
     blocks_payload: Optional[List[MergedBlock]] = None
     if req.merge_chunks or req.result_format == "blocks":
         neighbor_index = None
         if req.expand_neighbors and req.expand_neighbors > 0:
-            # Build neighbor index from candidate pool (mmr_pool) with hybrid scores (rel2)
             neighbor_index = {}
             for idx2, item in enumerate(mmr_pool):
                 payload = (item.get("hit").payload if item.get("hit") else {}) or {}
