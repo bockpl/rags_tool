@@ -995,12 +995,6 @@ def search_query(req: SearchQuery):
         must=[qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=cand_doc_ids))]
     )
 
-    sparse_kwargs: Dict[str, Any] = {}
-    if sparse_query is not None:
-        idx, val = sparse_query
-        if idx:
-            sparse_kwargs["sparse_vector"] = qm.SparseVector(indices=idx, values=val)
-
     cont_search = qdrant.search(
         collection_name=settings.collection_name,
         query_vector=(CONTENT_VECTOR_NAME, q_vec),
@@ -1009,7 +1003,6 @@ def search_query(req: SearchQuery):
         with_payload=True,
         with_vectors=False,
         search_params=qm.SearchParams(exact=False, hnsw_ef=128),
-        **sparse_kwargs,
     )
 
     # Opcjonalna dywersyfikacja MMR (po samych wynikach — w przybliżeniu użyjemy score)
@@ -1017,15 +1010,26 @@ def search_query(req: SearchQuery):
     # Dla prostego MMR potrzebowalibyśmy wektorów kandydatów — uproszczenie: Top‑K bez MMR
 
     results: List[SearchHit] = []
+    sparse_dict: Dict[int, float] = {}
+    if sparse_query is not None:
+        q_idx, q_val = sparse_query
+        sparse_dict = dict(zip(q_idx, q_val))
     for r in cont_search[: req.top_k]:
         payload = r.payload or {}
+        # Ręczny boost TF‑IDF na podstawie payloadu punktów
+        sparse_boost = 0.0
+        if sparse_dict and payload.get("sparse_indices") and payload.get("sparse_values"):
+            for idx_val, val_val in zip(payload.get("sparse_indices", []), payload.get("sparse_values", [])):
+                qv = sparse_dict.get(idx_val)
+                if qv is not None:
+                    sparse_boost += qv * val_val
         results.append(
             SearchHit(
                 doc_id=payload.get("doc_id", ""),
                 path=payload.get("path", ""),
                 section=payload.get("section"),
                 chunk_id=payload.get("chunk_id", 0),
-                score=float(r.score or 0.0),
+                score=float(r.score or 0.0) + sparse_boost,
                 snippet=(payload.get("text") or "").strip()[:500] if payload.get("text") else payload.get("summary", "")[:500],
                 summary=payload.get("summary"),
             )
