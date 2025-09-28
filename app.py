@@ -52,7 +52,9 @@ import logging
 import sys
 from typing import List, Optional, Dict, Any, Tuple
 
-from fastapi import FastAPI, Body, HTTPException
+from fastapi import FastAPI, Body, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 
 # Qdrant
@@ -104,6 +106,193 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.DEBUG if settings.debug else logging.INFO)
 logger.propagate = False
+
+ADMIN_UI_REQUEST_HEADER = "x-admin-ui"
+_admin_debug_activated = False
+
+ADMIN_UI_HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"utf-8\" />
+    <title>SummRAG Admin Console</title>
+    <style>
+        :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+        body { margin: 0; padding: 24px; background: #f5f5f5; }
+        .container { max-width: 900px; margin: 0 auto; background: #ffffff; padding: 24px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
+        h1 { margin-top: 0; }
+        label { font-weight: 600; display: block; margin-bottom: 8px; }
+        select, textarea, button { width: 100%; font-size: 15px; }
+        select { padding: 10px; border-radius: 8px; border: 1px solid #ccc; margin-bottom: 16px; }
+        textarea { min-height: 200px; padding: 12px; border-radius: 8px; border: 1px solid #ccc; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, \"Liberation Mono\", Menlo, monospace; }
+        button { padding: 12px; border: none; border-radius: 8px; background: #0060df; color: #fff; font-weight: 600; cursor: pointer; margin-top: 16px; }
+        button:disabled { background: #9ca3af; cursor: not-allowed; }
+        .meta { display: flex; gap: 12px; margin-bottom: 16px; font-size: 14px; color: #4b5563; flex-wrap: wrap; }
+        .meta span { background: #f3f4f6; padding: 6px 10px; border-radius: 999px; }
+        pre { background: #0f172a; color: #f8fafc; padding: 16px; border-radius: 10px; overflow: auto; margin-top: 24px; white-space: pre-wrap; word-wrap: break-word; }
+        .note { font-size: 14px; color: #6b7280; margin-bottom: 16px; }
+        .doc { background: #fef3c7; color: #78350f; border-radius: 10px; padding: 12px 16px; margin-bottom: 18px; font-size: 14px; line-height: 1.5; white-space: pre-line; }
+    </style>
+</head>
+<body>
+    <div class=\"container\">
+        <h1>SummRAG Admin Console</h1>
+        <p class=\"note\">Operacje wysyłają nagłówek <code>X-Admin-UI: 1</code>, aby wymusić tryb debug na serwerze.</p>
+        <label for=\"operation\">Wybierz operację</label>
+        <select id=\"operation\"></select>
+        <div class=\"meta\">
+            <span id=\"method\"></span>
+            <span id=\"path\"></span>
+        </div>
+        <div class=\"doc\" id=\"doc\"></div>
+        <div id=\"body-wrapper\">
+            <label for=\"payload\">Treść żądania (JSON)</label>
+            <textarea id=\"payload\" spellcheck=\"false\"></textarea>
+        </div>
+        <button id=\"send\">Wyślij żądanie</button>
+        <pre id=\"result\">Odpowiedź pojawi się tutaj.</pre>
+    </div>
+    <script>
+        const operations = __OPERATIONS__;
+
+        const selectEl = document.getElementById("operation");
+        const methodEl = document.getElementById("method");
+        const pathEl = document.getElementById("path");
+        const bodyWrapper = document.getElementById("body-wrapper");
+        const docEl = document.getElementById("doc");
+        const payloadEl = document.getElementById("payload");
+        const resultEl = document.getElementById("result");
+        const sendBtn = document.getElementById("send");
+
+        function populateOptions() {
+            operations.forEach((op, idx) => {
+                const option = document.createElement("option");
+                option.value = op.id;
+                option.textContent = op.label;
+                if (idx === 0) option.selected = true;
+                selectEl.appendChild(option);
+            });
+        }
+
+        function renderOperation(id) {
+            const op = operations.find(item => item.id === id);
+            if (!op) return;
+            methodEl.textContent = op.method;
+            pathEl.textContent = op.path;
+            docEl.textContent = op.doc || "Brak dokumentacji dla tej operacji.";
+            const hasBody = op.method !== "GET";
+            if (hasBody) {
+                bodyWrapper.style.display = "block";
+                payloadEl.value = op.body && op.body.length ? op.body : "{}";
+            } else {
+                bodyWrapper.style.display = "none";
+                payloadEl.value = "";
+            }
+            resultEl.textContent = "Odpowiedź pojawi się tutaj.";
+            sendBtn.disabled = false;
+            sendBtn.dataset.op = op.id;
+        }
+
+        async function runRequest() {
+            const opId = sendBtn.dataset.op;
+            const op = operations.find(item => item.id === opId);
+            if (!op) return;
+            sendBtn.disabled = true;
+            resultEl.textContent = "Wysyłanie...";
+
+            let bodyPayload = undefined;
+            if (op.method !== "GET") {
+                const raw = payloadEl.value.trim();
+                if (raw.length) {
+                    try {
+                        bodyPayload = JSON.stringify(JSON.parse(raw));
+                    } catch (err) {
+                        resultEl.textContent = `Błąd parsowania JSON: ${err}`;
+                        sendBtn.disabled = false;
+                        return;
+                    }
+                } else {
+                    bodyPayload = "{}";
+                }
+            }
+
+            try {
+                const response = await fetch(op.path, {
+                    method: op.method,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-Admin-UI": "1"
+                    },
+                    body: op.method === "GET" ? undefined : bodyPayload
+                });
+
+                const ct = response.headers.get("content-type") || "";
+                if (ct.includes("application/json")) {
+                    const data = await response.json();
+                    resultEl.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    const text = await response.text();
+                    resultEl.textContent = text;
+                }
+                if (!response.ok) {
+                    resultEl.textContent = `HTTP ${response.status}\n\n${resultEl.textContent}`;
+                }
+            } catch (err) {
+                resultEl.textContent = `Błąd wywołania: ${err}`;
+            }
+
+            sendBtn.disabled = false;
+        }
+
+        populateOptions();
+        renderOperation(selectEl.value);
+        selectEl.addEventListener("change", event => renderOperation(event.target.value));
+        sendBtn.addEventListener("click", runRequest);
+    </script>
+</body>
+</html>
+"""
+
+ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
+    {"id": "about", "path": "/about", "method": "GET"},
+    {"id": "health", "path": "/health", "method": "GET"},
+    {
+        "id": "collections-init",
+        "path": "/collections/init",
+        "method": "POST",
+        "body": "{\n  \"collection_name\": \"summrag\",\n  \"force_dim_probe\": false\n}",
+    },
+    {
+        "id": "ingest-scan",
+        "path": "/ingest/scan",
+        "method": "POST",
+        "body": "{\n  \"base_dir\": \"./data\",\n  \"glob\": \"**/*\",\n  \"recursive\": true\n}",
+    },
+    {
+        "id": "summaries-generate",
+        "path": "/summaries/generate",
+        "method": "POST",
+        "body": "{\n  \"files\": [\n    \"./docs/example.md\"\n  ]\n}",
+    },
+    {
+        "id": "ingest-build",
+        "path": "/ingest/build",
+        "method": "POST",
+        "body": "{\n  \"base_dir\": \"./data\",\n  \"glob\": \"**/*\",\n  \"recursive\": true,\n  \"reindex\": false,\n  \"chunk_tokens\": 900,\n  \"chunk_overlap\": 150,\n  \"collection_name\": \"summrag\",\n  \"enable_sparse\": true,\n  \"rebuild_tfidf\": true\n}",
+    },
+    {
+        "id": "documents-upsert",
+        "path": "/documents/upsert",
+        "method": "POST",
+        "body": "{\n  \"doc_id\": \"manual-doc-1\",\n  \"path\": \"./docs/manual.txt\",\n  \"chunks\": [\n    \"Pierwszy fragment\",\n    \"Drugi fragment\"\n  ],\n  \"summaries\": [\n    \"Streszczenie pierwszego fragmentu\",\n    \"Streszczenie drugiego fragmentu\"\n  ]\n}",
+    },
+    {
+        "id": "search-query",
+        "path": "/search/query",
+        "method": "POST",
+        "body": "{\n  \"query\": \"Jak działa SummRAG?\",\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\"\n}",
+    },
+]
 
 # MMR
 DEFAULT_MMR_LAMBDA = 0.3
@@ -440,12 +629,79 @@ class SearchResponse(BaseModel):
 app = FastAPI(title=f"{settings.app_name} OpenAPI Tool", version=settings.app_version)
 
 
-@app.get("/about", response_model=About)
+def build_admin_operations() -> List[Dict[str, Any]]:
+    route_lookup: Dict[Tuple[str, str], APIRoute] = {}
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            for method in route.methods or []:
+                route_lookup[(route.path, method.upper())] = route
+
+    operations: List[Dict[str, Any]] = []
+    for spec in ADMIN_OPERATION_SPECS:
+        method = spec["method"].upper()
+        path = spec["path"]
+        route = route_lookup.get((path, method))
+        summary = route.summary if route else None
+        description = route.description if route else None
+        doc_parts = [part for part in [summary, description] if part]
+        operations.append(
+            {
+                "id": spec["id"],
+                "label": spec.get("label") or f"{method} {path}",
+                "method": method,
+                "path": path,
+                "doc": "\n\n".join(doc_parts),
+                "body": spec.get("body"),
+            }
+        )
+    return operations
+
+
+@app.middleware("http")
+async def admin_ui_debug_middleware(request: Request, call_next):
+    global _admin_debug_activated
+    header_value = request.headers.get(ADMIN_UI_REQUEST_HEADER)
+    if header_value and header_value.lower() in {"1", "true", "yes"} and not _admin_debug_activated:
+        _admin_debug_activated = True
+        settings.debug = True
+        logger.setLevel(logging.DEBUG)
+        logger.info("Admin UI request detected — DEBUG logging enabled")
+    response = await call_next(request)
+    return response
+
+
+@app.get(
+    "/admin",
+    include_in_schema=False,
+    response_class=HTMLResponse,
+    summary="Panel administracyjny",
+    description="Statyczny panel HTML do testowania i debugowania endpointów SummRAG.",
+)
+def admin_console():
+    operations = build_admin_operations()
+    html = ADMIN_UI_HTML_TEMPLATE.replace(
+        "__OPERATIONS__", json.dumps(operations, ensure_ascii=False)
+    )
+    return html
+
+
+@app.get(
+    "/about",
+    response_model=About,
+    include_in_schema=False,
+    summary="Informacje o aplikacji",
+    description="Zwraca metadane serwisu SummRAG (nazwa, wersja, autor, opis).",
+)
 def about():
     return About()
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    include_in_schema=False,
+    summary="Stan usługi",
+    description="Sprawdza połączenie z Qdrant i raportuje kondycję aplikacji.",
+)
 def health():
     try:
         qdrant.get_collections()
@@ -454,14 +710,28 @@ def health():
         return {"status": "degraded", "qdrant": False, "error": str(e)}
 
 
-@app.post("/collections/init")
+@app.post(
+    "/collections/init",
+    include_in_schema=False,
+    summary="Inicjalizacja kolekcji",
+    description=(
+        "Tworzy kolekcję we wskazanej nazwie (jeśli nie istnieje) i opcjonalnie sondą"
+        " sprawdza wymiar embeddingów przy użyciu force_dim_probe."
+    ),
+)
 def collections_init(req: InitCollectionsRequest):
     dim = get_embedding_dim() if req.force_dim_probe else None
     ensure_collection(req.collection_name, dim)
     return {"ok": True, "collection": req.collection_name}
 
 
-@app.post("/ingest/scan", response_model=ScanResponse)
+@app.post(
+    "/ingest/scan",
+    response_model=ScanResponse,
+    include_in_schema=False,
+    summary="Skanowanie korpusu",
+    description="Zwraca listę plików w katalogu bazowym, które kwalifikują się do ingestu.",
+)
 def ingest_scan(req: ScanRequest):
     base = pathlib.Path(req.base_dir)
     if not base.exists():
@@ -471,7 +741,12 @@ def ingest_scan(req: ScanRequest):
     return ScanResponse(files=files)
 
 
-@app.post("/summaries/generate")
+@app.post(
+    "/summaries/generate",
+    include_in_schema=False,
+    summary="Streszczenia wybranych plików",
+    description="Generuje streszczenia oraz podpisy dla listy plików bez zapisu do Qdrant.",
+)
 def summaries_generate(req: SummariesGenerateRequest):
     results = {}
     for f in req.files:
@@ -485,7 +760,15 @@ def summaries_generate(req: SummariesGenerateRequest):
     return {"results": results}
 
 
-@app.post("/ingest/build")
+@app.post(
+    "/ingest/build",
+    include_in_schema=False,
+    summary="Pełny ingest korpusu",
+    description=(
+        "Buduje indeks SummRAG: parsuje dokumenty, tworzy streszczenia,"
+        " embeddingi oraz zapisuje punkty (wraz z TF-IDF) do Qdrant."
+    ),
+)
 def ingest_build(req: IngestBuildRequest):
     t0 = time.time()
     logger.debug(
@@ -654,7 +937,15 @@ def mmr_diversify(vectors: np.ndarray, scores: np.ndarray, k: int, lam: float = 
     return selected
 
 
-@app.post("/search/query", response_model=SearchResponse)
+@app.post(
+    "/search/query",
+    response_model=SearchResponse,
+    summary="Zapytanie SummRAG",
+    description=(
+        "Dwustopniowe wyszukiwanie: najpierw streszczenia, następnie pełne teksty"
+        " dokumentów, z opcjonalną hybrydą TF-IDF i prostym MMR."
+    ),
+)
 def search_query(req: SearchQuery):
     t0 = time.time()
     ensure_collection()
@@ -763,7 +1054,12 @@ def search_query(req: SearchQuery):
 # ──────────────────────────────────────────────────────────────────────────────
 # DODATKOWE: /documents/upsert — jeśli chcesz sam podawać gotowe chunk/summary
 # ──────────────────────────────────────────────────────────────────────────────
-@app.post("/documents/upsert")
+@app.post(
+    "/documents/upsert",
+    include_in_schema=False,
+    summary="Ręczny upsert dokumentu",
+    description="Aktualizuje lub dodaje dokument w Qdrant z dostarczonymi chunkami i streszczeniami.",
+)
 def documents_upsert(req: UpsertDocumentRequest):
     ensure_collection()
     # Embedding streszczeń i chunków
