@@ -1,6 +1,10 @@
-# rags_tool (0.6.0)
+# rags_tool (0.6.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.6.1
+
+- Dokładne chunkowanie po tokenach: `chunk_text` wykorzystuje teraz `tiktoken` do liczenia tokenów, dzięki czemu fragmenty lepiej mieszczą się w budżecie modeli i są bardziej spójne (mniej zbyt małych/zbyt dużych chunków). Jeśli `tiktoken` nie jest dostępny, stosowany jest bezpieczny fallback heurystyczny (~4 znaki/token). Zmiana wpływa tylko na sposób wyznaczania granic chunków — API pozostaje bez zmian.
 
 ## Nowości w 0.6.0
 

@@ -1,6 +1,6 @@
 """
 RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
-Version: 0.6.0
+Version: 0.6.1
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
 
@@ -69,6 +69,10 @@ import re
 import html
 import html2text
 import markdown2
+try:
+    import tiktoken  # token-aware chunking
+except Exception:  # optional dependency at runtime (fallback available)
+    tiktoken = None  # type: ignore
 
 # PDF (opcjonalne)
 try:
@@ -367,44 +371,120 @@ def split_into_paragraphs(text: str) -> List[str]:
     return [c.strip() for c in chunks if c.strip()]
 
 
-def chunk_text(text: str, target_tokens: int = 900, overlap_tokens: int = 150) -> List[str]:
-    # Prosty chunking po akapitach z pakietowaniem do ~tokenów (heurystyka po znakach)
-    # Przy braku tokenizerów używamy znaki ~ 4 char/token → target_chars
+# Initialize tokenizer once (token-aware chunking); fallback to heuristic if unavailable
+try:
+    _TOKENIZER = tiktoken.get_encoding("cl100k_base") if tiktoken is not None else None
+except Exception:
+    _TOKENIZER = None
+
+
+def count_tokens(text: str) -> int:
+    """Count tokens using tiktoken if available, otherwise heuristic fallback.
+
+    This keeps chunk sizes consistent with LLM limits and reduces too-small/too-large
+    fragments that harm retrieval quality.
+    """
+    if _TOKENIZER is not None:
+        try:
+            return len(_TOKENIZER.encode(text))
+        except Exception:
+            pass
+    # Fallback: ~4 chars per token
+    return max(1, len(text) // 4)
+
+
+def _split_text_by_tokens(text: str, target_tokens: int, overlap_tokens: int) -> List[str]:
+    """Split a long text into token windows with overlap using tiktoken when possible.
+
+    - Uses stride of (target_tokens - overlap_tokens)
+    - Decodes back to text for each window
+    - Falls back to character-based slicing when tokenizer is not available
+    """
+    chunks: List[str] = []
+    if _TOKENIZER is not None:
+        try:
+            toks = _TOKENIZER.encode(text)
+            if not toks:
+                return []
+            step = max(1, target_tokens - max(0, overlap_tokens))
+            start = 0
+            n = len(toks)
+            while start < n:
+                end = min(n, start + target_tokens)
+                piece = _TOKENIZER.decode(toks[start:end])
+                if piece.strip():
+                    chunks.append(piece)
+                if end >= n:
+                    break
+                start = end - max(0, overlap_tokens)
+            return chunks
+        except Exception:
+            # fall through to char-based
+            pass
+    # Char-based fallback (heuristic ~4 chars/token)
     token_to_char = 4
     target_chars = target_tokens * token_to_char
-    overlap_chars = overlap_tokens * token_to_char
+    overlap_chars = max(0, overlap_tokens) * token_to_char
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(n, start + target_chars)
+        piece = text[start:end]
+        if piece.strip():
+            chunks.append(piece)
+        if end >= n:
+            break
+        start = end - overlap_chars
+    return chunks
 
+
+def chunk_text(text: str, target_tokens: int = 900, overlap_tokens: int = 150) -> List[str]:
+    """Token-aware paragraph packing with overlap.
+
+    - Accumulates paragraphs until token budget would be exceeded.
+    - On overflow, emits current buffer and carries a token-based tail as overlap.
+    - Paragraphs longer than `target_tokens` are split by tokens with overlap.
+    - Falls back to character heuristic if tokenizer is unavailable.
+    """
     paras = split_into_paragraphs(text)
-    chunks = []
+    chunks: List[str] = []
     buf = ""
+
     for p in paras:
-        if len(buf) + len(p) + 2 <= target_chars:
-            buf = (buf + "\n\n" + p) if buf else p
-        else:
-            if buf:
-                chunks.append(buf)
-                # overlap na końcu poprzedniego chunku
-                buf_tail = buf[-overlap_chars:]
-                buf = buf_tail + "\n\n" + p
-            else:
-                # bardzo długi pojedynczy akapit
-                start = 0
-                while start < len(p):
-                    end = start + target_chars
-                    chunk = p[start:end]
-                    if chunk:
-                        chunks.append(chunk)
-                    start = end - overlap_chars
-                    if start < 0:
-                        start = 0
-                buf = ""
-    if buf:
-        while len(buf) > target_chars:
-            chunk = buf[:target_chars]
-            chunks.append(chunk)
-            buf = buf[target_chars - overlap_chars:]
+        candidate = (buf + "\n\n" + p) if buf else p
+        if count_tokens(candidate) <= target_tokens:
+            buf = candidate
+            continue
+
+        # Flush current buffer (if any), then start new one with token-overlap tail
         if buf:
             chunks.append(buf)
+            buf_tail = ""
+            if overlap_tokens > 0:
+                if _TOKENIZER is not None:
+                    try:
+                        toks = _TOKENIZER.encode(buf)
+                        tail = toks[-overlap_tokens:] if len(toks) > overlap_tokens else toks
+                        buf_tail = _TOKENIZER.decode(tail)
+                    except Exception:
+                        # heuristic fallback
+                        buf_tail = buf[-max(1, overlap_tokens * 4):]
+                else:
+                    buf_tail = buf[-max(1, overlap_tokens * 4):]
+            buf = (buf_tail + "\n\n" + p) if buf_tail else p
+        else:
+            # Single paragraph too long: split by tokens with overlap
+            long_parts = _split_text_by_tokens(p, target_tokens, overlap_tokens)
+            chunks.extend(long_parts)
+            buf = ""
+
+    # Finalize remaining buffer
+    if buf:
+        if count_tokens(buf) <= target_tokens:
+            chunks.append(buf)
+        else:
+            chunks.extend(_split_text_by_tokens(buf, target_tokens, overlap_tokens))
+
     return chunks
 
 
