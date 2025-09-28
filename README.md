@@ -1,6 +1,10 @@
-# rags_tool (0.7.1)
+# rags_tool (0.7.2)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.7.2
+
+- Streszczenia w JSON: funkcja streszczeń preferuje teraz tryb JSON (`response_format={"type":"json_object"}`) i oczekuje kluczy `summary`, `signature`, `entities`. Jeśli serwer nie wspiera JSON‑mode, automatycznie używany jest dotychczasowy parser tekstowy. Przełącznik: `SUMMARY_JSON_MODE` (domyślnie `true`).
 
 ## Nowości w 0.7.1
 
