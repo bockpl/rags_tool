@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "0.6.3"
+    app_version: str = "0.7.1"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -25,6 +25,8 @@ class SummRAGSettings(BaseSettings):
     collection_name: str = Field(default="rags_tool", alias="COLLECTION_NAME")
     debug: bool = Field(default=False, alias="DEBUG")
     vector_store_dir: Path = Field(default=Path(".rags_tool_store"), alias="VECTOR_STORE_DIR")
+    # Embedding vector dimension for the chosen embedding model
+    embedding_dim: int = Field(default=1024, alias="EMBEDDING_DIM")
 
     model_config = SettingsConfigDict(
         env_file=".env",

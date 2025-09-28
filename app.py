@@ -1,6 +1,6 @@
 """
 RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
-Version: 0.6.3
+Version: 0.7.1
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
 
@@ -116,6 +116,11 @@ ADMIN_UI_REQUEST_HEADER = "x-admin-ui"
 _admin_debug_activated = False
 
 ## Admin UI template moved to templates/admin.html
+
+def _scan_files(base: pathlib.Path, pattern: str, recursive: bool) -> List[pathlib.Path]:
+    """Scan for files by pattern with optional recursion and supported extensions filter."""
+    iterator = base.rglob(pattern) if recursive else base.glob(pattern)
+    return [p for p in iterator if p.is_file() and p.suffix.lower() in SUPPORTED_EXT]
 
 def _collect_documents(file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
     """Parse files, split into chunks, summarize and prepare corpora."""
@@ -835,6 +840,137 @@ def _stage2_select_chunks(
     return final_hits, mmr_pool, rel2
 
 
+def _classify_mode(query: str, mode: str) -> str:
+    """Classify retrieval mode based on query when mode=auto."""
+    if mode != "auto":
+        return mode
+    q = query.lower()
+    if re.search(r"archiw|stara|z \d{4}|wersja\s+z", q):
+        return "archival"
+    if re.search(r"obowiązując|aktualn|teraz|bieżąc", q):
+        return "current"
+    return "all"
+
+
+def _build_neighbor_index(
+    mmr_pool: List[Dict[str, Any]], rel2: List[float]
+) -> Dict[Tuple[str, Optional[str], int], Dict[str, Any]]:
+    """Build lookup for contiguous neighbor expansion when merging chunks."""
+    neighbor_index: Dict[Tuple[str, Optional[str], int], Dict[str, Any]] = {}
+    for idx2, item in enumerate(mmr_pool):
+        payload = (item.get("hit").payload if item.get("hit") else {}) or {}
+        did = payload.get("doc_id") or ""
+        sec = payload.get("section")
+        cid = payload.get("chunk_id")
+        if not did or cid is None:
+            continue
+        score2 = float(rel2[idx2]) if idx2 < len(rel2) else float(item.get("dense_score", 0.0))
+        neighbor_index[(did, sec, int(cid))] = {"payload": payload, "score": score2}
+    return neighbor_index
+
+
+def _shape_results(
+    final_hits: List[Dict[str, Any]],
+    doc_map: Dict[str, Any],
+    mmr_pool: List[Dict[str, Any]],
+    rel2: List[float],
+    req: "SearchQuery",
+) -> Tuple[List["SearchHit"], Optional[List[Dict[str, Any]]], Optional[List["MergedBlock"]]]:
+    blocks_payload: Optional[List[MergedBlock]] = None
+    if req.merge_chunks or req.result_format == "blocks":
+        neighbor_index = None
+        if req.expand_neighbors and req.expand_neighbors > 0:
+            neighbor_index = _build_neighbor_index(mmr_pool, rel2)
+        raw_blocks = build_merged_blocks(
+            final_hits,
+            merge_group_budget_tokens=req.merge_group_budget_tokens,
+            max_merged_per_group=req.max_merged_per_group,
+            join_delim=req.block_join_delimiter,
+            summary_mode=req.summary_mode,
+            expand_neighbors=max(0, int(req.expand_neighbors or 0)),
+            neighbor_index=neighbor_index,
+        )
+        blocks_payload = [
+            MergedBlock(
+                doc_id=b["doc_id"],
+                path=b.get("path", ""),
+                section=b.get("section"),
+                first_chunk_id=int(b.get("first_chunk_id", 0)),
+                last_chunk_id=int(b.get("last_chunk_id", 0)),
+                score=float(b.get("score", 0.0)),
+                summary=b.get("summary"),
+                text=b.get("text", ""),
+                token_estimate=int(b.get("token_estimate")) if b.get("token_estimate") is not None else None,
+            )
+            for b in raw_blocks
+        ]
+
+    if req.result_format == "blocks":
+        return [], None, blocks_payload
+
+    results: List[SearchHit] = []
+    groups_payload: Optional[List[Dict[str, Any]]] = None
+
+    if req.result_format == "grouped":
+        groups: Dict[str, Dict[str, Any]] = {}
+        for fh in final_hits:
+            payload = fh.get("payload") or {}
+            did = payload.get("doc_id", "")
+            if not did:
+                continue
+            grp = groups.get(did)
+            if grp is None:
+                grp = {
+                    "doc_id": did,
+                    "path": payload.get("path", ""),
+                    "summary": None if req.summary_mode == "none" else payload.get("summary"),
+                    "score": float(fh.get("score", 0.0)),
+                    "chunks": [],
+                }
+                groups[did] = grp
+            else:
+                if float(fh.get("score", 0.0)) > float(grp.get("score", 0.0)):
+                    grp["score"] = float(fh.get("score", 0.0))
+            snippet = (payload.get("text") or "").strip()[:500]
+            grp["chunks"].append({
+                "chunk_id": payload.get("chunk_id", 0),
+                "score": float(fh.get("score", 0.0)),
+                "snippet": snippet,
+            })
+        groups_list = list(groups.values())
+        for g in groups_list:
+            g["chunks"].sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        groups_list.sort(key=lambda g: float(g.get("score", 0.0)), reverse=True)
+        groups_payload = groups_list
+        results = []
+    else:
+        seen_docs: set = set()
+        for fh in final_hits:
+            payload = fh.get("payload") or {}
+            did = payload.get("doc_id", "")
+            if req.summary_mode == "none":
+                summary_val: Optional[str] = None
+            elif req.summary_mode == "first":
+                summary_val = None if did in seen_docs else payload.get("summary")
+                if did not in seen_docs:
+                    seen_docs.add(did)
+            else:
+                summary_val = payload.get("summary")
+            results.append(
+                SearchHit(
+                    doc_id=did,
+                    path=payload.get("path", ""),
+                    section=payload.get("section"),
+                    chunk_id=payload.get("chunk_id", 0),
+                    score=float(fh.get("score", 0.0)),
+                    snippet=(payload.get("text") or "").strip()[:500] if payload.get("text") else (payload.get("summary", "")[:500]),
+                    summary=summary_val,
+                )
+            )
+
+    return results, groups_payload, blocks_payload
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MERGING HELPERS — build merged blocks from contiguous chunks
@@ -989,7 +1125,8 @@ def build_merged_blocks(
 def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = None):
     collection = collection or settings.collection_name
     if dim is None:
-        dim = get_embedding_dim()
+        # Use configured embedding dimension to avoid unnecessary API calls
+        dim = settings.embedding_dim
     vectors_config = {
         CONTENT_VECTOR_NAME: qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
         SUMMARY_VECTOR_NAME: qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
@@ -1259,8 +1396,7 @@ def ingest_scan(req: ScanRequest):
     base = pathlib.Path(req.base_dir)
     if not base.exists():
         raise HTTPException(status_code=400, detail="base_dir nie istnieje")
-    pattern = req.glob
-    files = [str(p) for p in base.glob(pattern) if p.is_file() and p.suffix.lower() in SUPPORTED_EXT]
+    files = [str(p) for p in _scan_files(base, req.glob, req.recursive)]
     return ScanResponse(files=files)
 
 
@@ -1307,9 +1443,7 @@ def ingest_build(req: IngestBuildRequest):
     if not base.exists():
         raise HTTPException(status_code=400, detail="base_dir nie istnieje")
 
-    file_paths = [
-        p for p in base.glob(req.glob) if p.is_file() and p.suffix.lower() in SUPPORTED_EXT
-    ]
+    file_paths = _scan_files(base, req.glob, req.recursive)
     logger.debug("Found %d files for ingest", len(file_paths))
     if not file_paths:
         return {"ok": True, "indexed": 0, "took_ms": int((time.time() - t0) * 1000)}
@@ -1463,15 +1597,7 @@ def search_query(req: SearchQuery):
     ensure_collection()
 
     # 0) Tryb
-    mode = req.mode
-    if mode == "auto":
-        q = req.query.lower()
-        if re.search(r"archiw|stara|z \d{4}|wersja\s+z", q):
-            mode = "archival"
-        elif re.search(r"obowiązując|aktualn|teraz|bieżąc", q):
-            mode = "current"
-        else:
-            mode = "all"
+    mode = _classify_mode(req.query, req.mode)
 
     # 1) Query embedding
     q_vec = embed_text([req.query])[0]
@@ -1494,46 +1620,9 @@ def search_query(req: SearchQuery):
     if not final_hits:
         return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
 
-    # Optional: build merged blocks before shaping final response
-    blocks_payload: Optional[List[MergedBlock]] = None
-    if req.merge_chunks or req.result_format == "blocks":
-        neighbor_index = None
-        if req.expand_neighbors and req.expand_neighbors > 0:
-            neighbor_index = {}
-            for idx2, item in enumerate(mmr_pool):
-                payload = (item.get("hit").payload if item.get("hit") else {}) or {}
-                did = payload.get("doc_id") or ""
-                sec = payload.get("section")
-                cid = payload.get("chunk_id")
-                if not did or cid is None:
-                    continue
-                score2 = float(rel2[idx2]) if idx2 < len(rel2) else float(item.get("dense_score", 0.0))
-                neighbor_index[(did, sec, int(cid))] = {"payload": payload, "score": score2}
-        raw_blocks = build_merged_blocks(
-            final_hits,
-            merge_group_budget_tokens=req.merge_group_budget_tokens,
-            max_merged_per_group=req.max_merged_per_group,
-            join_delim=req.block_join_delimiter,
-            summary_mode=req.summary_mode,
-            expand_neighbors=max(0, int(req.expand_neighbors or 0)),
-            neighbor_index=neighbor_index,
-        )
-        blocks_payload = [
-            MergedBlock(
-                doc_id=b["doc_id"],
-                path=b.get("path", ""),
-                section=b.get("section"),
-                first_chunk_id=int(b.get("first_chunk_id", 0)),
-                last_chunk_id=int(b.get("last_chunk_id", 0)),
-                score=float(b.get("score", 0.0)),
-                summary=b.get("summary"),
-                text=b.get("text", ""),
-                token_estimate=int(b.get("token_estimate")) if b.get("token_estimate") is not None else None,
-            )
-            for b in raw_blocks
-        ]
+    # Shape response
+    results, groups_payload, blocks_payload = _shape_results(final_hits, doc_map, mmr_pool, rel2, req)
 
-    # If only blocks requested, return early
     if req.result_format == "blocks":
         took_ms = int((time.time() - t0) * 1000)
         if settings.debug:
@@ -1545,78 +1634,6 @@ def search_query(req: SearchQuery):
                 len(blocks_payload or []),
             )
         return SearchResponse(took_ms=took_ms, hits=[], groups=None, blocks=blocks_payload)
-
-    # Build response according to requested format
-    results: List[SearchHit] = []
-    groups_payload: Optional[List[Dict[str, Any]]] = None
-
-    if req.result_format == "grouped":
-        # Group results per document, keep only one summary at doc level
-        groups: Dict[str, Dict[str, Any]] = {}
-        for fh in final_hits:
-            payload = fh["payload"] or {}
-            did = payload.get("doc_id", "")
-            if not did:
-                # Skip items without doc_id
-                continue
-            grp = groups.get(did)
-            if grp is None:
-                grp = {
-                    "doc_id": did,
-                    "path": payload.get("path", ""),
-                    "summary": None if req.summary_mode == "none" else payload.get("summary"),
-                    "score": float(fh["score"]),  # will be max over chunks
-                    "chunks": [],
-                }
-                groups[did] = grp
-            else:
-                # update group score with max
-                if float(fh["score"]) > float(grp.get("score", 0.0)):
-                    grp["score"] = float(fh["score"])
-            # Append chunk (never include summary at chunk level)
-            snippet = (payload.get("text") or "").strip()[:500]
-            grp["chunks"].append({
-                "chunk_id": payload.get("chunk_id", 0),
-                "score": float(fh["score"]),
-                "snippet": snippet,
-            })
-        # Sort groups by score desc, and chunks inside each group by score desc
-        groups_list = list(groups.values())
-        for g in groups_list:
-            g["chunks"].sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-        groups_list.sort(key=lambda g: float(g.get("score", 0.0)), reverse=True)
-        groups_payload = groups_list
-        results = []  # keep flat list empty in grouped mode
-    else:
-        # Flat format: control duplication of summary per document
-        seen_docs: set = set()
-        for fh in final_hits:
-            payload = fh["payload"]
-            did = payload.get("doc_id", "")
-            # Decide summary according to summary_mode
-            summary_val: Optional[str]
-            if req.summary_mode == "none":
-                summary_val = None
-            elif req.summary_mode == "first":
-                if did in seen_docs:
-                    summary_val = None
-                else:
-                    summary_val = payload.get("summary")
-                    seen_docs.add(did)
-            else:  # "all"
-                summary_val = payload.get("summary")
-
-            results.append(
-                SearchHit(
-                    doc_id=did,
-                    path=payload.get("path", ""),
-                    section=payload.get("section"),
-                    chunk_id=payload.get("chunk_id", 0),
-                    score=float(fh["score"]),
-                    snippet=(payload.get("text") or "").strip()[:500] if payload.get("text") else (payload.get("summary", "")[:500]),
-                    summary=summary_val,
-                )
-            )
 
     took_ms = int((time.time() - t0) * 1000)
     if settings.debug:

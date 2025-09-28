@@ -1,9 +1,14 @@
-# rags_tool (0.6.3)
+# rags_tool (0.7.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
 
-## Nowości w 0.6.3
+## Nowości w 0.7.1
 
+- Refaktor: dalszy podział długich funkcji — osobne helpery dla klasyfikacji trybu, kształtowania odpowiedzi i skanowania plików; `ingest_scan` oraz `ingest_build` respektują teraz flagę `recursive` przy wyszukiwaniu plików.
+
+## Nowości w 0.7.0
+
+- Wymiar embeddingu z konfiguracji: kolekcja Qdrant jest tworzona na podstawie `EMBEDDING_DIM` (zamiast wykonywać zapytanie do API, by odczytać wymiar). Zmniejsza to koszty i przyspiesza start. Dla zgodności nadal można wymusić sondowanie ustawiając `force_dim_probe=true` w `POST /collections/init`.
 - Poprawka startu: uniknięto błędu `NameError: SearchQuery` poprzez użycie forward refs w typach helperów.
 
 ## Nowości w 0.6.2
@@ -71,6 +76,7 @@ export QDRANT_API_KEY=""
 export EMBEDDING_API_URL="http://127.0.0.1:8000/v1"
 export EMBEDDING_API_KEY="sk-embed-xxx"
 export EMBEDDING_MODEL="BAAI/bge-m3"
+export EMBEDDING_DIM="1024"          # stały wymiar wektora dla używanego modelu
 export SUMMARY_API_URL="http://127.0.0.1:8001/v1"
 export SUMMARY_API_KEY="sk-summary-xxx"
 export SUMMARY_MODEL="gpt-4o-mini"
