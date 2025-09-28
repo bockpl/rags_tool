@@ -1,6 +1,6 @@
 """
 RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
-Version: 0.1.2
+Version: 0.2.0
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
 
@@ -94,6 +94,7 @@ VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
 CONTENT_VECTOR_NAME = "content_dense"
 SUMMARY_VECTOR_NAME = "summary_dense"
 CONTENT_SPARSE_NAME = "content_sparse"
+SUMMARY_SPARSE_NAME = "summary_sparse"
 SPARSE_ENABLED = True  # TF‑IDF hybryda
 
 # Logger skonfigurowany pod konsolę kontenera
@@ -455,11 +456,12 @@ def embed_text(texts: List[str]) -> List[List[float]]:
 
 
 VECTORIZER_PATH = VECTOR_STORE_DIR / "tfidf_vectorizer.json"
+SUMMARY_VECTORIZER_PATH = VECTOR_STORE_DIR / "tfidf_vectorizer_summary.json"
 
 
-def load_vectorizer() -> Optional[TfidfVectorizer]:
-    if VECTORIZER_PATH.exists():
-        obj = json.loads(VECTORIZER_PATH.read_text())
+def load_vectorizer(path: pathlib.Path = VECTORIZER_PATH) -> Optional[TfidfVectorizer]:
+    if path.exists():
+        obj = json.loads(path.read_text())
         vec = TfidfVectorizer(**obj["params"])  # type: ignore
         vec.vocabulary_ = {k: int(v) for k, v in obj["vocab"].items()}  # type: ignore
         vec.idf_ = np.array(obj["idf"])  # type: ignore
@@ -467,26 +469,28 @@ def load_vectorizer() -> Optional[TfidfVectorizer]:
     return None
 
 
-def save_vectorizer(vec: TfidfVectorizer):
+def save_vectorizer(vec: TfidfVectorizer, path: pathlib.Path = VECTORIZER_PATH):
     params = vec.get_params()
     payload = {
         "params": {k: v for k, v in params.items() if k in ["lowercase", "ngram_range", "min_df", "max_df"]},
         "vocab": {k: int(v) for k, v in vec.vocabulary_.items()},
         "idf": vec.idf_.tolist(),
     }
-    VECTORIZER_PATH.write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload))
 
 
-def fit_vectorizer(corpus: List[str]) -> TfidfVectorizer:
+def fit_vectorizer(corpus: List[str], path: pathlib.Path = VECTORIZER_PATH) -> TfidfVectorizer:
     vec = TfidfVectorizer(lowercase=True, ngram_range=(1, 2), min_df=2, max_df=0.9)
     vec.fit(corpus)
-    save_vectorizer(vec)
+    save_vectorizer(vec, path=path)
     return vec
 
 
-def tfidf_vector(texts: List[str], vec: Optional[TfidfVectorizer]) -> List[Tuple[List[int], List[float]]]:
+def tfidf_vector(
+    texts: List[str], vec: Optional[TfidfVectorizer], path: pathlib.Path = VECTORIZER_PATH
+) -> List[Tuple[List[int], List[float]]]:
     if not vec:
-        vec = load_vectorizer()
+        vec = load_vectorizer(path)
         if not vec:
             # jeśli brak globalnego wektoryzatora, fit tymczasowy na wejściu (słabsze, ale działa)
             vec = TfidfVectorizer(lowercase=True, ngram_range=(1, 2), min_df=1, max_df=1.0)
@@ -516,7 +520,10 @@ def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = Non
     # Konfiguracja nazwanej macierzy rzadkiej – Qdrant 1.x: przekazujemy ją jako nazwany
     # wektor w polu `vector` punktu (wartość = SparseVector)
     sparse_config = (
-        {CONTENT_SPARSE_NAME: qm.SparseVectorParams()}
+        {
+            CONTENT_SPARSE_NAME: qm.SparseVectorParams(),
+            SUMMARY_SPARSE_NAME: qm.SparseVectorParams(),
+        }
         if SPARSE_ENABLED
         else None
     )
@@ -782,6 +789,7 @@ def ingest_build(req: IngestBuildRequest):
 
     # Parsowanie i chunking
     all_chunks: List[str] = []
+    summary_corpus: List[str] = []
     doc_records: List[Dict[str, Any]] = []
 
     for path in file_paths:
@@ -794,15 +802,22 @@ def ingest_build(req: IngestBuildRequest):
         # streszczenie całości (dla indeksu streszczeń dokumentu)
         doc_sum = llm_summary(raw[:12000])  # limit ochronny
         doc_id = sha1(str(path.resolve()))
+        summary_signature = doc_sum.get("signature", [])
+        summary_sparse_text = " ".join(
+            [doc_sum.get("summary", ""), " ".join(summary_signature)]
+        ).strip()
         rec = {
             "doc_id": doc_id,
             "path": str(path.resolve()),
             "chunks": chunks,
             "doc_summary": doc_sum["summary"],
-            "doc_signature": doc_sum.get("signature", []),
+            "doc_signature": summary_signature,
+            "summary_sparse_text": summary_sparse_text,
         }
         doc_records.append(rec)
         all_chunks.extend(chunks)
+        if summary_sparse_text:
+            summary_corpus.append(summary_sparse_text)
         logger.debug(
             "Document %s parsed | chunks=%d summary_len=%d",
             path,
@@ -811,19 +826,42 @@ def ingest_build(req: IngestBuildRequest):
         )
 
     # TF‑IDF (globalny)
-    vec = None
+    content_vec: Optional[TfidfVectorizer] = None
+    summary_vec: Optional[TfidfVectorizer] = None
     if req.enable_sparse:
         logger.debug("Sparse mode enabled; rebuild=%s", req.rebuild_tfidf)
-        if req.rebuild_tfidf or not VECTORIZER_PATH.exists():
-            vec = fit_vectorizer(all_chunks)
-            logger.debug("Fitted new TF-IDF vectorizer over %d chunks", len(all_chunks))
-        else:
-            vec = load_vectorizer()
-            if vec is None:
-                vec = fit_vectorizer(all_chunks)
-                logger.debug("Rebuilt TF-IDF vectorizer (cache missing) over %d chunks", len(all_chunks))
+        if all_chunks:
+            if req.rebuild_tfidf or not VECTORIZER_PATH.exists():
+                content_vec = fit_vectorizer(all_chunks)
+                logger.debug("Fitted new TF-IDF vectorizer over %d chunks", len(all_chunks))
             else:
-                logger.debug("Loaded existing TF-IDF vectorizer")
+                content_vec = load_vectorizer()
+                if content_vec is None:
+                    content_vec = fit_vectorizer(all_chunks)
+                    logger.debug("Rebuilt TF-IDF vectorizer (cache missing) over %d chunks", len(all_chunks))
+                else:
+                    logger.debug("Loaded existing TF-IDF vectorizer")
+        else:
+            logger.debug("No chunks available for TF-IDF fitting; reusing existing vectorizer if present")
+            content_vec = load_vectorizer()
+
+        if summary_corpus:
+            if req.rebuild_tfidf or not SUMMARY_VECTORIZER_PATH.exists():
+                summary_vec = fit_vectorizer(summary_corpus, path=SUMMARY_VECTORIZER_PATH)
+                logger.debug("Fitted new summary TF-IDF vectorizer over %d summaries", len(summary_corpus))
+            else:
+                summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
+                if summary_vec is None:
+                    summary_vec = fit_vectorizer(summary_corpus, path=SUMMARY_VECTORIZER_PATH)
+                    logger.debug(
+                        "Rebuilt summary TF-IDF vectorizer (cache missing) over %d summaries",
+                        len(summary_corpus),
+                    )
+                else:
+                    logger.debug("Loaded existing summary TF-IDF vectorizer")
+        else:
+            logger.debug("No summaries available for TF-IDF fitting; reusing existing summary vectorizer if present")
+            summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
 
     # Budowa punktów Qdrant
     points: List[qm.PointStruct] = []
@@ -834,17 +872,26 @@ def ingest_build(req: IngestBuildRequest):
         path = rec["path"]
         chunks = rec["chunks"]
         doc_summary = rec["doc_summary"]
+        doc_signature = rec["doc_signature"]
+        summary_sparse_text = rec["summary_sparse_text"]
 
         # Embedding streszczenia dokumentu (użyjemy go też jako wektor sekcji głównej)
-        summary_vec = embed_text([doc_summary])[0]
+        summary_dense_vec = embed_text([doc_summary])[0]
 
         # Embedding chunków
         content_vecs = embed_text(chunks)
         # TF‑IDF sparse
         if req.enable_sparse:
-            sparse_chunks = tfidf_vector(chunks, vec)
+            sparse_chunks = tfidf_vector(chunks, content_vec)
+            if summary_vec is not None and summary_sparse_text:
+                summary_sparse = tfidf_vector(
+                    [summary_sparse_text], summary_vec, path=SUMMARY_VECTORIZER_PATH
+                )[0]
+            else:
+                summary_sparse = ([], [])
         else:
             sparse_chunks = [([], []) for _ in chunks]
+            summary_sparse = ([], [])
 
         for i, chunk in enumerate(chunks):
             pid = int(str(int(sha1(f"{doc_id}:{i}")[0:12], 16))[:12])  # stabilny int z sha1
@@ -855,17 +902,26 @@ def ingest_build(req: IngestBuildRequest):
                 "is_active": True,
                 "summary": doc_summary,
                 "text": chunk,
+                "signature": doc_signature,
             }
 
             vectors = {
                 CONTENT_VECTOR_NAME: content_vecs[i],
-                SUMMARY_VECTOR_NAME: summary_vec,
+                SUMMARY_VECTOR_NAME: summary_dense_vec,
             }
 
             if SPARSE_ENABLED and req.enable_sparse:
                 indices, values = sparse_chunks[i]
                 if indices:
                     vectors[CONTENT_SPARSE_NAME] = qm.SparseVector(indices=indices, values=values)
+                    payload["content_sparse_indices"] = indices
+                    payload["content_sparse_values"] = values
+                if summary_sparse[0]:
+                    vectors[SUMMARY_SPARSE_NAME] = qm.SparseVector(
+                        indices=summary_sparse[0], values=summary_sparse[1]
+                    )
+                    payload["summary_sparse_indices"] = summary_sparse[0]
+                    payload["summary_sparse_values"] = summary_sparse[1]
 
             points.append(qm.PointStruct(id=pid, vector=vectors, payload=payload))
             point_count += 1
@@ -949,13 +1005,19 @@ def search_query(req: SearchQuery):
     q_vec = embed_text([req.query])[0]
 
     # Hybryda: dense + tfidf
-    sparse_query: Optional[Tuple[List[int], List[float]]] = None
-    if req.use_hybrid and SPARSE_ENABLED and VECTORIZER_PATH.exists():
-        vec = load_vectorizer()
-        if vec is not None:
-            idx, val = tfidf_vector([req.query], vec)[0]
+    content_sparse_query: Optional[Tuple[List[int], List[float]]] = None
+    summary_sparse_query: Optional[Tuple[List[int], List[float]]] = None
+    if req.use_hybrid and SPARSE_ENABLED:
+        content_vec = load_vectorizer()
+        if content_vec is not None:
+            idx, val = tfidf_vector([req.query], content_vec)[0]
             if idx:
-                sparse_query = (idx, val)
+                content_sparse_query = (idx, val)
+        summary_vec_model = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
+        if summary_vec_model is not None:
+            s_idx, s_val = tfidf_vector([req.query], summary_vec_model, path=SUMMARY_VECTORIZER_PATH)[0]
+            if s_idx:
+                summary_sparse_query = (s_idx, s_val)
 
     # Filtry payload
     flt = None
@@ -977,15 +1039,35 @@ def search_query(req: SearchQuery):
         score_threshold=None,
         search_params=qm.SearchParams(exact=False, hnsw_ef=128),
     )
+    summary_sparse_lookup: Dict[int, float] = {}
+    if summary_sparse_query is not None:
+        summary_sparse_lookup = dict(zip(summary_sparse_query[0], summary_sparse_query[1]))
 
-    # Zbierz kandydatów po doc_id (unikalne)
-    cand_doc_ids: List[str] = []
+    # Zbierz kandydatów po doc_id (unikalne) z hybrydową punktacją
+    cand_doc_scores: Dict[str, float] = {}
     for r in sum_search:
-        did = r.payload.get("doc_id")  # type: ignore
-        if did and did not in cand_doc_ids:
-            cand_doc_ids.append(did)
-        if len(cand_doc_ids) >= req.top_m:
-            break
+        payload = r.payload or {}
+        did = payload.get("doc_id")
+        if not did:
+            continue
+        dense_score = float(r.score or 0.0)
+        combined = dense_score
+        if summary_sparse_lookup and payload.get("summary_sparse_indices") and payload.get("summary_sparse_values"):
+            sparse_score = 0.0
+            for idx_val, val_val in zip(
+                payload.get("summary_sparse_indices", []),
+                payload.get("summary_sparse_values", []),
+            ):
+                qv = summary_sparse_lookup.get(idx_val)
+                if qv is not None:
+                    sparse_score += qv * val_val
+            combined = req.dense_weight * dense_score + req.sparse_weight * sparse_score
+        if did not in cand_doc_scores or combined > cand_doc_scores[did]:
+            cand_doc_scores[did] = combined
+
+    cand_doc_ids = [doc_id for doc_id, _ in sorted(cand_doc_scores.items(), key=lambda item: item[1], reverse=True)]
+    if len(cand_doc_ids) > req.top_m:
+        cand_doc_ids = cand_doc_ids[: req.top_m]
 
     if not cand_doc_ids:
         return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
@@ -1008,8 +1090,8 @@ def search_query(req: SearchQuery):
     # Dywersyfikacja MMR na podstawie wektorów contentu i wyników score
     mmr_candidates = list(cont_search)
     sparse_dict: Dict[int, float] = {}
-    if sparse_query is not None:
-        q_idx, q_val = sparse_query
+    if content_sparse_query is not None:
+        q_idx, q_val = content_sparse_query
         sparse_dict = dict(zip(q_idx, q_val))
 
     if mmr_candidates and req.top_k < len(mmr_candidates):
@@ -1036,18 +1118,25 @@ def search_query(req: SearchQuery):
     for r in mmr_candidates:
         payload = r.payload or {}
         sparse_boost = 0.0
-        if sparse_dict and payload.get("sparse_indices") and payload.get("sparse_values"):
-            for idx_val, val_val in zip(payload.get("sparse_indices", []), payload.get("sparse_values", [])):
+        combined_score = float(r.score or 0.0)
+        if sparse_dict and payload.get("content_sparse_indices") and payload.get("content_sparse_values"):
+            for idx_val, val_val in zip(
+                payload.get("content_sparse_indices", []),
+                payload.get("content_sparse_values", []),
+            ):
                 qv = sparse_dict.get(idx_val)
                 if qv is not None:
                     sparse_boost += qv * val_val
+            combined_score = (
+                req.dense_weight * combined_score + req.sparse_weight * sparse_boost
+            )
         results.append(
             SearchHit(
                 doc_id=payload.get("doc_id", ""),
                 path=payload.get("path", ""),
                 section=payload.get("section"),
                 chunk_id=payload.get("chunk_id", 0),
-                score=float(r.score or 0.0) + sparse_boost,
+                score=combined_score,
                 snippet=(payload.get("text") or "").strip()[:500] if payload.get("text") else payload.get("summary", "")[:500],
                 summary=payload.get("summary"),
             )

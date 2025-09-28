@@ -1,6 +1,11 @@
-# SummRAG
+# SummRAG (0.2.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.2.0
+
+- Hybrydowy etap recall na streszczeniach — wyniki dense są łączone z dopasowaniem TF-IDF po streszczeniach i sygnaturach dokumentów.
+- Podczas ingestu zapisywane są sparse wektory streszczeń i treści, co stabilizuje ranking hybrydowy w obu etapach wyszukiwania.
 
 ## Wymagania
 
