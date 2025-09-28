@@ -1001,22 +1001,40 @@ def search_query(req: SearchQuery):
         query_filter=flt2,
         limit=req.top_m,
         with_payload=True,
-        with_vectors=False,
+        with_vectors=[CONTENT_VECTOR_NAME],
         search_params=qm.SearchParams(exact=False, hnsw_ef=128),
     )
 
-    # Opcjonalna dywersyfikacja MMR (po samych wynikach — w przybliżeniu użyjemy score)
-    # Bez wektorów punktów trudno policzyć rep; użyjemy tylko score, co zadziała jako zwykłe Top‑K
-    # Dla prostego MMR potrzebowalibyśmy wektorów kandydatów — uproszczenie: Top‑K bez MMR
-
-    results: List[SearchHit] = []
+    # Dywersyfikacja MMR na podstawie wektorów contentu i wyników score
+    mmr_candidates = list(cont_search)
     sparse_dict: Dict[int, float] = {}
     if sparse_query is not None:
         q_idx, q_val = sparse_query
         sparse_dict = dict(zip(q_idx, q_val))
-    for r in cont_search[: req.top_k]:
+
+    if mmr_candidates and req.top_k < len(mmr_candidates):
+        mat = []
+        scores = []
+        for hit in mmr_candidates:
+            vec_map = hit.vector or {}
+            vec = vec_map.get(CONTENT_VECTOR_NAME)
+            if vec is None:
+                continue
+            mat.append(vec)
+            scores.append(float(hit.score or 0.0))
+        if mat:
+            vecs_np = np.array(mat, dtype=float)
+            scores_np = np.array(scores, dtype=float)
+            mmr_idx = mmr_diversify(vecs_np, scores_np, req.top_k, lam=req.mmr_lambda)
+            mmr_candidates = [mmr_candidates[i] for i in mmr_idx]
+        else:
+            mmr_candidates = mmr_candidates[: req.top_k]
+    else:
+        mmr_candidates = mmr_candidates[: req.top_k]
+
+    results: List[SearchHit] = []
+    for r in mmr_candidates:
         payload = r.payload or {}
-        # Ręczny boost TF‑IDF na podstawie payloadu punktów
         sparse_boost = 0.0
         if sparse_dict and payload.get("sparse_indices") and payload.get("sparse_values"):
             for idx_val, val_val in zip(payload.get("sparse_indices", []), payload.get("sparse_values", [])):
