@@ -1,6 +1,12 @@
-# SummRAG (0.3.0)
+# SummRAG (0.4.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.4.0
+
+- Kontrola duplikacji streszczeń w wynikach: nowy parametr `summary_mode` (`none` | `first` | `all`). Domyślnie `first` — streszczenie dokumentu pojawia się tylko przy pierwszym trafieniu z danego dokumentu (eliminuje powtarzanie).
+- Nowy format wyników: `result_format` (`flat` | `grouped`). Domyślnie `flat`. W trybie `grouped` wyniki są grupowane per dokument (jedno streszczenie na dokument + lista trafionych fragmentów).
+- Zaktualizowany panel Admin UI ma domyślnie `summary_mode: "first"` i `result_format: "flat"` w predefiniowanym żądaniu `search-query`.
 
 ## Nowości w 0.3.0
 
@@ -86,6 +92,41 @@ Możesz także umieścić te wartości w pliku `.env`; aplikacja wczyta je autom
 - `score_norm`: `minmax` | `zscore` | `none` — sposób normalizacji przed fuzją.
 - `rep_alpha`: udział dense w repulsji MMR (domyślnie = `dense_weight`).
 - `mmr_stage1`: MMR po stronie streszczeń (domyślnie true).
+- `summary_mode`: `none` | `first` | `all` — kontrola tego, czy i kiedy dołączać streszczenie dokumentu do trafień (domyślnie `first`).
+- `result_format`: `flat` | `grouped` — kształt odpowiedzi; w `grouped` otrzymasz listę grup dokumentów z fragmentami.
+
+Przykładowe zapytanie (flat, bez duplikacji streszczeń):
+
+```json
+{
+  "query": "Jak działa SummRAG?",
+  "top_m": 10,
+  "top_k": 5,
+  "mode": "auto",
+  "use_hybrid": true,
+  "dense_weight": 0.6,
+  "sparse_weight": 0.4,
+  "mmr_lambda": 0.3,
+  "per_doc_limit": 2,
+  "score_norm": "minmax",
+  "rep_alpha": 0.6,
+  "mmr_stage1": true,
+  "summary_mode": "first",
+  "result_format": "flat"
+}
+```
+
+Przykładowe zapytanie (grouped):
+
+```json
+{
+  "query": "Jak działa SummRAG?",
+  "top_m": 10,
+  "top_k": 5,
+  "result_format": "grouped",
+  "summary_mode": "first"
+}
+```
 
 ## Licencja
 

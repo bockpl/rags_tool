@@ -1,6 +1,6 @@
 """
 RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
-Version: 0.3.0
+Version: 0.4.0
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
 
@@ -285,7 +285,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "search-query",
         "path": "/search/query",
         "method": "POST",
-        "body": "{\n  \"query\": \"Jak działa SummRAG?\",\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true\n}",
+        "body": "{\n  \"query\": \"Jak działa SummRAG?\",\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"result_format\": \"flat\"\n}",
     },
 ]
 
@@ -674,6 +674,10 @@ class SearchQuery(BaseModel):
     score_norm: str = DEFAULT_SCORE_NORM  # minmax|zscore|none
     rep_alpha: Optional[float] = None  # fallback to dense_weight
     mmr_stage1: bool = True
+    # Controls duplication of document summary in results
+    summary_mode: str = "first"  # none|first|all
+    # Controls shape of response: flat list vs grouped per document
+    result_format: str = "flat"  # flat|grouped
 
 
 class SearchHit(BaseModel):
@@ -689,6 +693,25 @@ class SearchHit(BaseModel):
 class SearchResponse(BaseModel):
     took_ms: int
     hits: List[SearchHit]
+    # Optional grouped representation (when requested)
+    groups: Optional[List["SearchGroup"]] = None
+
+
+class SearchChunk(BaseModel):
+    chunk_id: int
+    score: float
+    snippet: str
+
+
+class SearchGroup(BaseModel):
+    doc_id: str
+    path: str
+    summary: Optional[str] = None
+    score: float
+    chunks: List[SearchChunk]
+
+# Rebuild forward refs for Pydantic v2
+SearchResponse.model_rebuild()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1312,20 +1335,77 @@ def search_query(req: SearchQuery):
         })
     final_hits.sort(key=lambda x: x["score"], reverse=True)
 
+    # Build response according to requested format
     results: List[SearchHit] = []
-    for fh in final_hits:
-        payload = fh["payload"]
-        results.append(
-            SearchHit(
-                doc_id=payload.get("doc_id", ""),
-                path=payload.get("path", ""),
-                section=payload.get("section"),
-                chunk_id=payload.get("chunk_id", 0),
-                score=float(fh["score"]),
-                snippet=(payload.get("text") or "").strip()[:500] if payload.get("text") else payload.get("summary", "")[:500],
-                summary=payload.get("summary"),
+    groups_payload: Optional[List[Dict[str, Any]]] = None
+
+    if req.result_format == "grouped":
+        # Group results per document, keep only one summary at doc level
+        groups: Dict[str, Dict[str, Any]] = {}
+        for fh in final_hits:
+            payload = fh["payload"] or {}
+            did = payload.get("doc_id", "")
+            if not did:
+                # Skip items without doc_id
+                continue
+            grp = groups.get(did)
+            if grp is None:
+                grp = {
+                    "doc_id": did,
+                    "path": payload.get("path", ""),
+                    "summary": None if req.summary_mode == "none" else payload.get("summary"),
+                    "score": float(fh["score"]),  # will be max over chunks
+                    "chunks": [],
+                }
+                groups[did] = grp
+            else:
+                # update group score with max
+                if float(fh["score"]) > float(grp.get("score", 0.0)):
+                    grp["score"] = float(fh["score"])
+            # Append chunk (never include summary at chunk level)
+            snippet = (payload.get("text") or "").strip()[:500]
+            grp["chunks"].append({
+                "chunk_id": payload.get("chunk_id", 0),
+                "score": float(fh["score"]),
+                "snippet": snippet,
+            })
+        # Sort groups by score desc, and chunks inside each group by score desc
+        groups_list = list(groups.values())
+        for g in groups_list:
+            g["chunks"].sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        groups_list.sort(key=lambda g: float(g.get("score", 0.0)), reverse=True)
+        groups_payload = groups_list
+        results = []  # keep flat list empty in grouped mode
+    else:
+        # Flat format: control duplication of summary per document
+        seen_docs: set = set()
+        for fh in final_hits:
+            payload = fh["payload"]
+            did = payload.get("doc_id", "")
+            # Decide summary according to summary_mode
+            summary_val: Optional[str]
+            if req.summary_mode == "none":
+                summary_val = None
+            elif req.summary_mode == "first":
+                if did in seen_docs:
+                    summary_val = None
+                else:
+                    summary_val = payload.get("summary")
+                    seen_docs.add(did)
+            else:  # "all"
+                summary_val = payload.get("summary")
+
+            results.append(
+                SearchHit(
+                    doc_id=did,
+                    path=payload.get("path", ""),
+                    section=payload.get("section"),
+                    chunk_id=payload.get("chunk_id", 0),
+                    score=float(fh["score"]),
+                    snippet=(payload.get("text") or "").strip()[:500] if payload.get("text") else (payload.get("summary", "")[:500]),
+                    summary=summary_val,
+                )
             )
-        )
 
     took_ms = int((time.time() - t0) * 1000)
     if settings.debug:
@@ -1336,4 +1416,4 @@ def search_query(req: SearchQuery):
             len(mmr_pool) if 'mmr_pool' in locals() else 0,
             len(results),
         )
-    return SearchResponse(took_ms=took_ms, hits=results)
+    return SearchResponse(took_ms=took_ms, hits=results, groups=groups_payload)
