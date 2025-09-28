@@ -10,5 +10,8 @@ ENV_FILE=/etc/RAGS_tool/.env
 # Persistent storage mapping (host → container)
 VECTOR_STORE_HOST_DIR=/srv/ai/qdrant_data/
 VECTOR_STORE_CONTAINER_DIR=/app/.summrag_store
+# Documents directory mapping (host → container)
+DOCS_HOST_DIR=/srv/ai/rags_docs/
+DOCS_CONTAINER_DIR=/app/data
 # The application environment is loaded from ${ENV_FILE} (standard .env syntax)
 # Skopiuj szablon .env z repozytorium i zaktualizuj go przed włączeniem usługi (np. DEBUG=true dla verbose logów).

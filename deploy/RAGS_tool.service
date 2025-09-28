@@ -15,6 +15,7 @@ ExecStart=/usr/bin/docker run --rm \
   --env-file ${ENV_FILE} \
   -p ${HOST_PORT}:${CONTAINER_PORT} \
   -v ${VECTOR_STORE_HOST_DIR}:${VECTOR_STORE_CONTAINER_DIR} \
+  -v ${DOCS_HOST_DIR}:${DOCS_CONTAINER_DIR} \
   ${DOCKER_IMAGE}:${DOCKER_TAG}
 ExecStop=-${DOCKER_BIN} stop RAGS_tool
 Restart=on-failure
