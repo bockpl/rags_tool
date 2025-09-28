@@ -1,15 +1,14 @@
 # /etc/default/RAGS_tool - systemd overrides for the RAGS_tool container service
 # Update these values to match your deployment before installing.
 
-DOCKER_BIN="/usr/bin/docker"
-DOCKER_IMAGE="rags_tool"
-DOCKER_TAG="latest"
-HOST_PORT=7002
+DOCKER_IMAGE=rags_tool
+DOCKER_TAG=latest
+HOST_PORT=7001
 CONTAINER_PORT=8080
-ENV_FILE="/etc/RAGS_tool/.env"
+ENV_FILE=/etc/RAGS_tool/.env
 
 # Persistent storage mapping (host → container)
-VECTOR_STORE_HOST_DIR="/srv/ai/qdrant_data/"
-VECTOR_STORE_CONTAINER_DIR="/app/.summrag_store"
+VECTOR_STORE_HOST_DIR=/srv/ai/qdrant_data/
+VECTOR_STORE_CONTAINER_DIR=/app/.summrag_store
 # The application environment is loaded from ${ENV_FILE} (standard .env syntax)
 # Skopiuj szablon .env z repozytorium i zaktualizuj go przed włączeniem usługi (np. DEBUG=true dla verbose logów).
