@@ -12,7 +12,6 @@ ZAŁOŻENIA
   • /ingest/scan — skan katalogu
   • /ingest/build — przetworzenie korpusu: parsowanie → streszczenia → wektory → indeks
   • /summaries/generate — streszczenia dla pojedynczych plików
-  • /documents/upsert — pojedynczy dokument w/gotowych danych
   • /search/query — główne odpytywanie (dwustopniowe): streszczenia → pełny tekst (z hybrydą dense+tfidf)
 
 - Wejście: katalog z dokumentami (TXT/MD/HTML; PDF opcjonalnie jeśli dostępny PyPDF2) + instancja Qdrant.
@@ -29,8 +28,8 @@ URUCHOMIENIE
   export SUMMARY_API_URL=http://127.0.0.1:8001/v1     # Twój endpoint do streszczeń
   export SUMMARY_API_KEY=sk-summary-xxx
   export SUMMARY_MODEL="gpt-4o-mini"                 # lub lokalny chat model zgodny z /v1/chat/completions
-  export COLLECTION_NAME="summrag"
-  export VECTOR_STORE_DIR=".summrag_store"         # gdzie zapisze się TF‑IDF, cache itp.
+  export COLLECTION_NAME="rags_tool"
+  export VECTOR_STORE_DIR=".rags_tool_store"         # gdzie zapisze się TF‑IDF, cache itp.
   export DEBUG=false                                  # ustaw na true, by zobaczyć logi ingestu
 
   # (alternatywnie) wpisz te wartości do pliku .env — aplikacja wczyta go automatycznie
@@ -94,6 +93,7 @@ VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
 # Stałe
 CONTENT_VECTOR_NAME = "content_dense"
 SUMMARY_VECTOR_NAME = "summary_dense"
+CONTENT_SPARSE_NAME = "content_sparse"
 SPARSE_ENABLED = True  # TF‑IDF hybryda
 
 # Logger skonfigurowany pod konsolę kontenera
@@ -260,7 +260,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "collections-init",
         "path": "/collections/init",
         "method": "POST",
-        "body": "{\n  \"collection_name\": \"summrag\",\n  \"force_dim_probe\": false\n}",
+        "body": "{\n  \"collection_name\": \"rags_tool\",\n  \"force_dim_probe\": false\n}",
     },
     {
         "id": "ingest-scan",
@@ -278,13 +278,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "ingest-build",
         "path": "/ingest/build",
         "method": "POST",
-        "body": "{\n  \"base_dir\": \"/app/data\",\n  \"glob\": \"**/*\",\n  \"recursive\": true,\n  \"reindex\": false,\n  \"chunk_tokens\": 900,\n  \"chunk_overlap\": 150,\n  \"collection_name\": \"summrag\",\n  \"enable_sparse\": true,\n  \"rebuild_tfidf\": true\n}",
-    },
-    {
-        "id": "documents-upsert",
-        "path": "/documents/upsert",
-        "method": "POST",
-        "body": "{\n  \"doc_id\": \"manual-doc-1\",\n  \"path\": \"/app/data/manual.txt\",\n  \"chunks\": [\n    \"Pierwszy fragment\",\n    \"Drugi fragment\"\n  ],\n  \"summaries\": [\n    \"Streszczenie pierwszego fragmentu\",\n    \"Streszczenie drugiego fragmentu\"\n  ]\n}",
+        "body": "{\n  \"base_dir\": \"/app/data\",\n  \"glob\": \"**/*\",\n  \"recursive\": true,\n  \"reindex\": false,\n  \"chunk_tokens\": 900,\n  \"chunk_overlap\": 150,\n  \"collection_name\": \"rags_tool\",\n  \"enable_sparse\": true,\n  \"rebuild_tfidf\": true\n}",
     },
     {
         "id": "search-query",
@@ -519,7 +513,13 @@ def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = Non
         CONTENT_VECTOR_NAME: qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
         SUMMARY_VECTOR_NAME: qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
     }
-    sparse_config = None
+    # Konfiguracja nazwanej macierzy rzadkiej – Qdrant 1.x: przekazujemy ją jako nazwany
+    # wektor w polu `vector` punktu (wartość = SparseVector)
+    sparse_config = (
+        {CONTENT_SPARSE_NAME: qm.SparseVectorParams()}
+        if SPARSE_ENABLED
+        else None
+    )
     try:
         qdrant.get_collection(collection)
         logger.debug("Collection '%s' already exists; skipping creation", collection)
@@ -584,17 +584,6 @@ class IngestBuildRequest(BaseModel):
 
 class SummariesGenerateRequest(BaseModel):
     files: List[str]
-
-
-class UpsertDocumentRequest(BaseModel):
-    doc_id: str
-    path: str
-    chunks: List[str]
-    summaries: List[str]
-    signatures: List[List[str]] = Field(default_factory=list)
-    is_active: Optional[bool] = True
-    valid_from: Optional[str] = None
-    valid_to: Optional[str] = None
 
 
 class SearchQuery(BaseModel):
@@ -865,25 +854,20 @@ def ingest_build(req: IngestBuildRequest):
                 "chunk_id": i,
                 "is_active": True,
                 "summary": doc_summary,
+                "text": chunk,
             }
-            if req.enable_sparse:
-                indices, values = sparse_chunks[i]
-                if indices:
-                    payload["sparse_indices"] = indices
-                    payload["sparse_values"] = values
 
             vectors = {
                 CONTENT_VECTOR_NAME: content_vecs[i],
                 SUMMARY_VECTOR_NAME: summary_vec,
             }
 
-            points.append(
-                qm.PointStruct(
-                    id=pid,
-                    vector=vectors,
-                    payload=payload,
-                )
-            )
+            if SPARSE_ENABLED and req.enable_sparse:
+                indices, values = sparse_chunks[i]
+                if indices:
+                    vectors[CONTENT_SPARSE_NAME] = qm.SparseVector(indices=indices, values=values)
+
+            points.append(qm.PointStruct(id=pid, vector=vectors, payload=payload))
             point_count += 1
 
         # Upsert w partiach, by nie trzymać wszystkiego w RAM
@@ -965,13 +949,13 @@ def search_query(req: SearchQuery):
     q_vec = embed_text([req.query])[0]
 
     # Hybryda: dense + tfidf
-    sparse_query = None
+    sparse_query: Optional[Tuple[List[int], List[float]]] = None
     if req.use_hybrid and SPARSE_ENABLED and VECTORIZER_PATH.exists():
         vec = load_vectorizer()
         if vec is not None:
             idx, val = tfidf_vector([req.query], vec)[0]
             if idx:
-                sparse_query = dict(zip(idx, val))
+                sparse_query = (idx, val)
 
     # Filtry payload
     flt = None
@@ -1011,6 +995,12 @@ def search_query(req: SearchQuery):
         must=[qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=cand_doc_ids))]
     )
 
+    sparse_kwargs: Dict[str, Any] = {}
+    if sparse_query is not None:
+        idx, val = sparse_query
+        if idx:
+            sparse_kwargs["sparse_vector"] = qm.SparseVector(indices=idx, values=val)
+
     cont_search = qdrant.search(
         collection_name=settings.collection_name,
         query_vector=(CONTENT_VECTOR_NAME, q_vec),
@@ -1019,6 +1009,7 @@ def search_query(req: SearchQuery):
         with_payload=True,
         with_vectors=False,
         search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+        **sparse_kwargs,
     )
 
     # Opcjonalna dywersyfikacja MMR (po samych wynikach — w przybliżeniu użyjemy score)
@@ -1028,20 +1019,13 @@ def search_query(req: SearchQuery):
     results: List[SearchHit] = []
     for r in cont_search[: req.top_k]:
         payload = r.payload or {}
-        sparse_boost = 0.0
-        if sparse_query and payload.get("sparse_indices") and payload.get("sparse_values"):
-            for idx_val, val_val in zip(payload["sparse_indices"], payload["sparse_values"]):
-                q_val = sparse_query.get(idx_val)
-                if q_val is not None:
-                    sparse_boost += q_val * val_val
-
         results.append(
             SearchHit(
                 doc_id=payload.get("doc_id", ""),
                 path=payload.get("path", ""),
                 section=payload.get("section"),
                 chunk_id=payload.get("chunk_id", 0),
-                score=float(r.score or 0.0) + sparse_boost,
+                score=float(r.score or 0.0),
                 snippet=(payload.get("text") or "").strip()[:500] if payload.get("text") else payload.get("summary", "")[:500],
                 summary=payload.get("summary"),
             )
@@ -1049,50 +1033,3 @@ def search_query(req: SearchQuery):
 
     took_ms = int((time.time() - t0) * 1000)
     return SearchResponse(took_ms=took_ms, hits=results)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# DODATKOWE: /documents/upsert — jeśli chcesz sam podawać gotowe chunk/summary
-# ──────────────────────────────────────────────────────────────────────────────
-@app.post(
-    "/documents/upsert",
-    include_in_schema=False,
-    summary="Ręczny upsert dokumentu",
-    description="Aktualizuje lub dodaje dokument w Qdrant z dostarczonymi chunkami i streszczeniami.",
-)
-def documents_upsert(req: UpsertDocumentRequest):
-    ensure_collection()
-    # Embedding streszczeń i chunków
-    sum_vec = embed_text([" ".join(req.summaries)[:12000] or "summary"])[0]
-    cont_vecs = embed_text(req.chunks)
-    sparse_vectors = tfidf_vector(req.chunks, load_vectorizer()) if SPARSE_ENABLED else [([], [])] * len(req.chunks)
-
-    points: List[qm.PointStruct] = []
-    for i, chunk in enumerate(req.chunks):
-        pid = int(str(int(sha1(f"{req.doc_id}:{i}")[0:12], 16))[:12])
-        payload = {
-            "doc_id": req.doc_id,
-            "path": req.path,
-            "chunk_id": i,
-            "is_active": req.is_active,
-            "summary": (req.summaries[i] if i < len(req.summaries) else req.summaries[-1]) if req.summaries else None,
-            "text": chunk,
-            "valid_from": req.valid_from,
-            "valid_to": req.valid_to,
-        }
-        vectors = {CONTENT_VECTOR_NAME: cont_vecs[i], SUMMARY_VECTOR_NAME: sum_vec}
-        if SPARSE_ENABLED:
-            idx, val = sparse_vectors[i]
-            if idx:
-                payload["sparse_indices"] = idx
-                payload["sparse_values"] = val
-        points.append(
-            qm.PointStruct(
-                id=pid,
-                vector=vectors,
-                payload=payload,
-            )
-        )
-
-    qdrant.upsert(collection_name=settings.collection_name, points=points)
-    return {"ok": True, "points": len(points)}

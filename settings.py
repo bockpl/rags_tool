@@ -22,9 +22,9 @@ class SummRAGSettings(BaseSettings):
     summary_api_url: str = Field(default="http://127.0.0.1:8001/v1", alias="SUMMARY_API_URL")
     summary_api_key: str = Field(default="sk-no-key", alias="SUMMARY_API_KEY")
     summary_model: str = Field(default="gpt-4o-mini", alias="SUMMARY_MODEL")
-    collection_name: str = Field(default="summrag", alias="COLLECTION_NAME")
+    collection_name: str = Field(default="rags_tool", alias="COLLECTION_NAME")
     debug: bool = Field(default=False, alias="DEBUG")
-    vector_store_dir: Path = Field(default=Path(".summrag_store"), alias="VECTOR_STORE_DIR")
+    vector_store_dir: Path = Field(default=Path(".rags_tool_store"), alias="VECTOR_STORE_DIR")
 
     model_config = SettingsConfigDict(
         env_file=".env",

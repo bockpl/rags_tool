@@ -21,8 +21,8 @@ export EMBEDDING_MODEL="BAAI/bge-m3"
 export SUMMARY_API_URL="http://127.0.0.1:8001/v1"
 export SUMMARY_API_KEY="sk-summary-xxx"
 export SUMMARY_MODEL="gpt-4o-mini"
-export COLLECTION_NAME="summrag"
-export VECTOR_STORE_DIR=".summrag_store"
+export COLLECTION_NAME="rags_tool"
+export VECTOR_STORE_DIR=".rags_tool_store"
 export DEBUG="false"  # ustaw na "true", aby włączyć logi debugujące
 ```
 
@@ -45,14 +45,14 @@ Możesz także umieścić te wartości w pliku `.env`; aplikacja wczyta je autom
 
 1. Zbuduj obraz:
    ```bash
-   docker build -t summrag:latest .
+   docker build -t rags_tool:latest .
    ```
 2. Uruchom kontener, przekazując wymagane zmienne środowiskowe:
    ```bash
    docker run --rm -p 8080:8080 \
      --env-file .env \
-     -v $(pwd)/.summrag_store:/app/.summrag_store \
-     summrag:latest
+    -v $(pwd)/.rags_tool_store:/app/.rags_tool_store \
+    rags_tool:latest
    ```
 
 > **Uwaga**: Qdrant i modele LLM muszą działać poza kontenerem i być dostępne pod adresami przekazanymi w zmiennych środowiskowych.
