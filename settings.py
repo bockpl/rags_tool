@@ -1,0 +1,40 @@
+"""Application configuration loading using pydantic-settings."""
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class SummRAGSettings(BaseSettings):
+    """Centralised configuration for the SummRAG service."""
+
+    app_name: str = "SummRAG"
+    app_version: str = "0.1.2"
+
+    qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
+    qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
+    embedding_api_url: str = Field(default="http://127.0.0.1:8000/v1", alias="EMBEDDING_API_URL")
+    embedding_api_key: str = Field(default="sk-no-key", alias="EMBEDDING_API_KEY")
+    embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
+    summary_api_url: str = Field(default="http://127.0.0.1:8001/v1", alias="SUMMARY_API_URL")
+    summary_api_key: str = Field(default="sk-no-key", alias="SUMMARY_API_KEY")
+    summary_model: str = Field(default="gpt-4o-mini", alias="SUMMARY_MODEL")
+    collection_name: str = Field(default="summrag", alias="COLLECTION_NAME")
+    debug: bool = Field(default=False, alias="DEBUG")
+    vector_store_dir: Path = Field(default=Path(".summrag_store"), alias="VECTOR_STORE_DIR")
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> SummRAGSettings:
+    """Return cached application settings instance."""
+
+    return SummRAGSettings()

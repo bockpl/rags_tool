@@ -1,0 +1,25 @@
+[Unit]
+Description=RAGS_tool Summarization Service (Docker)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/RAGS_tool
+ExecStartPre=-${DOCKER_BIN} stop RAGS_tool
+ExecStartPre=-${DOCKER_BIN} rm RAGS_tool
+ExecStartPre=-${DOCKER_BIN} pull ${DOCKER_IMAGE}:${DOCKER_TAG}
+ExecStart=${DOCKER_BIN} run --rm \
+  --name RAGS_tool \
+  --env-file ${ENV_FILE} \
+  -p ${HOST_PORT}:${CONTAINER_PORT} \
+  -v ${VECTOR_STORE_HOST_DIR}:${VECTOR_STORE_CONTAINER_DIR} \
+  ${DOCKER_IMAGE}:${DOCKER_TAG}
+ExecStop=-${DOCKER_BIN} stop RAGS_tool
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
