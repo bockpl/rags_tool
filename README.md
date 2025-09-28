@@ -1,11 +1,14 @@
-# SummRAG (0.2.0)
+# SummRAG (0.3.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
 
-## Nowości w 0.2.0
+## Nowości w 0.3.0
 
-- Hybrydowy etap recall na streszczeniach — wyniki dense są łączone z dopasowaniem TF-IDF po streszczeniach i sygnaturach dokumentów.
-- Podczas ingestu zapisywane są sparse wektory streszczeń i treści, co stabilizuje ranking hybrydowy w obu etapach wyszukiwania.
+- MMR i ranking liczone w przestrzeni hybrydowej (dense + TF‑IDF) z normalizacją wyników; końcowe sortowanie po score hybrydowym.
+- Limit per‑doc w Etapie 2 (domyślnie 2) przeciwdziała dominacji jednego dokumentu.
+- Opcje normalizacji: `minmax` (domyślna), `zscore`, `none` — stabilizują wagi dense/sparse.
+- Opcjonalny MMR na Etapie 1 (streszczenia) z re‑pulsywnością hybrydową.
+- Nowe parametry zapytania: `per_doc_limit`, `score_norm`, `rep_alpha`, `mmr_stage1` (szczegóły niżej).
 
 ## Wymagania
 
@@ -70,8 +73,19 @@ Możesz także umieścić te wartości w pliku `.env`; aplikacja wczyta je autom
 - `POST /ingest/scan` – skanowanie katalogu z dokumentami
 - `POST /ingest/build` – pełny pipeline ingestu (streszczenia + embedding + indeks)
 - `POST /summaries/generate` – generowanie streszczeń pojedynczych plików
-- `POST /documents/upsert` – wstawianie dokumentu wraz z gotowymi danymi
 - `POST /search/query` – zapytania dwustopniowe z hybrydowym rankingiem
+
+### Parametry wyszukiwania (`POST /search/query`)
+
+- `top_m`: liczba docelowych dokumentów po Etapie 1 (streszczenia).
+- `top_k`: końcowa liczba wyników (po Etapie 2).
+- `use_hybrid`: włącza TF‑IDF po stronie zapytania (domyślnie true).
+- `dense_weight`, `sparse_weight`: wagi składników hybrydowych.
+- `mmr_lambda`: balans trafności vs. dywersyfikacji (MMR).
+- `per_doc_limit`: maksymalna liczba wyników z jednego dokumentu (domyślnie 2).
+- `score_norm`: `minmax` | `zscore` | `none` — sposób normalizacji przed fuzją.
+- `rep_alpha`: udział dense w repulsji MMR (domyślnie = `dense_weight`).
+- `mmr_stage1`: MMR po stronie streszczeń (domyślnie true).
 
 ## Licencja
 

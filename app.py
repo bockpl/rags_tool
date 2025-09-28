@@ -1,6 +1,6 @@
 """
 RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
-Version: 0.2.0
+Version: 0.3.0
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
 
@@ -285,12 +285,14 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "search-query",
         "path": "/search/query",
         "method": "POST",
-        "body": "{\n  \"query\": \"Jak działa SummRAG?\",\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\"\n}",
+        "body": "{\n  \"query\": \"Jak działa SummRAG?\",\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true\n}",
     },
 ]
 
 # MMR
 DEFAULT_MMR_LAMBDA = 0.3
+DEFAULT_PER_DOC_LIMIT = 2
+DEFAULT_SCORE_NORM = "minmax"  # minmax|zscore|none
 
 # ──────────────────────────────────────────────────────────────────────────────
 # INICJALIZACJA KLIENTÓW
@@ -506,6 +508,72 @@ def tfidf_vector(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# SCORING HELPERS — normalization and hybrid ops
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _normalize(values: List[float], method: str = DEFAULT_SCORE_NORM) -> List[float]:
+    if not values:
+        return []
+    if method == "none":
+        return values
+    arr = np.array(values, dtype=float)
+    if method == "zscore":
+        mean = float(arr.mean())
+        std = float(arr.std())
+        if std < 1e-12:
+            return [0.0 for _ in values]
+        return [float((v - mean) / std) for v in arr]
+    # minmax default
+    vmin = float(arr.min())
+    vmax = float(arr.max())
+    if vmax - vmin < 1e-12:
+        return [0.0 for _ in values]
+    return [float((v - vmin) / (vmax - vmin)) for v in arr]
+
+
+def _sparse_dot(query_lookup: Dict[int, float], indices: List[int], values: List[float]) -> float:
+    if not query_lookup or not indices or not values:
+        return 0.0
+    acc = 0.0
+    for i, v in zip(indices, values):
+        q = query_lookup.get(int(i))
+        if q is not None:
+            acc += q * float(v)
+    return float(acc)
+
+
+def _sparse_pair_cos(
+    a_idx: List[int], a_val: List[float], b_idx: List[int], b_val: List[float]
+) -> float:
+    # Assuming L2-normalized TF-IDF values from scikit (default). Then dot = cosine.
+    if not a_idx or not b_idx:
+        return 0.0
+    i = j = 0
+    sim = 0.0
+    while i < len(a_idx) and j < len(b_idx):
+        ai = int(a_idx[i])
+        bj = int(b_idx[j])
+        if ai == bj:
+            sim += float(a_val[i]) * float(b_val[j])
+            i += 1
+            j += 1
+        elif ai < bj:
+            i += 1
+        else:
+            j += 1
+    return float(sim)
+
+
+def _cosine_dense(a: List[float], b: List[float]) -> float:
+    va = np.array(a, dtype=float)
+    vb = np.array(b, dtype=float)
+    denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+    if denom < 1e-12:
+        return 0.0
+    return float(np.dot(va, vb) / denom)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # QDRANT — KOLEKCJA
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -602,6 +670,10 @@ class SearchQuery(BaseModel):
     dense_weight: float = 0.6
     sparse_weight: float = 0.4
     mmr_lambda: float = DEFAULT_MMR_LAMBDA
+    per_doc_limit: int = DEFAULT_PER_DOC_LIMIT
+    score_norm: str = DEFAULT_SCORE_NORM  # minmax|zscore|none
+    rep_alpha: Optional[float] = None  # fallback to dense_weight
+    mmr_stage1: bool = True
 
 
 class SearchHit(BaseModel):
@@ -951,16 +1023,16 @@ def ingest_build(req: IngestBuildRequest):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def mmr_diversify(vectors: np.ndarray, scores: np.ndarray, k: int, lam: float = DEFAULT_MMR_LAMBDA) -> List[int]:
-    # Prosta implementacja MMR na macierzy (kandydaci × dim)
+    # Legacy MMR (dense only); kept for compatibility
     selected: List[int] = []
     candidates = list(range(len(scores)))
     if len(candidates) <= k:
         return candidates
-    # Normalizacja
     if vectors.ndim == 1:
         vectors = vectors.reshape(1, -1)
-    sims = lambda a, b: float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
-    # Greedy
+    def sims(a, b) -> float:
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        return float(np.dot(a, b) / (denom + 1e-9))
     while len(selected) < k and candidates:
         best_i = None
         best_score = -1e9
@@ -968,12 +1040,83 @@ def mmr_diversify(vectors: np.ndarray, scores: np.ndarray, k: int, lam: float = 
             rep = 0.0
             for j in selected:
                 rep = max(rep, sims(vectors[i], vectors[j]))
-            mmr = lam * scores[i] - (1 - lam) * rep
+            mmr = lam * float(scores[i]) - (1 - lam) * rep
             if mmr > best_score:
                 best_score = mmr
                 best_i = i
-        selected.append(best_i)  # type: ignore
-        candidates.remove(best_i)  # type: ignore
+        if best_i is None:
+            break
+        selected.append(best_i)
+        candidates.remove(best_i)
+    return selected
+
+
+def mmr_diversify_hybrid(
+    dense_vecs: List[List[float]],
+    sparse_vecs: List[Tuple[List[int], List[float]]],
+    rel_scores: List[float],
+    k: int,
+    lam: float,
+    rep_alpha: float,
+    per_doc_ids: Optional[List[str]] = None,
+    per_doc_limit: Optional[int] = None,
+) -> List[int]:
+    # Greedy MMR with hybrid redundancy (dense+sparse) and optional per-doc cap
+    n = len(rel_scores)
+    candidates = list(range(n))
+    if n <= k:
+        return candidates
+    selected: List[int] = []
+    counts: Dict[str, int] = {}
+    def allowed(i: int) -> bool:
+        if per_doc_ids is None or per_doc_limit is None:
+            return True
+        did = per_doc_ids[i]
+        return counts.get(did, 0) < per_doc_limit
+    while len(selected) < k and candidates:
+        best_i = None
+        best_score = -1e12
+        for i in candidates:
+            if per_doc_limit is not None and per_doc_ids is not None:
+                if not allowed(i):
+                    continue
+            rep = 0.0
+            for j in selected:
+                d_sim = _cosine_dense(dense_vecs[i], dense_vecs[j])
+                s_sim = _sparse_pair_cos(
+                    sparse_vecs[i][0], sparse_vecs[i][1], sparse_vecs[j][0], sparse_vecs[j][1]
+                )
+                rep = max(rep, rep_alpha * d_sim + (1.0 - rep_alpha) * s_sim)
+            mmr = lam * float(rel_scores[i]) - (1.0 - lam) * rep
+            if mmr > best_score:
+                best_score = mmr
+                best_i = i
+        if best_i is None:
+            break
+        # if per-doc cap blocks all candidates, relax once to fill
+        if per_doc_limit is not None and per_doc_ids is not None and not allowed(best_i):
+            alt = None
+            alt_score = -1e12
+            for i in candidates:
+                if allowed(i):
+                    rep = 0.0
+                    for j in selected:
+                        d_sim = _cosine_dense(dense_vecs[i], dense_vecs[j])
+                        s_sim = _sparse_pair_cos(
+                            sparse_vecs[i][0], sparse_vecs[i][1], sparse_vecs[j][0], sparse_vecs[j][1]
+                        )
+                        rep = max(rep, rep_alpha * d_sim + (1.0 - rep_alpha) * s_sim)
+                    mmr = lam * float(rel_scores[i]) - (1.0 - lam) * rep
+                    if mmr > alt_score:
+                        alt_score = mmr
+                        alt = i
+            if alt is not None:
+                best_i = alt
+        selected.append(best_i)
+        candidates.remove(best_i)
+        if per_doc_limit is not None and per_doc_ids is not None:
+            did = per_doc_ids[best_i]
+            counts[did] = counts.get(did, 0) + 1
     return selected
 
 
@@ -1035,7 +1178,7 @@ def search_query(req: SearchQuery):
         query_filter=flt,
         limit=max(50, req.top_m),
         with_payload=True,
-        with_vectors=False,
+        with_vectors=[SUMMARY_VECTOR_NAME] if req.mmr_stage1 else False,
         score_threshold=None,
         search_params=qm.SearchParams(exact=False, hnsw_ef=128),
     )
@@ -1043,31 +1186,54 @@ def search_query(req: SearchQuery):
     if summary_sparse_query is not None:
         summary_sparse_lookup = dict(zip(summary_sparse_query[0], summary_sparse_query[1]))
 
-    # Zbierz kandydatów po doc_id (unikalne) z hybrydową punktacją
-    cand_doc_scores: Dict[str, float] = {}
+    # Zbierz kandydatów po doc_id (unikalne) i przygotuj dane do hybrydowego MMR
+    doc_map: Dict[str, Dict[str, Any]] = {}
     for r in sum_search:
         payload = r.payload or {}
         did = payload.get("doc_id")
         if not did:
             continue
+        if did in doc_map:
+            continue
         dense_score = float(r.score or 0.0)
-        combined = dense_score
+        sparse_dot = 0.0
         if summary_sparse_lookup and payload.get("summary_sparse_indices") and payload.get("summary_sparse_values"):
-            sparse_score = 0.0
-            for idx_val, val_val in zip(
-                payload.get("summary_sparse_indices", []),
-                payload.get("summary_sparse_values", []),
-            ):
-                qv = summary_sparse_lookup.get(idx_val)
-                if qv is not None:
-                    sparse_score += qv * val_val
-            combined = req.dense_weight * dense_score + req.sparse_weight * sparse_score
-        if did not in cand_doc_scores or combined > cand_doc_scores[did]:
-            cand_doc_scores[did] = combined
+            sparse_dot = _sparse_dot(summary_sparse_lookup, payload.get("summary_sparse_indices", []), payload.get("summary_sparse_values", []))
+        vec_map = r.vector or {}
+        dense_vec = vec_map.get(SUMMARY_VECTOR_NAME)
+        if dense_vec is None:
+            dense_vec = []
+        doc_map[did] = {
+            "doc_id": did,
+            "dense_vec": dense_vec,
+            "sparse_idx": payload.get("summary_sparse_indices", []) or [],
+            "sparse_val": payload.get("summary_sparse_values", []) or [],
+            "dense_score": dense_score,
+            "sparse_score": sparse_dot,
+            "path": payload.get("path"),
+        }
 
-    cand_doc_ids = [doc_id for doc_id, _ in sorted(cand_doc_scores.items(), key=lambda item: item[1], reverse=True)]
-    if len(cand_doc_ids) > req.top_m:
-        cand_doc_ids = cand_doc_ids[: req.top_m]
+    if not doc_map:
+        return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
+
+    doc_items = list(doc_map.values())
+    dense_scores = [float(x["dense_score"]) for x in doc_items]
+    sparse_scores = [float(x["sparse_score"]) for x in doc_items]
+    dense_norm = _normalize(dense_scores, req.score_norm)
+    sparse_norm = _normalize(sparse_scores, req.score_norm)
+    hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
+
+    # Opcjonalny hybrydowy MMR na Etapie 1
+    if req.mmr_stage1 and len(doc_items) > 1:
+        rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
+        dense_vecs = [x["dense_vec"] for x in doc_items]
+        sparse_vecs = [(x["sparse_idx"], x["sparse_val"]) for x in doc_items]
+        mmr_idx = mmr_diversify_hybrid(dense_vecs, sparse_vecs, hybrid_rel, min(req.top_m, len(doc_items)), req.mmr_lambda, rep_alpha)
+        cand_doc_ids = [doc_items[i]["doc_id"] for i in mmr_idx]
+    else:
+        order = sorted(range(len(doc_items)), key=lambda i: hybrid_rel[i], reverse=True)
+        order = order[: min(req.top_m, len(order))]
+        cand_doc_ids = [doc_items[i]["doc_id"] for i in order]
 
     if not cand_doc_ids:
         return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
@@ -1087,60 +1253,87 @@ def search_query(req: SearchQuery):
         search_params=qm.SearchParams(exact=False, hnsw_ef=128),
     )
 
-    # Dywersyfikacja MMR na podstawie wektorów contentu i wyników score
-    mmr_candidates = list(cont_search)
-    sparse_dict: Dict[int, float] = {}
-    if content_sparse_query is not None:
-        q_idx, q_val = content_sparse_query
-        sparse_dict = dict(zip(q_idx, q_val))
+    # Przygotuj kandydatów do hybrydowego MMR z limitem per-doc
+    mmr_pool = []
+    for hit in cont_search:
+        payload = hit.payload or {}
+        dense_score = float(hit.score or 0.0)
+        sparse_dot = 0.0
+        if content_sparse_query is not None and payload.get("content_sparse_indices") and payload.get("content_sparse_values"):
+            q_lookup = dict(zip(content_sparse_query[0], content_sparse_query[1]))
+            sparse_dot = _sparse_dot(q_lookup, payload.get("content_sparse_indices", []), payload.get("content_sparse_values", []))
+        mmr_pool.append({
+            "hit": hit,
+            "doc_id": payload.get("doc_id", ""),
+            "dense_vec": (hit.vector or {}).get(CONTENT_VECTOR_NAME) or [],
+            "sparse_idx": payload.get("content_sparse_indices", []) or [],
+            "sparse_val": payload.get("content_sparse_values", []) or [],
+            "dense_score": dense_score,
+            "sparse_score": sparse_dot,
+        })
 
-    if mmr_candidates and req.top_k < len(mmr_candidates):
-        mat = []
-        scores = []
-        for hit in mmr_candidates:
-            vec_map = hit.vector or {}
-            vec = vec_map.get(CONTENT_VECTOR_NAME)
-            if vec is None:
-                continue
-            mat.append(vec)
-            scores.append(float(hit.score or 0.0))
-        if mat:
-            vecs_np = np.array(mat, dtype=float)
-            scores_np = np.array(scores, dtype=float)
-            mmr_idx = mmr_diversify(vecs_np, scores_np, req.top_k, lam=req.mmr_lambda)
-            mmr_candidates = [mmr_candidates[i] for i in mmr_idx]
-        else:
-            mmr_candidates = mmr_candidates[: req.top_k]
-    else:
-        mmr_candidates = mmr_candidates[: req.top_k]
+    if not mmr_pool:
+        return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
+
+    # normalizacja i hybrydowy relevance
+    dense_scores2 = [x["dense_score"] for x in mmr_pool]
+    sparse_scores2 = [x["sparse_score"] for x in mmr_pool]
+    dense_norm2 = _normalize(dense_scores2, req.score_norm)
+    sparse_norm2 = _normalize(sparse_scores2, req.score_norm)
+    rel2 = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm2, sparse_norm2)]
+
+    rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
+    dense_vecs2 = [x["dense_vec"] for x in mmr_pool]
+    sparse_vecs2 = [(x["sparse_idx"], x["sparse_val"]) for x in mmr_pool]
+    doc_ids2 = [x["doc_id"] for x in mmr_pool]
+
+    sel_idx = mmr_diversify_hybrid(
+        dense_vecs2,
+        sparse_vecs2,
+        rel2,
+        min(req.top_k, len(mmr_pool)),
+        req.mmr_lambda,
+        rep_alpha,
+        per_doc_ids=doc_ids2,
+        per_doc_limit=max(1, int(req.per_doc_limit)) if req.per_doc_limit and req.per_doc_limit > 0 else None,
+    )
+
+    selected = [mmr_pool[i] for i in sel_idx]
+    # finalne przeliczenie hybrydowego score i sortowanie malejąco
+    final_hits = []
+    for idx, item in zip(sel_idx, selected):
+        hit = item["hit"]
+        payload = hit.payload or {}
+        final_score = float(rel2[idx])
+        final_hits.append({
+            "hit": hit,
+            "score": float(final_score),
+            "payload": payload,
+        })
+    final_hits.sort(key=lambda x: x["score"], reverse=True)
 
     results: List[SearchHit] = []
-    for r in mmr_candidates:
-        payload = r.payload or {}
-        sparse_boost = 0.0
-        combined_score = float(r.score or 0.0)
-        if sparse_dict and payload.get("content_sparse_indices") and payload.get("content_sparse_values"):
-            for idx_val, val_val in zip(
-                payload.get("content_sparse_indices", []),
-                payload.get("content_sparse_values", []),
-            ):
-                qv = sparse_dict.get(idx_val)
-                if qv is not None:
-                    sparse_boost += qv * val_val
-            combined_score = (
-                req.dense_weight * combined_score + req.sparse_weight * sparse_boost
-            )
+    for fh in final_hits:
+        payload = fh["payload"]
         results.append(
             SearchHit(
                 doc_id=payload.get("doc_id", ""),
                 path=payload.get("path", ""),
                 section=payload.get("section"),
                 chunk_id=payload.get("chunk_id", 0),
-                score=combined_score,
+                score=float(fh["score"]),
                 snippet=(payload.get("text") or "").strip()[:500] if payload.get("text") else payload.get("summary", "")[:500],
                 summary=payload.get("summary"),
             )
         )
 
     took_ms = int((time.time() - t0) * 1000)
+    if settings.debug:
+        logger.debug(
+            "Search took %d ms | stage1_docs=%d stage2_candidates=%d returned=%d",
+            took_ms,
+            len(doc_map) if 'doc_map' in locals() else 0,
+            len(mmr_pool) if 'mmr_pool' in locals() else 0,
+            len(results),
+        )
     return SearchResponse(took_ms=took_ms, hits=results)
