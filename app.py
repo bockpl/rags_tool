@@ -1,6 +1,6 @@
 """
 RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
-Version: 0.4.0
+Version: 0.6.0
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
 
@@ -116,7 +116,7 @@ ADMIN_UI_HTML_TEMPLATE = """
 <html lang=\"en\">
 <head>
     <meta charset=\"utf-8\" />
-    <title>SummRAG Admin Console</title>
+    <title>rags_tool Admin Console</title>
     <style>
         :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
         body { margin: 0; padding: 24px; background: #f5f5f5; }
@@ -137,7 +137,7 @@ ADMIN_UI_HTML_TEMPLATE = """
 </head>
 <body>
     <div class=\"container\">
-        <h1>SummRAG Admin Console</h1>
+        <h1>rags_tool Admin Console</h1>
         <p class=\"note\">Operacje wysyłają nagłówek <code>X-Admin-UI: 1</code>, aby wymusić tryb debug na serwerze.</p>
         <label for=\"operation\">Wybierz operację</label>
         <select id=\"operation\"></select>
@@ -285,7 +285,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "search-query",
         "path": "/search/query",
         "method": "POST",
-        "body": "{\n  \"query\": \"Jak działa SummRAG?\",\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"result_format\": \"flat\"\n}",
+        "body": "{\n  \"query\": \"Jak działa rags_tool?\",\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"merge_chunks\": true,\n  \"merge_group_budget_tokens\": 1200,\n  \"max_merged_per_group\": 1,\n  \"expand_neighbors\": 1,\n  \"result_format\": \"blocks\"\n}",
     },
 ]
 
@@ -574,6 +574,152 @@ def _cosine_dense(a: List[float], b: List[float]) -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# MERGING HELPERS — build merged blocks from contiguous chunks
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _approx_tokens(s: str) -> int:
+    # Rough heuristic: ~4 chars per token
+    return max(1, len(s) // 4)
+
+
+def build_merged_blocks(
+    final_hits: List[Dict[str, Any]],
+    merge_group_budget_tokens: int,
+    max_merged_per_group: int,
+    join_delim: str,
+    summary_mode: str = "first",
+    expand_neighbors: int = 0,
+    neighbor_index: Optional[Dict[Tuple[str, Optional[str], int], Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    # Group by (doc_id, section)
+    groups: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+    for fh in final_hits:
+        payload = fh.get("payload") or {}
+        did = payload.get("doc_id") or ""
+        sec = payload.get("section")
+        if not did:
+            continue
+        key = (did, sec)
+        groups.setdefault(key, []).append(fh)
+
+    blocks: List[Dict[str, Any]] = []
+    for (doc_id, section), items in groups.items():
+        # sort by chunk_id ascending
+        items.sort(key=lambda x: int((x.get("payload") or {}).get("chunk_id", 0)))
+
+        # find contiguous runs
+        runs: List[List[Dict[str, Any]]] = []
+        cur_run: List[Dict[str, Any]] = []
+        for cur in items:
+            if not cur_run:
+                cur_run = [cur]
+            else:
+                prev = cur_run[-1]
+                prev_id = int((prev.get("payload") or {}).get("chunk_id", 0))
+                cur_id = int((cur.get("payload") or {}).get("chunk_id", 0))
+                if cur_id == prev_id + 1:
+                    cur_run.append(cur)
+                else:
+                    runs.append(cur_run)
+                    cur_run = [cur]
+        if cur_run:
+            runs.append(cur_run)
+
+        # pick top runs by max score
+        runs.sort(key=lambda r: max(float(x.get("score", 0.0)) for x in r), reverse=True)
+        take_n = max(1, int(max_merged_per_group))
+        selected_runs = runs[:take_n]
+
+        seen_summary = False
+        for run in selected_runs:
+            # Optionally expand contiguous run with neighbors from candidate pool
+            if expand_neighbors and neighbor_index:
+                # Determine group identifiers
+                p0 = (run[0].get("payload") or {})
+                did = p0.get("doc_id") or ""
+                sec = p0.get("section")
+                # Collect existing chunk_ids in run
+                existing_ids = {int((r.get("payload") or {}).get("chunk_id", -10)) for r in run}
+                # Compute current bounds
+                cur_first = min(existing_ids) if existing_ids else None
+                cur_last = max(existing_ids) if existing_ids else None
+                # Extend to the left
+                if cur_first is not None:
+                    for step in range(1, int(expand_neighbors) + 1):
+                        cid = cur_first - step
+                        key = (did, sec, cid)
+                        if key in neighbor_index:
+                            if cid not in existing_ids:
+                                nb = neighbor_index[key]
+                                run.insert(0, {"payload": nb.get("payload", {}), "score": float(nb.get("score", 0.0))})
+                                existing_ids.add(cid)
+                                cur_first = cid
+                        else:
+                            break  # keep contiguity
+                # Extend to the right
+                if cur_last is not None:
+                    for step in range(1, int(expand_neighbors) + 1):
+                        cid = cur_last + step
+                        key = (did, sec, cid)
+                        if key in neighbor_index:
+                            if cid not in existing_ids:
+                                nb = neighbor_index[key]
+                                run.append({"payload": nb.get("payload", {}), "score": float(nb.get("score", 0.0))})
+                                existing_ids.add(cid)
+                                cur_last = cid
+                        else:
+                            break  # keep contiguity
+            text_parts: List[str] = []
+            scores: List[float] = []
+            used_tokens = 0
+            first_chunk_id = int((run[0].get("payload") or {}).get("chunk_id", 0))
+            last_chunk_id = first_chunk_id
+            for r in run:
+                payload = r.get("payload") or {}
+                chunk_text = (payload.get("text") or "").strip()
+                if not chunk_text:
+                    continue
+                t = _approx_tokens(chunk_text)
+                # Always allow first piece, then enforce budget
+                if text_parts and used_tokens + t > int(merge_group_budget_tokens):
+                    break
+                text_parts.append(chunk_text)
+                scores.append(float(r.get("score", 0.0)))
+                last_chunk_id = int(payload.get("chunk_id", last_chunk_id))
+                used_tokens += t
+
+            if not text_parts:
+                continue
+
+            # summary per document/section according to summary_mode
+            payload0 = (run[0].get("payload") or {})
+            if summary_mode == "none":
+                block_summary = None
+            elif summary_mode == "first":
+                block_summary = payload0.get("summary") if not seen_summary else None
+                seen_summary = True
+            else:  # "all"
+                block_summary = payload0.get("summary")
+
+            blocks.append(
+                {
+                    "doc_id": doc_id,
+                    "path": payload0.get("path", ""),
+                    "section": section,
+                    "first_chunk_id": first_chunk_id,
+                    "last_chunk_id": last_chunk_id,
+                    "score": max(scores) if scores else 0.0,
+                    "summary": block_summary,
+                    "text": join_delim.join(text_parts).strip(),
+                    "token_estimate": used_tokens,
+                }
+            )
+
+    blocks.sort(key=lambda b: float(b.get("score", 0.0)), reverse=True)
+    return blocks
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # QDRANT — KOLEKCJA
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -662,55 +808,74 @@ class SummariesGenerateRequest(BaseModel):
 
 
 class SearchQuery(BaseModel):
-    query: str
-    top_m: int = 100  # etap streszczeń
-    top_k: int = 10   # wynik końcowy
-    mode: str = "auto"  # auto|current|archival|all
-    use_hybrid: bool = True
-    dense_weight: float = 0.6
-    sparse_weight: float = 0.4
-    mmr_lambda: float = DEFAULT_MMR_LAMBDA
-    per_doc_limit: int = DEFAULT_PER_DOC_LIMIT
-    score_norm: str = DEFAULT_SCORE_NORM  # minmax|zscore|none
-    rep_alpha: Optional[float] = None  # fallback to dense_weight
-    mmr_stage1: bool = True
+    query: str = Field(..., description="User question in natural language. Keep it concise; no tool/system instructions.")
+    top_m: int = Field(100, description="Stage-1 (summaries) candidate document count. Typical 50–200.")
+    top_k: int = Field(10, description="Final result count after Stage-2 selection. Typical 5–10.")
+    mode: str = Field("auto", description="Retrieval mode: auto|current|archival|all. 'current' filters is_active=true; 'archival' false.")
+    use_hybrid: bool = Field(True, description="Enable hybrid scoring (dense + TF-IDF) for query.")
+    dense_weight: float = Field(0.6, description="Weight of dense similarity in hybrid relevance [0..1].")
+    sparse_weight: float = Field(0.4, description="Weight of sparse (TF-IDF) similarity in hybrid relevance [0..1].")
+    mmr_lambda: float = Field(DEFAULT_MMR_LAMBDA, description="MMR relevance-vs-diversity balance [0..1]. Higher = more relevance.")
+    per_doc_limit: int = Field(DEFAULT_PER_DOC_LIMIT, description="Max results per single document in Stage-2.")
+    score_norm: str = Field(DEFAULT_SCORE_NORM, description="Score normalization: minmax|zscore|none.")
+    rep_alpha: Optional[float] = Field(None, description="Redundancy alpha in hybrid MMR (dense contribution). Defaults to dense_weight.")
+    mmr_stage1: bool = Field(True, description="Apply hybrid MMR already at Stage-1 (summaries).")
     # Controls duplication of document summary in results
-    summary_mode: str = "first"  # none|first|all
-    # Controls shape of response: flat list vs grouped per document
-    result_format: str = "flat"  # flat|grouped
+    summary_mode: str = Field("first", description="Document summary duplication: none|first|all. 'first' shows once per doc.")
+    # Optional merging of adjacent chunks into larger blocks
+    merge_chunks: bool = Field(False, description="If true, also build merged blocks per (doc_id, section).")
+    merge_group_budget_tokens: int = Field(1200, description="Approx token budget per merged block (~4 chars/token).")
+    max_merged_per_group: int = Field(1, description="Max merged blocks to return for each (doc_id, section) group.")
+    block_join_delimiter: str = Field("\n\n", description="Delimiter used when concatenating contiguous chunks in a merged block.")
+    expand_neighbors: int = Field(0, description="When merging, also try to include up to N missing adjacent chunks from candidates (mmr_pool). 0 disables.")
+    # Controls shape of response: flat list vs grouped per document vs blocks
+    result_format: str = Field("flat", description="Response shape: flat|grouped|blocks. For tools, 'blocks' is recommended.")
 
 
 class SearchHit(BaseModel):
-    doc_id: str
-    path: str
-    section: Optional[str] = None
-    chunk_id: int
-    score: float
-    snippet: str
-    summary: Optional[str] = None
+    doc_id: str = Field(..., description="Stable document identifier (sha1 over absolute path).")
+    path: str = Field(..., description="Absolute document path (for citation).")
+    section: Optional[str] = Field(default=None, description="Optional document section identifier, if present.")
+    chunk_id: int = Field(..., description="Chunk index within the document (0-based).")
+    score: float = Field(..., description="Hybrid relevance score (normalized according to score_norm).")
+    snippet: str = Field(..., description="Short text snippet of the chunk or summary fallback.")
+    summary: Optional[str] = Field(default=None, description="Document-level summary (presence controlled by summary_mode).")
 
 
 class SearchResponse(BaseModel):
-    took_ms: int
-    hits: List[SearchHit]
+    took_ms: int = Field(..., description="Total search latency in milliseconds.")
+    hits: List[SearchHit] = Field(..., description="Flat hit list (chunk-level).")
     # Optional grouped representation (when requested)
-    groups: Optional[List["SearchGroup"]] = None
+    groups: Optional[List["SearchGroup"]] = Field(default=None, description="Grouped results per document (summary + chunks).")
+    # Optional merged blocks representation
+    blocks: Optional[List["MergedBlock"]] = Field(default=None, description="Merged blocks per (doc_id, section). Prefer for tool use.")
 
 
 class SearchChunk(BaseModel):
-    chunk_id: int
-    score: float
-    snippet: str
+    chunk_id: int = Field(..., description="Chunk index within the document (0-based).")
+    score: float = Field(..., description="Hybrid relevance score (normalized).")
+    snippet: str = Field(..., description="Short text snippet of the chunk.")
 
 
 class SearchGroup(BaseModel):
-    doc_id: str
-    path: str
-    summary: Optional[str] = None
-    score: float
-    chunks: List[SearchChunk]
+    doc_id: str = Field(..., description="Stable document identifier.")
+    path: str = Field(..., description="Absolute document path.")
+    summary: Optional[str] = Field(default=None, description="Document-level summary (single copy per document).")
+    score: float = Field(..., description="Max score among group's chunks.")
+    chunks: List[SearchChunk] = Field(..., description="Chunk-level results belonging to this document.")
 
-# Rebuild forward refs for Pydantic v2
+class MergedBlock(BaseModel):
+    doc_id: str = Field(..., description="Stable document identifier.")
+    path: str = Field(..., description="Absolute document path.")
+    section: Optional[str] = Field(default=None, description="Optional section identifier.")
+    first_chunk_id: int = Field(..., description="First chunk id (inclusive) in this merged block.")
+    last_chunk_id: int = Field(..., description="Last chunk id (inclusive) in this merged block.")
+    score: float = Field(..., description="Block score = max score among its member chunks.")
+    summary: Optional[str] = Field(default=None, description="Document/section summary if requested by summary_mode.")
+    text: str = Field(..., description="Merged textual content of the block (joined contiguous chunks).")
+    token_estimate: Optional[int] = Field(default=None, description="Heuristic token length (~4 chars/token).")
+
+# Rebuild forward refs again after defining MergedBlock
 SearchResponse.model_rebuild()
 
 
@@ -766,7 +931,7 @@ async def admin_ui_debug_middleware(request: Request, call_next):
     include_in_schema=False,
     response_class=HTMLResponse,
     summary="Panel administracyjny",
-    description="Statyczny panel HTML do testowania i debugowania endpointów SummRAG.",
+    description="Statyczny panel HTML do testowania i debugowania endpointów rags_tool.",
 )
 def admin_console():
     operations = build_admin_operations()
@@ -781,7 +946,7 @@ def admin_console():
     response_model=About,
     include_in_schema=False,
     summary="Informacje o aplikacji",
-    description="Zwraca metadane serwisu SummRAG (nazwa, wersja, autor, opis).",
+    description="Zwraca metadane serwisu rags_tool (nazwa, wersja, autor, opis).",
 )
 def about():
     return About()
@@ -856,7 +1021,7 @@ def summaries_generate(req: SummariesGenerateRequest):
     include_in_schema=False,
     summary="Pełny ingest korpusu",
     description=(
-        "Buduje indeks SummRAG: parsuje dokumenty, tworzy streszczenia,"
+        "Buduje indeks rags_tool: parsuje dokumenty, tworzy streszczenia,"
         " embeddingi oraz zapisuje punkty (wraz z TF-IDF) do Qdrant."
     ),
 )
@@ -1146,10 +1311,18 @@ def mmr_diversify_hybrid(
 @app.post(
     "/search/query",
     response_model=SearchResponse,
-    summary="Zapytanie SummRAG",
+    summary="rags_tool search (LLM tool)",
+    operation_id="rags_tool_search",
+    tags=["tools"],
     description=(
-        "Dwustopniowe wyszukiwanie: najpierw streszczenia, następnie pełne teksty"
-        " dokumentów, z opcjonalną hybrydą TF-IDF i prostym MMR."
+        "Two-stage retrieval for LLM tools. Stage-1 ranks document summaries; "
+        "Stage-2 ranks full-text chunks within selected documents using hybrid scoring (dense+TF-IDF) and MMR.\n\n"
+        "Usage guidance for tools:\n"
+        "- Prefer `result_format=\"blocks\"` with `merge_chunks=true` to receive consolidated blocks.\n"
+        "- Set `top_k` to 5–10 and keep defaults for other params unless you know why to change them.\n"
+        "- `summary_mode=first` includes a single document summary per document/section.\n"
+        "- `mode=auto` auto-detects current/archival, or force with `current|archival|all`.\n"
+        "Returned fields: use `blocks[].text` as evidence; cite `blocks[].path` and chunk id range."
     ),
 )
 def search_query(req: SearchQuery):
@@ -1335,6 +1508,59 @@ def search_query(req: SearchQuery):
         })
     final_hits.sort(key=lambda x: x["score"], reverse=True)
 
+    # Optional: build merged blocks before shaping final response
+    blocks_payload: Optional[List[MergedBlock]] = None
+    if req.merge_chunks or req.result_format == "blocks":
+        neighbor_index = None
+        if req.expand_neighbors and req.expand_neighbors > 0:
+            # Build neighbor index from candidate pool (mmr_pool) with hybrid scores (rel2)
+            neighbor_index = {}
+            for idx2, item in enumerate(mmr_pool):
+                payload = (item.get("hit").payload if item.get("hit") else {}) or {}
+                did = payload.get("doc_id") or ""
+                sec = payload.get("section")
+                cid = payload.get("chunk_id")
+                if not did or cid is None:
+                    continue
+                score2 = float(rel2[idx2]) if idx2 < len(rel2) else float(item.get("dense_score", 0.0))
+                neighbor_index[(did, sec, int(cid))] = {"payload": payload, "score": score2}
+        raw_blocks = build_merged_blocks(
+            final_hits,
+            merge_group_budget_tokens=req.merge_group_budget_tokens,
+            max_merged_per_group=req.max_merged_per_group,
+            join_delim=req.block_join_delimiter,
+            summary_mode=req.summary_mode,
+            expand_neighbors=max(0, int(req.expand_neighbors or 0)),
+            neighbor_index=neighbor_index,
+        )
+        blocks_payload = [
+            MergedBlock(
+                doc_id=b["doc_id"],
+                path=b.get("path", ""),
+                section=b.get("section"),
+                first_chunk_id=int(b.get("first_chunk_id", 0)),
+                last_chunk_id=int(b.get("last_chunk_id", 0)),
+                score=float(b.get("score", 0.0)),
+                summary=b.get("summary"),
+                text=b.get("text", ""),
+                token_estimate=int(b.get("token_estimate")) if b.get("token_estimate") is not None else None,
+            )
+            for b in raw_blocks
+        ]
+
+    # If only blocks requested, return early
+    if req.result_format == "blocks":
+        took_ms = int((time.time() - t0) * 1000)
+        if settings.debug:
+            logger.debug(
+                "Search took %d ms | stage1_docs=%d stage2_candidates=%d returned_blocks=%d",
+                took_ms,
+                len(doc_map) if 'doc_map' in locals() else 0,
+                len(mmr_pool) if 'mmr_pool' in locals() else 0,
+                len(blocks_payload or []),
+            )
+        return SearchResponse(took_ms=took_ms, hits=[], groups=None, blocks=blocks_payload)
+
     # Build response according to requested format
     results: List[SearchHit] = []
     groups_payload: Optional[List[Dict[str, Any]]] = None
@@ -1416,4 +1642,4 @@ def search_query(req: SearchQuery):
             len(mmr_pool) if 'mmr_pool' in locals() else 0,
             len(results),
         )
-    return SearchResponse(took_ms=took_ms, hits=results, groups=groups_payload)
+    return SearchResponse(took_ms=took_ms, hits=results, groups=groups_payload, blocks=blocks_payload)
