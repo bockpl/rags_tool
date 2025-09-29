@@ -1,6 +1,6 @@
 """
 RAGS_tool — dwustopniowy RAG ze streszczeniami (FastAPI + Qdrant)
-Version: 0.7.2
+Version: 0.9.0
 Author: Seweryn Sitarski (seweryn.sitarski@gmail.com) with support from Kat
 License: MIT
 
@@ -123,7 +123,7 @@ def _scan_files(base: pathlib.Path, pattern: str, recursive: bool) -> List[pathl
     return [p for p in iterator if p.is_file() and p.suffix.lower() in SUPPORTED_EXT]
 
 def _collect_documents(file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
-    """Parse files, split into chunks, summarize and prepare corpora."""
+    """Parse files, split into section-aware chunks, summarize and prepare corpora."""
     all_chunks: List[str] = []
     summary_corpus: List[str] = []
     doc_records: List[Dict[str, Any]] = []
@@ -131,7 +131,9 @@ def _collect_documents(file_paths: List[pathlib.Path], chunk_tokens: int, chunk_
     for path in file_paths:
         logger.debug("Processing document %s", path)
         raw = extract_text(path)
-        chunks = chunk_text(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap)
+        # Prefer section-aware chunking for regulation-like documents
+        chunk_items = chunk_text_by_sections(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap)
+        chunks = chunk_items
         if not chunks:
             logger.debug("Document %s produced no chunks; skipping", path)
             continue
@@ -148,7 +150,7 @@ def _collect_documents(file_paths: List[pathlib.Path], chunk_tokens: int, chunk_
             "summary_sparse_text": summary_sparse_text,
         }
         doc_records.append(rec)
-        all_chunks.extend(chunks)
+        all_chunks.extend([c.get("text", "") for c in chunks])
         if summary_sparse_text:
             summary_corpus.append(summary_sparse_text)
         logger.debug(
@@ -230,10 +232,12 @@ def _build_and_upsert_points(
         summary_sparse_text = rec["summary_sparse_text"]
 
         summary_dense_vec = embed_text([doc_summary])[0]
-        content_vecs = embed_text(chunks)
+        content_texts = [c.get("text", c) if isinstance(c, dict) else str(c) for c in chunks]
+        content_vecs = embed_text(content_texts)
 
         if enable_sparse:
-            sparse_chunks = tfidf_vector(chunks, content_vec)
+            # TF-IDF expects plain strings, not dict items
+            sparse_chunks = tfidf_vector(content_texts, content_vec)
             if summary_vec is not None and summary_sparse_text:
                 summary_sparse = tfidf_vector([summary_sparse_text], summary_vec, path=SUMMARY_VECTORIZER_PATH)[0]
             else:
@@ -242,7 +246,13 @@ def _build_and_upsert_points(
             sparse_chunks = [([], []) for _ in chunks]
             summary_sparse = ([], [])
 
-        for i, chunk in enumerate(chunks):
+        for i, chunk_item in enumerate(chunks):
+            if isinstance(chunk_item, dict):
+                chunk_text_val = chunk_item.get("text", "")
+                section_label = chunk_item.get("section")
+            else:
+                chunk_text_val = str(chunk_item)
+                section_label = None
             pid = int(str(int(sha1(f"{doc_id}:{i}")[0:12], 16))[:12])
             payload = {
                 "doc_id": doc_id,
@@ -250,9 +260,11 @@ def _build_and_upsert_points(
                 "chunk_id": i,
                 "is_active": True,
                 "summary": doc_summary,
-                "text": chunk,
+                "text": chunk_text_val,
                 "signature": doc_signature,
             }
+            if section_label:
+                payload["section"] = section_label
 
             vectors: Dict[str, Any] = {
                 CONTENT_VECTOR_NAME: content_vecs[i],
@@ -513,6 +525,327 @@ def chunk_text(text: str, target_tokens: int = 900, overlap_tokens: int = 150) -
             chunks.extend(_split_text_by_tokens(buf, target_tokens, overlap_tokens))
 
     return chunks
+
+
+# ——— Section-aware segmentation (Polish regulations) ———
+
+CHAPTER_RE = re.compile(r"^\s*Rozdział\s+([IVXLC\d]+)\b.*", re.IGNORECASE)
+PARAGRAPH_RE = re.compile(r"^\s*§\s*(\d+[a-zA-Z]?)\b\s*(.*)$")
+ATTACHMENT_RE = re.compile(r"^\s*Załącznik(\s+nr\s+\d+)?\b.*", re.IGNORECASE)
+REGULAMIN_RE = re.compile(r"^\s*REGULAMIN\b.*", re.IGNORECASE)
+
+# Enumeration (points/subpoints) markers within paragraphs
+ENUM_NUM_RE = re.compile(r"^\s*(\d{1,3})[\.)]\s+(.*)$")  # e.g. '1) ...' or '2. ...'
+ENUM_LIT_RE = re.compile(r"^\s*(?:lit\.)?\s*([a-ząćęłńóśźż])[\)]\s+(.*)$", re.IGNORECASE)  # 'a) ...' or 'lit. b) ...'
+ENUM_ROM_RE = re.compile(r"^\s*((?:[ivx]+|[IVX]+))[\)]\s+(.*)$")  # 'i) ...' / 'IV) ...'
+ENUM_DASH_RE = re.compile(r"^\s*[•\-–—]\s+(.*)$")  # bullet/tiret lines
+
+
+def _segment_polish_sections(text: str) -> List[Tuple[str, str]]:
+    """Heuristically segment Polish regulation-like documents into sections.
+
+    Recognizes headers such as:
+    - "Rozdział N" (optionally followed by a subtitle line)
+    - Paragraph markers "§ N" (used as sub-sections under current chapter)
+    - "Załącznik ..." blocks
+    - "REGULAMIN" header
+
+    Returns a list of (section_label, section_text) without crossing boundaries
+    between identified sections. Falls back to a single preamble section when
+    no markers are found.
+    """
+    lines = text.splitlines()
+    n = len(lines)
+    sections: List[Tuple[str, str]] = []
+
+    current_top: Optional[str] = None
+    current_label: Optional[str] = None
+    buffer: List[str] = []
+
+    def flush():
+        nonlocal buffer, current_label
+        if buffer:
+            body = "\n".join(buffer).strip()
+            if body:
+                label = current_label or current_top or "Preambuła"
+                sections.append((label, body))
+        buffer = []
+
+    i = 0
+    while i < n:
+        line = lines[i]
+
+        # Attachments
+        if ATTACHMENT_RE.match(line or ""):
+            flush()
+            current_top = line.strip()
+            current_label = current_top
+            i += 1
+            continue
+
+        # Chapters
+        m_ch = CHAPTER_RE.match(line or "")
+        if m_ch:
+            flush()
+            # try to capture a subtitle on the next non-empty, non-header line
+            subtitle = ""
+            j = i + 1
+            while j < n and not (lines[j] or "").strip():
+                j += 1
+            if j < n:
+                nxt = lines[j]
+                if not (PARAGRAPH_RE.match(nxt or "") or CHAPTER_RE.match(nxt or "") or ATTACHMENT_RE.match(nxt or "")):
+                    subtitle = nxt.strip()
+            top = line.strip()
+            if subtitle:
+                top = f"{top} — {subtitle}"
+            current_top = top
+            current_label = current_top
+            i += 1
+            continue
+
+        # Paragraphs (§)
+        m_par = PARAGRAPH_RE.match(line or "")
+        if m_par:
+            flush()
+            para_no = m_par.group(1)
+            tail = (m_par.group(2) or "").strip()
+            lab = f"§ {para_no}"
+            if tail:
+                lab = f"{lab} — {tail}"
+            current_label = f"{current_top} {lab}" if current_top else lab
+            i += 1
+            continue
+
+        # Main header "REGULAMIN"
+        if REGULAMIN_RE.match(line or ""):
+            flush()
+            current_top = "REGULAMIN"
+            current_label = current_top
+            i += 1
+            continue
+
+        # default: accumulate
+        buffer.append(line)
+        i += 1
+
+    flush()
+
+    # If no sections recognized, return single block
+    if not sections:
+        return [("Preambuła", text)]
+    return sections
+
+
+def chunk_text_by_sections(
+    text: str,
+    target_tokens: int = 900,
+    overlap_tokens: int = 150,
+) -> List[Dict[str, Any]]:
+    """Split text into section-constrained chunks.
+
+    - Detects legal-like sections (Rozdział/§/Załącznik/REGULAMIN).
+    - For sections being paragraphs ("§ …"), further detects enumerations
+      (points and subpoints) such as numeric points (1), letter points (a)),
+      roman points (i)) and dash bullets, and splits accordingly.
+    - Chunks within each (sub)section independently using token-aware packing.
+    - Returns list of {"text": str, "section": str} dicts.
+    """
+    segments = _segment_polish_sections(text)
+    out: List[Dict[str, Any]] = []
+    for label, body in segments:
+        # If the label corresponds to a paragraph ("§ …" appears in label),
+        # attempt to split its content into enumeration-based sub-sections.
+        if "§" in label:
+            enum_splits = _split_enumerations_in_paragraph(body)
+            if enum_splits:
+                for suffix, subtext in enum_splits:
+                    full_label = f"{label} {suffix}".strip()
+                    parts = chunk_text(subtext, target_tokens=target_tokens, overlap_tokens=overlap_tokens)
+                    for p in parts:
+                        out.append({"text": p, "section": full_label})
+                continue
+        # Fallback for non-paragraph sections or when no enumerations found
+        parts = chunk_text(body, target_tokens=target_tokens, overlap_tokens=overlap_tokens)
+        for p in parts:
+            out.append({"text": p, "section": label})
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ENUMERATION SPLITTING — points and subpoints inside paragraph sections (§)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _match_enum_marker(line: str) -> Optional[Tuple[str, str, str]]:
+    """Return tuple (kind, tag, rest) if line starts with an enumeration marker.
+
+    kind ∈ {"num", "lit", "rom", "dash"}
+    tag  = normalized label element (e.g., '3', 'b', 'iv', 'dash')
+    rest = remaining text after the marker.
+    """
+    m = ENUM_NUM_RE.match(line)
+    if m:
+        return ("num", m.group(1), m.group(2))
+    m = ENUM_LIT_RE.match(line)
+    if m:
+        return ("lit", m.group(1).lower(), m.group(2))
+    m = ENUM_ROM_RE.match(line)
+    if m:
+        return ("rom", m.group(1), m.group(2))
+    m = ENUM_DASH_RE.match(line)
+    if m:
+        return ("dash", "dash", m.group(1))
+    return None
+
+
+def _should_split(count: int, contents: List[str], min_count: int = 2, min_chars: int = 20) -> bool:
+    """Heuristic: split only if there are enough items and they are not trivial."""
+    if count < min_count:
+        return False
+    long_enough = sum(1 for s in contents if len((s or "").strip()) >= min_chars)
+    return long_enough >= min_count
+
+
+def _split_enumerations_in_paragraph(body: str) -> List[Tuple[str, str]]:
+    """Split a paragraph ("§ …") body into logical sub-sections based on enumerations.
+
+    Strategy (three levels):
+    - Level 1: numeric points (1) 2. …) → label 'pkt X'
+    - Level 2: letter points (a) b) … or 'lit. a)') → label 'lit. y)'
+    - Level 3: roman (i) ii) …) or dash bullets '–'/'-'/'•' → label 'roman i)' or 'tiret N'
+
+    Returns list of (suffix_label, text). If no sensible split is found,
+    returns an empty list (caller will fall back to chunking the whole section).
+    """
+    lines = body.splitlines()
+    # Data structures to collect hierarchy in encounter order
+    nums: List[Dict[str, Any]] = []
+    current_num: Optional[Dict[str, Any]] = None
+    current_lit: Optional[Dict[str, Any]] = None
+    current_sub: Optional[Dict[str, Any]] = None
+
+    def new_num(tag: str, first: str):
+        nonlocal current_num, current_lit, current_sub
+        blk = {"tag": tag, "content": [first] if first else [], "lits": [], "subs": [], "sub_counter": 0}
+        nums.append(blk)
+        current_num = blk
+        current_lit = None
+        current_sub = None
+
+    def new_lit(tag: str, first: str):
+        nonlocal current_lit, current_sub
+        if current_num is None:
+            return
+        blk = {"tag": tag, "content": [first] if first else [], "subs": [], "sub_counter": 0}
+        current_num["lits"].append(blk)
+        current_lit = blk
+        current_sub = None
+
+    def new_sub(kind: str, tag: str, first: str):
+        nonlocal current_sub
+        parent = current_lit if current_lit is not None else current_num
+        if parent is None:
+            return
+        if kind == "dash":
+            parent["sub_counter"] += 1
+            tag = str(parent["sub_counter"])  # ordinal for tyrets
+        blk = {"kind": kind, "tag": tag, "content": [first] if first else []}
+        parent["subs"].append(blk)
+        current_sub = blk
+
+    for raw in lines:
+        line = raw.rstrip()
+        m = _match_enum_marker(line)
+        if m:
+            kind, tag, rest = m
+            if kind == "num":
+                new_num(tag, rest)
+                continue
+            if kind == "lit":
+                new_lit(tag, rest)
+                continue
+            # roman/dash become subpoints of the deepest available parent
+            new_sub(kind, tag, rest)
+            continue
+        # Non-marker line: append to the deepest open block
+        if current_sub is not None:
+            current_sub["content"].append(line)
+        elif current_lit is not None:
+            current_lit["content"].append(line)
+        elif current_num is not None:
+            current_num["content"].append(line)
+        else:
+            # No enumeration seen yet — do not accumulate preamble; prefer fallback
+            pass
+
+    # Decide splitting granularity
+    results: List[Tuple[str, str]] = []
+
+    def serialize_sub(sub: Dict[str, Any]) -> str:
+        return "\n".join(sub.get("content", []))
+
+    def serialize_lit(lit: Dict[str, Any], deep: bool) -> List[Tuple[str, str]]:
+        if deep and _should_split(len(lit["subs"]), [serialize_sub(s) for s in lit["subs"]]):
+            out: List[Tuple[str, str]] = []
+            # Third-level split
+            for sub in lit["subs"]:
+                if sub.get("kind") == "rom":
+                    suffix = f"lit. {lit['tag']}) roman {sub['tag']})"
+                else:
+                    suffix = f"lit. {lit['tag']}) tiret {sub['tag']}"
+                out.append((suffix, serialize_sub(sub)))
+            return out
+        # No third-level split: return lit as single block
+        text_parts = []
+        if lit.get("content"):
+            text_parts.append("\n".join(lit["content"]))
+        # inline subs if present
+        for sub in lit.get("subs", []):
+            text_parts.append(serialize_sub(sub))
+        return [(f"lit. {lit['tag']})", "\n".join([t for t in text_parts if t]))]
+
+    def serialize_num(num: Dict[str, Any]) -> List[Tuple[str, str]]:
+        # Prefer splitting by letters if there is a real list
+        lit_texts = ["\n".join(l.get("content", [])) for l in num.get("lits", [])]
+        if _should_split(len(num["lits"]), lit_texts):
+            out: List[Tuple[str, str]] = []
+            for lit in num["lits"]:
+                out.extend(serialize_lit(lit, deep=True))
+            return out
+        # Else consider splitting by third-level under the numeric point
+        sub_texts = [serialize_sub(s) for s in num.get("subs", [])]
+        if _should_split(len(num["subs"]), sub_texts):
+            out = []
+            for sub in num["subs"]:
+                if sub.get("kind") == "rom":
+                    suffix = f"pkt {num['tag']} roman {sub['tag']})"
+                else:
+                    suffix = f"pkt {num['tag']} tiret {sub['tag']}"
+                out.append((suffix, serialize_sub(sub)))
+            return out
+        # No inner split: numeric point as a whole
+        text_parts = []
+        if num.get("content"):
+            text_parts.append("\n".join(num["content"]))
+        for lit in num.get("lits", []):
+            # inline lit content (including their subs)
+            for suffix, txt in serialize_lit(lit, deep=False):
+                text_parts.append(txt)
+        for sub in num.get("subs", []):
+            text_parts.append(serialize_sub(sub))
+        return [(f"pkt {num['tag']}", "\n".join([t for t in text_parts if t]))]
+
+    # If we found multiple numeric points, split at least by numeric level
+    if _should_split(len(nums), ["\n".join(n.get("content", [])) for n in nums]):
+        for num in nums:
+            results.extend(serialize_num(num))
+    else:
+        # Not enough structure detected — return empty to signal fallback
+        results = []
+
+    # Filter out empty blocks
+    final = [(suffix, txt.strip()) for (suffix, txt) in results if (txt or "").strip()]
+    return final
 
 
 SUMMARY_PROMPT = (
@@ -1084,7 +1417,6 @@ def build_merged_blocks(
         take_n = max(1, int(max_merged_per_group))
         selected_runs = runs[:take_n]
 
-        seen_summary = False
         for run in selected_runs:
             # Optionally expand contiguous run with neighbors from candidate pool
             if expand_neighbors and neighbor_index:
@@ -1145,15 +1477,9 @@ def build_merged_blocks(
             if not text_parts:
                 continue
 
-            # summary per document/section according to summary_mode
+            # Capture document summary, but defer inclusion policy until after sorting
             payload0 = (run[0].get("payload") or {})
-            if summary_mode == "none":
-                block_summary = None
-            elif summary_mode == "first":
-                block_summary = payload0.get("summary") if not seen_summary else None
-                seen_summary = True
-            else:  # "all"
-                block_summary = payload0.get("summary")
+            doc_summary_val = payload0.get("summary")
 
             blocks.append(
                 {
@@ -1163,13 +1489,33 @@ def build_merged_blocks(
                     "first_chunk_id": first_chunk_id,
                     "last_chunk_id": last_chunk_id,
                     "score": max(scores) if scores else 0.0,
-                    "summary": block_summary,
+                    "summary": None,  # will be assigned after global sorting based on policy
+                    "doc_summary": doc_summary_val,  # internal key used for policy
                     "text": join_delim.join(text_parts).strip(),
                     "token_estimate": used_tokens,
                 }
             )
 
+    # Sort globally by score so that summary_mode='first' lands on top-scoring block per doc
     blocks.sort(key=lambda b: float(b.get("score", 0.0)), reverse=True)
+
+    # Apply summary inclusion policy per document (not per section)
+    if summary_mode == "none":
+        for b in blocks:
+            b["summary"] = None
+    elif summary_mode == "first":
+        seen_docs: set = set()
+        for b in blocks:
+            did = b.get("doc_id")
+            if did not in seen_docs:
+                b["summary"] = b.get("doc_summary")
+                seen_docs.add(did)
+            else:
+                b["summary"] = None
+    else:  # "all"
+        for b in blocks:
+            b["summary"] = b.get("doc_summary")
+
     return blocks
 
 
@@ -1197,9 +1543,62 @@ def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = Non
         else None
     )
     try:
-        qdrant.get_collection(collection)
-        logger.debug("Collection '%s' already exists; skipping creation", collection)
+        info = qdrant.get_collection(collection)
+        # Validate dense vectors config (expect named vectors)
+        try:
+            vecs = getattr(getattr(info, "config", None), "params", None)
+            vecs = getattr(vecs, "vectors", None)
+            names: set = set()
+            if isinstance(vecs, dict):
+                names = set(vecs.keys())
+            else:
+                for attr in ("configs", "map", "vectors", "items", "data"):
+                    mapping = getattr(vecs, attr, None)
+                    if isinstance(mapping, dict) and mapping:
+                        names = set(mapping.keys())
+                        break
+            expected = {CONTENT_VECTOR_NAME, SUMMARY_VECTOR_NAME}
+            if not names or not expected.issubset(names):
+                logger.error(
+                    "Collection '%s' incompatible vectors config. Found names=%s, expected at least %s",
+                    collection,
+                    sorted(list(names)) if names else None,
+                    sorted(list(expected)),
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Kolekcja '{collection}' ma niekompatybilną konfigurację wektorów. "
+                        f"Wymagane nazwane wektory: {sorted(list(expected))}. Usuń kolekcję lub uruchom ingest z reindex=true."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Could not verify vectors config for '%s': %s", collection, exc)
+        # Ensure sparse vectors exist (idempotent on modern Qdrant)
+        if SPARSE_ENABLED:
+            try:
+                qdrant.update_collection(
+                    collection_name=collection,
+                    sparse_vectors_config={
+                        CONTENT_SPARSE_NAME: qm.SparseVectorParams(),
+                        SUMMARY_SPARSE_NAME: qm.SparseVectorParams(),
+                    },
+                )
+                logger.debug("Ensured sparse vectors for '%s' are configured", collection)
+            except UnexpectedResponse as exc:
+                msg = str(exc).lower()
+                if "already" in msg or "exist" in msg or "conflict" in msg:
+                    logger.debug("Sparse vectors already present for '%s'", collection)
+                else:
+                    logger.error("Failed to ensure sparse vectors for '%s': %s", collection, exc)
+                    raise
+        logger.debug("Collection '%s' exists and is compatible", collection)
         return
+    except HTTPException:
+        # bubble up incompatibility to caller
+        raise
     except Exception:
         logger.debug("Collection '%s' not found; creating", collection)
         pass
@@ -1492,6 +1891,12 @@ def ingest_build(req: IngestBuildRequest):
         req.recursive,
         req.reindex,
     )
+    if req.reindex:
+        try:
+            qdrant.delete_collection(collection_name=req.collection_name)
+            logger.debug("Deleted collection '%s' due to reindex request", req.collection_name)
+        except Exception as exc:
+            logger.debug("Delete collection '%s' skipped or failed: %s", req.collection_name, exc)
     ensure_collection(req.collection_name)
 
     base = pathlib.Path(req.base_dir)
@@ -1642,7 +2047,7 @@ def mmr_diversify_hybrid(
         "Usage guidance for tools:\n"
         "- Prefer `result_format=\"blocks\"` with `merge_chunks=true` to receive consolidated blocks.\n"
         "- Set `top_k` to 5–10 and keep defaults for other params unless you know why to change them.\n"
-        "- `summary_mode=first` includes a single document summary per document/section.\n"
+        "- `summary_mode=first` includes a single document summary per document.\n"
         "- `mode=auto` auto-detects current/archival, or force with `current|archival|all`.\n"
         "Returned fields: use `blocks[].text` as evidence; cite `blocks[].path` and chunk id range."
     ),

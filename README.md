@@ -1,6 +1,18 @@
-# rags_tool (0.7.2)
+# rags_tool (0.9.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.9.0
+
+- Sekcjony podział punktów i podpunktów w obrębie paragrafów (§): wykrywamy listy numerowane (`1)`, `2.`), literowe (`a)`, `lit. b)`), rzymskie (`i)`, `IV)`), a także tirety (`-`, `–`, `•`). Każdy wykryty element staje się osobną podsekcją z etykietą np. „§ 7 pkt 3 lit. b)”, która trafia do payloadu jako `section`.
+- Heurystyki unikające szumu: segmentujemy tylko gdy poziom ma co najmniej 2 elementy i elementy mają sensowną długość; krótkie i pojedyncze pozycje pozostają w rodzicu.
+- Integracja z dotychczasowym chunkingiem: podsekcje są dalej dzielone tokenowo, a grupowanie `blocks` i `grouped` zyskuje bardziej precyzyjne granice.
+
+## Nowości w 0.8.0
+
+- Sekcyjny chunking dla dokumentów regulaminowych i prawnych: parser rozpoznaje nagłówki „Rozdział …”, paragrafy „§ …”, a także bloki „Załącznik …”. Tekst jest dzielony w granicach sekcji i paragrafów, bez ich przecinania.
+- Payloady Qdrant zawierają teraz pole `section` dla każdego chunku (np. „Rozdział 1 — Informacje ogólne § 1”), co poprawia scalanie bloków (`merge_chunks`) i prezentację wyników (`blocks`, `grouped`).
+- Lepsze cytowanie: odpowiedzi zawierają `section`, co ułatwia odwołania do konkretnych fragmentów dokumentu.
 
 ## Nowości w 0.7.2
 
@@ -193,6 +205,7 @@ curl -sS "$SUMMARY_API_URL/chat/completions" \
 - „Api key is used with an insecure connection.” — komunikat ostrzegawczy z klienta Qdrant przy użyciu HTTP z kluczem API. Najlepiej przejść na HTTPS (`QDRANT_URL`).
 - „Dimension mismatch” po zmianie modelu embedującego — uruchom `POST /collections/init` z `force_dim_probe=true` i/lub przebuduj indeks (`/ingest/build`).
 - Model czatowy nie zwraca prefiksów `SUMMARY:`/`SIGNATURE:`/`ENTITIES:` — sprawdź, czy endpoint respektuje wiadomość systemową i format prośby; w razie czego parser użyje fallbacku.
+- Qdrant 500 „Service internal error: No such file or directory (os error 2)” podczas `upsert` — aplikacja próbuje automatycznie odzyskać działanie: ponawia po `ensure_collection`, dzieli batch na mniejsze (64), a jeśli to nie pomaga, wysyła punkty bez składników TF‑IDF (tylko dense). Jeśli błąd się utrzymuje, sprawdź uprawnienia/zapisywalność storage Qdrant oraz wersję serwera (zalecana 1.7+ z obsługą named sparse vectors).
 
 ## Najważniejsze endpointy
 
