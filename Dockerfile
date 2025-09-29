@@ -26,9 +26,10 @@ RUN pip install --no-cache-dir \
     html2text \
     PyPDF2
 
-COPY app.py settings.py ./
+COPY app ./app
+COPY main.py ./
 COPY templates ./templates
 
 EXPOSE 8080
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

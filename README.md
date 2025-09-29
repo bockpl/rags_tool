@@ -1,6 +1,12 @@
-# rags_tool (0.9.0)
+# rags_tool (0.9.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.9.1
+
+- Refaktor: podział kodu na logiczne moduły (`app/api.py`, `app/core/*`, `app/models.py`, `app/qdrant_utils.py`).
+- Zmieniony sposób uruchomienia: `uvicorn main:app` (wcześniej `uvicorn app:app`).
+- README i Dockerfile dostosowane do nowej struktury.
 
 ## Nowości w 0.9.0
 
@@ -112,9 +118,33 @@ Możesz także umieścić te wartości w pliku `.env`; aplikacja wczyta je autom
    ```
 3. Start serwera:
    ```bash
-   uvicorn app:app --host 0.0.0.0 --port 8080
+   uvicorn main:app --host 0.0.0.0 --port 8080
    ```
 4. Dokumentacja API jest dostępna pod `/docs` (Swagger UI) oraz `/openapi.json`.
+
+## Struktura projektu
+
+```
+.
+├── app/
+│   ├── __init__.py
+│   ├── api.py              # endpointy FastAPI
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── chunking.py     # chunk_text, count_tokens, segmentacja sekcji
+│   │   ├── embedding.py    # embed_text, TF-IDF (load/save/fit/vector)
+│   │   ├── parsing.py      # extract_text, html_to_text, split_into_paragraphs
+│   │   ├── search.py       # _stage1, _stage2, MMR, shaping
+│   │   └── summary.py      # llm_summary i prompty
+│   ├── models.py           # modele Pydantic (Request/Response)
+│   ├── qdrant_utils.py     # ensure_collection, upsert punktów, klient Qdrant
+│   └── settings.py         # konfiguracja aplikacji
+├── templates/
+│   └── admin.html
+├── .env
+├── main.py                 # wejście startowe (uvicorn main:app)
+└── Dockerfile
+```
 
 ## Uruchomienie w Dockerze
 
