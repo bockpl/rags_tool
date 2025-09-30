@@ -29,7 +29,11 @@ settings = get_settings()
 
 logger = logging.getLogger("rags_tool")
 
-qdrant = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+qdrant = QdrantClient(
+    url=settings.qdrant_url,
+    api_key=settings.qdrant_api_key,
+    timeout=settings.qdrant_request_timeout,
+)
 
 
 def sha1(s: str) -> str:
@@ -132,6 +136,7 @@ def build_and_upsert_points(
     collection_name: str,
 ) -> int:
     points: List[qm.PointStruct] = []
+    batch_limit = 256
     point_count = 0
 
     for rec in doc_records:
@@ -195,7 +200,7 @@ def build_and_upsert_points(
             points.append(qm.PointStruct(id=pid, vector=vectors, payload=payload))
             point_count += 1
 
-        if len(points) >= 1024:
+        if len(points) >= batch_limit:
             qdrant.upsert(collection_name=collection_name, points=points)
             points = []
 

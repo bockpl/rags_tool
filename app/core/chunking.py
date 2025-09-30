@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from .parsing import split_into_paragraphs
+try:
+    import spacy
+    from spacy.language import Language
+    from spacy.matcher import Matcher
+    from spacy.tokens import Doc, Span
+except ImportError:
+    spacy = None  # type: ignore
 
 try:
     import tiktoken  # type: ignore
@@ -18,6 +24,72 @@ if tiktoken is not None:  # pragma: no cover - runtime path
         _TOKENIZER = tiktoken.get_encoding("cl100k_base")
     except Exception:
         _TOKENIZER = None
+
+SECTION_HIERARCHY: Tuple[str, ...] = (
+    "attachment",
+    "regulamin",
+    "chapter",
+    "par",
+    "ust",
+    "pkt",
+    "lit",
+    "dash",
+)
+
+
+def _clean_value(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _extract_number(text: str) -> Optional[str]:
+    match = re.search(r"(\d+[a-z]?)", text, re.I)
+    return match.group(1) if match else None
+
+
+def _extract_letter(text: str) -> Optional[str]:
+    match = re.search(r"([a-z])", text, re.I)
+    return match.group(1).lower() if match else None
+
+
+def _format_level(level: str, value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if level == "attachment":
+        return value
+    if level == "regulamin":
+        return value.upper()
+    if level == "chapter":
+        return value
+    if level == "par":
+        value = value.lstrip("§").strip()
+        return f"§ {value}" if value else None
+    if level == "ust":
+        value = value.rstrip(".)").strip()
+        return f"ust. {value}" if value else None
+    if level == "pkt":
+        value = value.rstrip(".)").strip()
+        return f"pkt {value}" if value else None
+    if level == "lit":
+        value = value.rstrip(".)").strip().lower()
+        return f"lit. {value}" if value else None
+    if level == "dash":
+        return value
+    return value
+
+
+def _format_section_label(hierarchy: Dict[str, Optional[str]]) -> str:
+    parts: List[str] = []
+    for level in SECTION_HIERARCHY:
+        formatted = _format_level(level, hierarchy.get(level))
+        if formatted:
+            parts.append(formatted)
+    return " ".join(parts).strip() or "Preambuła"
 
 
 def count_tokens(text: str) -> int:
@@ -71,7 +143,13 @@ def _split_text_by_tokens(text: str, target_tokens: int, overlap_tokens: int) ->
 
 def chunk_text(text: str, target_tokens: int = 900, overlap_tokens: int = 150) -> List[str]:
     """Token-aware paragraph packing with overlap."""
-    paras = split_into_paragraphs(text)
+    try:
+        from .parsing import split_into_paragraphs
+
+        paras = split_into_paragraphs(text)
+    except ImportError:
+        paras = text.split("\n\n")
+
     chunks: List[str] = []
     buf = ""
     for p in paras:
@@ -89,9 +167,9 @@ def chunk_text(text: str, target_tokens: int = 900, overlap_tokens: int = 150) -
                         tail = toks[-overlap_tokens:] if len(toks) > overlap_tokens else toks
                         buf_tail = _TOKENIZER.decode(tail)
                     except Exception:
-                        buf_tail = buf[-max(1, overlap_tokens * 4):]
+                        buf_tail = buf[-max(1, overlap_tokens * 4) :]
                 else:
-                    buf_tail = buf[-max(1, overlap_tokens * 4):]
+                    buf_tail = buf[-max(1, overlap_tokens * 4) :]
             buf = (buf_tail + "\n\n" + p) if buf_tail else p
         else:
             long_parts = _split_text_by_tokens(p, target_tokens, overlap_tokens)
@@ -105,142 +183,105 @@ def chunk_text(text: str, target_tokens: int = 900, overlap_tokens: int = 150) -
     return chunks
 
 
-# Section-aware segmentation (Polish regulations)
-CHAPTER_RE = re.compile(r"^\s*Rozdział\s+([IVXLC\d]+)\b.*", re.IGNORECASE)
-PARAGRAPH_RE = re.compile(r"^\s*§\s*(\d+[a-zA-Z]?)\b\s*(.*)$")
-ATTACHMENT_RE = re.compile(r"^\s*Załącznik(\s+nr\s+\d+)?\b.*", re.IGNORECASE)
-REGULAMIN_RE = re.compile(r"^\s*REGULAMIN\b.*", re.IGNORECASE)
-
-# Enumeration markers within paragraphs
-ENUM_NUM_RE = re.compile(r"^\s*(\d{1,3})[\.)]\s+(.*)$")
-ENUM_LIT_RE = re.compile(r"^\s*(?:lit\.)?\s*([a-ząćęłńóśźż])[\)]\s+(.*)$", re.IGNORECASE)
-ENUM_ROM_RE = re.compile(r"^\s*((?:[ivx]+|[IVX]+))[\)]\s+(.*)$")
-ENUM_DASH_RE = re.compile(r"^\s*[•\-–—]\s+(.*)$")
+_NLP_PIPELINE: Optional[Language] = None
 
 
-def _segment_polish_sections(text: str) -> List[Tuple[str, str]]:
-    lines = text.splitlines()
-    n = len(lines)
-    sections: List[Tuple[str, str]] = []
+def _get_nlp_pipeline() -> Optional[Language]:
+    """Loads and caches the spaCy NLP pipeline with the custom section annotator."""
+    global _NLP_PIPELINE
+    if _NLP_PIPELINE:
+        return _NLP_PIPELINE
+    if spacy is None:
+        raise ImportError(
+            "spaCy is not installed. Please run `pip install spacy` and `python -m spacy download pl_core_news_sm`."
+        )
 
-    current_top: Optional[str] = None
-    current_label: Optional[str] = None
-    buffer: List[str] = []
+    if not Span.has_extension("section_hierarchy"):
+        Span.set_extension("section_hierarchy", default=None)
+    if not Span.has_extension("section_label"):
+        Span.set_extension("section_label", default=None)
 
-    def flush():
-        nonlocal buffer, current_label
-        if buffer:
-            body = "\n".join(buffer).strip()
-            if body:
-                label = current_label or current_top or "Preambuła"
-                sections.append((label, body))
-        buffer = []
+    @Language.component("section_annotator_v2")
+    def section_annotator_v2(doc: Doc) -> Doc:
+        patterns = {
+            "attachment": [[{"LOWER": "załącznik"}]],
+            "regulamin": [[{"LOWER": "regulamin"}]],
+            "chapter": [[{"LOWER": {"IN": ["rozdział", "dział"]}}, {"IS_SPACE": True, "OP": "+"}, {"LIKE_NUM": True}]],
+            "par": [[{"TEXT": "§"}, {"IS_SPACE": True, "OP": "*"}, {"LIKE_NUM": True}]],
+            "ust": [[{"IS_DIGIT": True}, {"TEXT": "."}]],
+            "pkt": [[{"LIKE_NUM": True}, {"TEXT": ")"}]],
+            "lit": [[{"IS_ALPHA": True, "LENGTH": 1}, {"TEXT": ")"}]],
+            "dash": [[{"TEXT": {"IN": ["-", "–", "—", "•"]}}]],
+        }
 
-    i = 0
-    while i < n:
-        line = lines[i]
-        if ATTACHMENT_RE.match(line or ""):
-            flush()
-            current_top = line.strip()
-            current_label = current_top
-            i += 1
-            continue
-        m_ch = CHAPTER_RE.match(line or "")
-        if m_ch:
-            flush()
-            subtitle = ""
-            j = i + 1
-            while j < n and not (lines[j] or "").strip():
-                j += 1
-            if j < n:
-                nxt = lines[j]
-                if not (PARAGRAPH_RE.match(nxt or "") or CHAPTER_RE.match(nxt or "") or ATTACHMENT_RE.match(nxt or "")):
-                    subtitle = nxt.strip()
-            top = line.strip()
-            if subtitle:
-                top = f"{top} — {subtitle}"
-            current_top = top
-            current_label = current_top
-            i += 1
-            continue
-        m_par = PARAGRAPH_RE.match(line or "")
-        if m_par:
-            flush()
-            para_no = m_par.group(1)
-            tail = (m_par.group(2) or "").strip()
-            lab = f"§ {para_no}"
-            if tail:
-                lab = f"{lab} — {tail}"
-            current_label = f"{current_top} {lab}" if current_top else lab
-            i += 1
-            continue
-        if REGULAMIN_RE.match(line or ""):
-            flush()
-            current_top = "REGULAMIN"
-            current_label = current_top
-            i += 1
-            continue
-        buffer.append(line)
-        i += 1
-    flush()
-    if not sections:
-        return [("Preambuła", text)]
-    return sections
+        extractors = {
+            "attachment": lambda s: _clean_value(s.text),
+            "regulamin": lambda s: _clean_value(s.text.upper()),
+            "chapter": lambda s: _clean_value(s.text),
+            "par": lambda s: _extract_number(s.text),
+            "ust": lambda s: _extract_number(s.text),
+            "pkt": lambda s: _extract_number(s.text),
+            "lit": lambda s: _extract_letter(s.text),
+            "dash": lambda s: "•",
+        }
 
+        matcher = Matcher(doc.vocab)
+        for name, p_list in patterns.items():
+            matcher.add(name, p_list)
 
-def _match_enum_marker(line: str) -> Optional[Tuple[str, str, str]]:
-    m = ENUM_NUM_RE.match(line)
-    if m:
-        return ("num", m.group(1), m.group(2))
-    m = ENUM_LIT_RE.match(line)
-    if m:
-        return ("lit", m.group(1).lower(), m.group(2))
-    m = ENUM_ROM_RE.match(line)
-    if m:
-        return ("rom", m.group(1).lower(), m.group(2))
-    m = ENUM_DASH_RE.match(line)
-    if m:
-        return ("dash", "dash", m.group(1))
-    return None
+        matches: List[Tuple[str, Span]] = []
+        for match_id, start, end in matcher(doc):
+            span = doc[start:end]
+            is_line_start = span.start == 0 or doc.text[span.start_char - 1] in "\n\r"
+            if is_line_start:
+                matches.append((doc.vocab.strings[match_id], span))
 
+        matches.sort(key=lambda item: item[1].start)
 
-def _should_split(count: int, contents: List[str], min_count: int = 2, min_chars: int = 20) -> bool:
-    if count < min_count:
-        return False
-    long_enough = sum(1 for c in contents if len((c or "").strip()) >= min_chars)
-    return long_enough >= min_count
+        current_hierarchy = {level: None for level in SECTION_HIERARCHY}
+        section_spans: List[Span] = []
+        last_span_end = 0
 
+        for name, marker_span in matches:
+            if marker_span.start_char > last_span_end:
+                content_span = doc.char_span(
+                    last_span_end,
+                    marker_span.start_char,
+                    alignment_mode="expand",
+                )
+                if content_span and content_span.text.strip():
+                    content_span._.section_hierarchy = current_hierarchy.copy()
+                    section_spans.append(content_span)
 
-def _split_enumerations_in_paragraph(body: str) -> List[Tuple[str, str]]:
-    lines = [l.rstrip() for l in body.splitlines()]
-    items: List[Tuple[str, List[str]]] = []
-    current: Optional[Tuple[str, List[str]]] = None
-    for line in lines:
-        m = _match_enum_marker(line)
-        if m:
-            if current is not None:
-                items.append(current)
-            kind, tag, rest = m
-            label = f"{tag})" if kind in {"num", "lit", "rom"} else "•"
-            current = (label, [rest])
-        else:
-            if current is None:
-                current = ("", [line])
-            else:
-                current[1].append(line)
-    if current is not None:
-        items.append(current)
-    contents = ["\n".join(v).strip() for _, v in items]
-    if not _should_split(len(items), contents):
-        return []
-    results: List[Tuple[str, str]] = []
-    if any(lbl for lbl, _ in items):
-        for lbl, txt in zip([lbl for lbl, _ in items], contents):
-            results.append((lbl, txt))
-    else:
-        results = []
-    final = [(suffix, txt.strip()) for (suffix, txt) in results if (txt or "").strip()]
-    return final
+            level_index = SECTION_HIERARCHY.index(name)
+            value = extractors[name](marker_span)
+            current_hierarchy[name] = value
+            for downstream in SECTION_HIERARCHY[level_index + 1 :]:
+                current_hierarchy[downstream] = None
+
+            last_span_end = marker_span.end_char
+
+        if last_span_end < len(doc.text):
+            content_span = doc.char_span(last_span_end, len(doc.text), alignment_mode="expand")
+            if content_span and content_span.text.strip():
+                content_span._.section_hierarchy = current_hierarchy.copy()
+                section_spans.append(content_span)
+
+        for span in section_spans:
+            hierarchy = getattr(span._, "section_hierarchy", None) or {}
+            span._.section_label = _format_section_label(hierarchy)
+
+        doc.spans["sections"] = section_spans
+        return doc
+
+    try:
+        nlp = spacy.blank("pl")
+        nlp.add_pipe("section_annotator_v2", last=True)
+        _NLP_PIPELINE = nlp
+        return _NLP_PIPELINE
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"Error initializing spaCy pipeline: {exc}")
+        return None
 
 
 def chunk_text_by_sections(
@@ -248,20 +289,39 @@ def chunk_text_by_sections(
     target_tokens: int = 900,
     overlap_tokens: int = 150,
 ) -> List[Dict[str, Any]]:
-    segments = _segment_polish_sections(text)
-    out: List[Dict[str, Any]] = []
-    for label, body in segments:
-        if "§" in label:
-            enum_splits = _split_enumerations_in_paragraph(body)
-            if enum_splits:
-                for suffix, subtext in enum_splits:
-                    full_label = f"{label} {suffix}".strip()
-                    parts = chunk_text(subtext, target_tokens=target_tokens, overlap_tokens=overlap_tokens)
-                    for p in parts:
-                        out.append({"text": p, "section": full_label})
-                continue
-        parts = chunk_text(body, target_tokens=target_tokens, overlap_tokens=overlap_tokens)
-        for p in parts:
-            out.append({"text": p, "section": label})
-    return out
+    """Chunk text by detected sections while keeping payload compatible with Qdrant."""
 
+    def _fallback() -> List[Dict[str, Any]]:
+        return [
+            {"text": part, "section": "Dokument"}
+            for part in chunk_text(text, target_tokens=target_tokens, overlap_tokens=overlap_tokens)
+            if part.strip()
+        ]
+
+    try:
+        nlp = _get_nlp_pipeline()
+    except ImportError:
+        return _fallback()
+
+    if nlp is None:
+        return _fallback()
+
+    doc = nlp(text)
+    span_group = doc.spans.get("sections", []) if hasattr(doc.spans, "get") else []
+    section_spans = list(span_group)
+    if not section_spans:
+        return _fallback()
+
+    out: List[Dict[str, Any]] = []
+    for section_span in section_spans:
+        body = section_span.text
+        if not body or not body.strip():
+            continue
+        label = getattr(section_span._, "section_label", None) or "Dokument"
+        parts = chunk_text(body, target_tokens=target_tokens, overlap_tokens=overlap_tokens)
+        for part in parts:
+            if not part.strip():
+                continue
+            out.append({"text": part, "section": label})
+
+    return out or _fallback()

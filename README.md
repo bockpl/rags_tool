@@ -1,6 +1,20 @@
-# rags_tool (0.9.2)
+# rags_tool (0.9.5)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.9.5
+
+- Naprawiono błąd `Unknown arguments: ['timeout']` podczas `upsert` w klientach Qdrant bez wsparcia parametru per-zapytanie; limit czasu ustawiany jest teraz wyłącznie globalnie.
+
+## Nowości w 0.9.4
+
+- Rozbito upserty do Qdrant na mniejsze batch-e (256 punktów) i dodano ustawialny timeout, co zapobiega błędom `ResponseHandlingException: timed out` przy dużych dokumentach.
+- Nowa zmienna środowiskowa `QDRANT_TIMEOUT` (domyślnie 60 s) pozwala dostosować limit czasu na operacje HTTP do konfiguracji klastra.
+
+## Nowości w 0.9.3
+
+- Ujednolicono etykiety sekcji generowane przez spaCy (np. § 5 ust. 3 pkt 2), dzięki czemu payload Qdrant zachowuje pełną hierarchię.
+- Uproszczony fallback chunk_text_by_sections gwarantuje pary {text, section} także bez spaCy, co zabezpiecza ingest.
 
 ## Nowości w 0.9.2
 
@@ -102,6 +116,7 @@ Ustaw wymagane zmienne środowiskowe przed uruchomieniem aplikacji:
 ```bash
 export QDRANT_URL="http://127.0.0.1:6333"
 export QDRANT_API_KEY=""
+export QDRANT_TIMEOUT="60"
 export EMBEDDING_API_URL="http://127.0.0.1:8000/v1"
 export EMBEDDING_API_KEY="sk-embed-xxx"
 export EMBEDDING_MODEL="BAAI/bge-m3"

@@ -24,7 +24,10 @@ RUN pip install --no-cache-dir \
     markdown2 \
     beautifulsoup4 \
     html2text \
-    PyPDF2
+    PyPDF2 \
+    spacy
+
+RUN python -m spacy download pl_core_news_sm
 
 COPY app ./app
 COPY main.py ./

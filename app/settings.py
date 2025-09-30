@@ -12,10 +12,11 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "0.9.2"
+    app_version: str = "0.9.5"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
+    qdrant_request_timeout: float = Field(default=60.0, alias="QDRANT_TIMEOUT")
     embedding_api_url: str = Field(default="http://127.0.0.1:8000/v1", alias="EMBEDDING_API_URL")
     embedding_api_key: str = Field(default="sk-no-key", alias="EMBEDDING_API_KEY")
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
