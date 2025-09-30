@@ -1,6 +1,13 @@
-# rags_tool (0.9.1)
+# rags_tool (0.9.2)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 0.9.2
+
+- Nowe narzędzie CLI: wydobywanie wzorców sekcjonowania z korpusu (`tools/mine_section_patterns.py`).
+  - Skanowanie plików zgodne z ingest/scan (`SUPPORTED_EXT`, ten sam parser `extract_text`).
+  - Heurystyka + fallback do LLM z użyciem tego samego modelu co streszczenia (`SUMMARY_*`).
+  - Wynikiem jest snippet Pythona z `SECTION_LEVELS` i `LEVEL_PATTERNS` (unia poziomów z całego korpusu).
 
 ## Nowości w 0.9.1
 
@@ -236,6 +243,39 @@ curl -sS "$SUMMARY_API_URL/chat/completions" \
 - „Dimension mismatch” po zmianie modelu embedującego — uruchom `POST /collections/init` z `force_dim_probe=true` i/lub przebuduj indeks (`/ingest/build`).
 - Model czatowy nie zwraca prefiksów `SUMMARY:`/`SIGNATURE:`/`ENTITIES:` — sprawdź, czy endpoint respektuje wiadomość systemową i format prośby; w razie czego parser użyje fallbacku.
 - Qdrant 500 „Service internal error: No such file or directory (os error 2)” podczas `upsert` — aplikacja próbuje automatycznie odzyskać działanie: ponawia po `ensure_collection`, dzieli batch na mniejsze (64), a jeśli to nie pomaga, wysyła punkty bez składników TF‑IDF (tylko dense). Jeśli błąd się utrzymuje, sprawdź uprawnienia/zapisywalność storage Qdrant oraz wersję serwera (zalecana 1.7+ z obsługą named sparse vectors).
+
+## Narzędzie: wzorce sekcji
+
+Narzędzie CLI do wydobywania poziomów sekcji i bezpiecznych regexów na podstawie całego korpusu.
+
+- Plik: `tools/mine_section_patterns.py`
+- Skanuje te same formaty co ingest (`SUPPORTED_EXT`), używa identycznego parsera treści (`extract_text`).
+- Heurystyka (szybka) + LLM fallback (ten sam model co streszczenia: `SUMMARY_API_URL`, `SUMMARY_API_KEY`, `SUMMARY_MODEL`).
+
+Przykład użycia:
+
+```bash
+python tools/mine_section_patterns.py /app/data \
+  --glob "**/*" \
+  --recursive \
+  --out section_patterns.py
+```
+
+Przykładowy wynik (snippet Pythona):
+
+```python
+SECTION_LEVELS = ["doc", "chapter", "par", "ust", "pkt", "lit", "dash"]
+LEVEL_PATTERNS = {
+  "chapter": r"^\s*(rozdział|dział)\s+([IVXLCDM]+|\d+)",
+  "par":     r"^\s*§\s*(\d+[a-z]?)",
+  "ust":     r"\bust\.?\s*(\d+[a-z]?)\b",
+  "pkt":     r"(\bpkt\.?\s*(\d+[a-z]?)|^\s*\(?\d+[a-z]?\))",
+  "lit":     r"\blit\.?\s*([a-z])\)",
+  "dash":    r"^\s*[-–—]\s+",
+}
+```
+
+Wartości `SECTION_LEVELS` to unia poziomów znalezionych we wszystkich dokumentach; `doc` jest zawsze dołączany na górze hierarchii. `LEVEL_PATTERNS` zawiera tylko te poziomy, dla których wykryto wzorce.
 
 ## Najważniejsze endpointy
 

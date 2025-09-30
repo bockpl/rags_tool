@@ -29,6 +29,7 @@ RUN pip install --no-cache-dir \
 COPY app ./app
 COPY main.py ./
 COPY templates ./templates
+COPY tools ./tools
 
 EXPOSE 8080
 
