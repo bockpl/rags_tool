@@ -24,12 +24,26 @@ class SummRAGSettings(BaseSettings):
     summary_api_key: str = Field(default="sk-no-key", alias="SUMMARY_API_KEY")
     summary_model: str = Field(default="gpt-4o-mini", alias="SUMMARY_MODEL")
     collection_name: str = Field(default="rags_tool", alias="COLLECTION_NAME")
+    summary_collection_name: Optional[str] = Field(
+        default=None, alias="SUMMARY_COLLECTION_NAME"
+    )
+    content_collection_name: Optional[str] = Field(
+        default=None, alias="CONTENT_COLLECTION_NAME"
+    )
     debug: bool = Field(default=False, alias="DEBUG")
     vector_store_dir: Path = Field(default=Path(".rags_tool_store"), alias="VECTOR_STORE_DIR")
     # Embedding vector dimension for the chosen embedding model
     embedding_dim: int = Field(default=1024, alias="EMBEDDING_DIM")
     # Prefer JSON responses for summaries (OpenAI JSON mode). Fallback to text parser if unsupported.
     summary_json_mode: bool = Field(default=True, alias="SUMMARY_JSON_MODE")
+
+    @property
+    def qdrant_summary_collection(self) -> str:
+        return self.summary_collection_name or f"{self.collection_name}_summaries"
+
+    @property
+    def qdrant_content_collection(self) -> str:
+        return self.content_collection_name or f"{self.collection_name}_content"
 
     model_config = SettingsConfigDict(
         env_file=".env",

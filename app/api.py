@@ -38,7 +38,12 @@ from app.models import (
     SearchResponse,
     SummariesGenerateRequest,
 )
-from app.qdrant_utils import build_and_upsert_points, ensure_collection, qdrant
+from app.qdrant_utils import (
+    build_and_upsert_points,
+    derive_collection_names,
+    ensure_collections,
+    qdrant,
+)
 from app.settings import get_settings
 
 
@@ -253,15 +258,21 @@ def health():
     include_in_schema=False,
     summary="Inicjalizacja kolekcji",
     description=(
-        "Tworzy kolekcję we wskazanej nazwie (jeśli nie istnieje) i opcjonalnie sondą sprawdza wymiar embeddingów przy użyciu force_dim_probe."
+        "Tworzy parę kolekcji (streszczenia + treść) dla wskazanej nazwy bazowej (jeśli nie istnieją) i opcjonalnie sondą sprawdza wymiar embeddingów przy użyciu force_dim_probe."
     ),
 )
 def collections_init(req: InitCollectionsRequest):
     from app.core.embedding import get_embedding_dim
 
     dim = get_embedding_dim() if req.force_dim_probe else None
-    ensure_collection(req.collection_name, dim)
-    return {"ok": True, "collection": req.collection_name}
+    ensure_collections(req.collection_name, dim)
+    summary_collection, content_collection = derive_collection_names(req.collection_name)
+    return {
+        "ok": True,
+        "collection": req.collection_name,
+        "summary_collection": summary_collection,
+        "content_collection": content_collection,
+    }
 
 
 @app.post(
@@ -315,13 +326,20 @@ def ingest_build(req: IngestBuildRequest):
         req.recursive,
         req.reindex,
     )
+    summary_collection, content_collection = derive_collection_names(req.collection_name)
+
     if req.reindex:
-        try:
-            qdrant.delete_collection(collection_name=req.collection_name)
-            logger.debug("Deleted collection '%s' due to reindex request", req.collection_name)
-        except Exception as exc:
-            logger.debug("Delete collection '%s' skipped or failed: %s", req.collection_name, exc)
-    ensure_collection(req.collection_name)
+        for coll_name in (summary_collection, content_collection):
+            try:
+                qdrant.delete_collection(collection_name=coll_name)
+                logger.debug(
+                    "Deleted collection '%s' due to reindex request", coll_name
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Delete collection '%s' skipped or failed: %s", coll_name, exc
+                )
+    ensure_collections(req.collection_name)
 
     base = pathlib.Path(req.base_dir)
     if not base.exists():
@@ -375,7 +393,7 @@ def ingest_build(req: IngestBuildRequest):
             content_vec,
             summary_vec,
             enable_sparse=req.enable_sparse,
-            collection_name=req.collection_name,
+            collection_base=req.collection_name,
         )
 
     took_ms = int((time.time() - t0) * 1000)
@@ -470,7 +488,7 @@ def search_query(req: SearchQuery):
     The endpoint returns a JSON with `blocks` ready for citation by the LLM.
     """
     t0 = time.time()
-    ensure_collection()
+    ensure_collections()
 
     mode = _classify_mode(req.query, req.mode)
     q_vec = embed_text([req.query])[0]

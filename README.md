@@ -159,7 +159,7 @@ Możesz także umieścić te wartości w pliku `.env`; aplikacja wczyta je autom
 │   │   ├── search.py       # _stage1, _stage2, MMR, shaping
 │   │   └── summary.py      # llm_summary i prompty
 │   ├── models.py           # modele Pydantic (Request/Response)
-│   ├── qdrant_utils.py     # ensure_collection, upsert punktów, klient Qdrant
+│   ├── qdrant_utils.py     # ensure_collections, upsert punktów, klient Qdrant
 │   └── settings.py         # konfiguracja aplikacji
 ├── templates/
 │   └── admin.html
@@ -257,7 +257,7 @@ curl -sS "$SUMMARY_API_URL/chat/completions" \
 - „Api key is used with an insecure connection.” — komunikat ostrzegawczy z klienta Qdrant przy użyciu HTTP z kluczem API. Najlepiej przejść na HTTPS (`QDRANT_URL`).
 - „Dimension mismatch” po zmianie modelu embedującego — uruchom `POST /collections/init` z `force_dim_probe=true` i/lub przebuduj indeks (`/ingest/build`).
 - Model czatowy nie zwraca prefiksów `SUMMARY:`/`SIGNATURE:`/`ENTITIES:` — sprawdź, czy endpoint respektuje wiadomość systemową i format prośby; w razie czego parser użyje fallbacku.
-- Qdrant 500 „Service internal error: No such file or directory (os error 2)” podczas `upsert` — aplikacja próbuje automatycznie odzyskać działanie: ponawia po `ensure_collection`, dzieli batch na mniejsze (64), a jeśli to nie pomaga, wysyła punkty bez składników TF‑IDF (tylko dense). Jeśli błąd się utrzymuje, sprawdź uprawnienia/zapisywalność storage Qdrant oraz wersję serwera (zalecana 1.7+ z obsługą named sparse vectors).
+- Qdrant 500 „Service internal error: No such file or directory (os error 2)” podczas `upsert` — aplikacja próbuje automatycznie odzyskać działanie: ponawia po `ensure_collections`, dzieli batch na mniejsze (64), a jeśli to nie pomaga, wysyła punkty bez składników TF‑IDF (tylko dense). Jeśli błąd się utrzymuje, sprawdź uprawnienia/zapisywalność storage Qdrant oraz wersję serwera (zalecana 1.7+ z obsługą named sparse vectors).
 
 ## Narzędzie: wzorce sekcji
 

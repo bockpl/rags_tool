@@ -40,22 +40,31 @@ def sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
-def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = None):
-    collection = collection or settings.collection_name
-    if dim is None:
-        dim = settings.embedding_dim
-    vectors_config = {
-        CONTENT_VECTOR_NAME: qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
-        SUMMARY_VECTOR_NAME: qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
-    }
-    sparse_config = (
-        {
-            CONTENT_SPARSE_NAME: qm.SparseVectorParams(),
-            SUMMARY_SPARSE_NAME: qm.SparseVectorParams(),
-        }
-        if SPARSE_ENABLED
-        else None
-    )
+def _derive_summary_collection(base: Optional[str]) -> str:
+    if base:
+        return f"{base}_summaries"
+    if settings.summary_collection_name:
+        return settings.summary_collection_name
+    return f"{settings.collection_name}_summaries"
+
+
+def _derive_content_collection(base: Optional[str]) -> str:
+    if base:
+        return f"{base}_content"
+    if settings.content_collection_name:
+        return settings.content_collection_name
+    return f"{settings.collection_name}_content"
+
+
+def derive_collection_names(base: Optional[str] = None) -> Tuple[str, str]:
+    return _derive_summary_collection(base), _derive_content_collection(base)
+
+
+def _ensure_single_collection(
+    collection: str,
+    vectors_config: Dict[str, qm.VectorParams],
+    sparse_config: Optional[Dict[str, qm.SparseVectorParams]] = None,
+):
     try:
         info = qdrant.get_collection(collection)
         try:
@@ -70,10 +79,10 @@ def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = Non
                     if isinstance(mapping, dict) and mapping:
                         names = set(mapping.keys())
                         break
-            expected = {CONTENT_VECTOR_NAME, SUMMARY_VECTOR_NAME}
-            if not names or not expected.issubset(names):
+            expected = set(vectors_config.keys())
+            if names != expected:
                 logger.error(
-                    "Collection '%s' incompatible vectors config. Found names=%s, expected at least %s",
+                    "Collection '%s' incompatible vectors config. Found names=%s, expected %s",
                     collection,
                     sorted(list(names)) if names else None,
                     sorted(list(expected)),
@@ -87,14 +96,11 @@ def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = Non
                 )
         except Exception as exc:
             logger.warning("Could not verify vectors config for '%s': %s", collection, exc)
-        if SPARSE_ENABLED:
+        if SPARSE_ENABLED and sparse_config:
             try:
                 qdrant.update_collection(
                     collection_name=collection,
-                    sparse_vectors_config={
-                        CONTENT_SPARSE_NAME: qm.SparseVectorParams(),
-                        SUMMARY_SPARSE_NAME: qm.SparseVectorParams(),
-                    },
+                    sparse_vectors_config=sparse_config,
                 )
                 logger.debug("Ensured sparse vectors for '%s' are configured", collection)
             except UnexpectedResponse as exc:
@@ -110,7 +116,6 @@ def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = Non
         raise
     except Exception:
         logger.debug("Collection '%s' not found; creating", collection)
-        pass
 
     try:
         qdrant.create_collection(
@@ -127,16 +132,42 @@ def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = Non
         raise
 
 
+def ensure_collections(collection_base: Optional[str] = None, dim: Optional[int] = None):
+    if dim is None:
+        dim = settings.embedding_dim
+    summary_collection, content_collection = derive_collection_names(collection_base)
+    summary_vectors = {
+        SUMMARY_VECTOR_NAME: qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
+    }
+    content_vectors = {
+        CONTENT_VECTOR_NAME: qm.VectorParams(size=dim, distance=qm.Distance.COSINE),
+    }
+    summary_sparse = (
+        {SUMMARY_SPARSE_NAME: qm.SparseVectorParams()}
+        if SPARSE_ENABLED
+        else None
+    )
+    content_sparse = (
+        {CONTENT_SPARSE_NAME: qm.SparseVectorParams()}
+        if SPARSE_ENABLED
+        else None
+    )
+    _ensure_single_collection(summary_collection, summary_vectors, summary_sparse)
+    _ensure_single_collection(content_collection, content_vectors, content_sparse)
+
+
 def build_and_upsert_points(
     doc_records: Iterable[Dict[str, Any]],
     content_vec,
     summary_vec,
     *,
     enable_sparse: bool,
-    collection_name: str,
+    collection_base: Optional[str],
 ) -> int:
-    points: List[qm.PointStruct] = []
+    summary_collection, content_collection = derive_collection_names(collection_base)
     batch_limit = 256
+    summary_points: List[qm.PointStruct] = []
+    content_points: List[qm.PointStruct] = []
     point_count = 0
 
     for rec in doc_records:
@@ -154,7 +185,9 @@ def build_and_upsert_points(
         if enable_sparse:
             sparse_chunks = tfidf_vector(content_texts, content_vec)
             if summary_vec is not None and summary_sparse_text:
-                summary_sparse = tfidf_vector([summary_sparse_text], summary_vec, path=SUMMARY_VECTORIZER_PATH)[0]
+                summary_sparse = tfidf_vector(
+                    [summary_sparse_text], summary_vec, path=SUMMARY_VECTORIZER_PATH
+                )[0]
             else:
                 summary_sparse = ([], [])
         else:
@@ -171,7 +204,6 @@ def build_and_upsert_points(
         }
         summary_vectors: Dict[str, Any] = {
             SUMMARY_VECTOR_NAME: summary_dense_vec,
-            CONTENT_VECTOR_NAME: summary_dense_vec,
         }
         if SPARSE_ENABLED and enable_sparse and summary_sparse[0]:
             summary_vectors[SUMMARY_SPARSE_NAME] = qm.SparseVector(
@@ -181,10 +213,13 @@ def build_and_upsert_points(
             summary_payload["summary_sparse_values"] = summary_sparse[1]
 
         summary_pid = int(str(int(sha1(f"{doc_id}:summary")[0:12], 16))[:12])
-        points.append(
+        summary_points.append(
             qm.PointStruct(id=summary_pid, vector=summary_vectors, payload=summary_payload)
         )
         point_count += 1
+        if len(summary_points) >= batch_limit:
+            qdrant.upsert(collection_name=summary_collection, points=summary_points)
+            summary_points = []
 
         for i, chunk_item in enumerate(chunks):
             if isinstance(chunk_item, dict):
@@ -207,7 +242,6 @@ def build_and_upsert_points(
 
             vectors: Dict[str, Any] = {
                 CONTENT_VECTOR_NAME: content_vecs[i],
-                SUMMARY_VECTOR_NAME: summary_dense_vec,
             }
 
             if SPARSE_ENABLED and enable_sparse:
@@ -217,14 +251,15 @@ def build_and_upsert_points(
                     payload["content_sparse_indices"] = indices
                     payload["content_sparse_values"] = values
 
-            points.append(qm.PointStruct(id=pid, vector=vectors, payload=payload))
+            content_points.append(qm.PointStruct(id=pid, vector=vectors, payload=payload))
             point_count += 1
+            if len(content_points) >= batch_limit:
+                qdrant.upsert(collection_name=content_collection, points=content_points)
+                content_points = []
 
-        if len(points) >= batch_limit:
-            qdrant.upsert(collection_name=collection_name, points=points)
-            points = []
-
-    if points:
-        qdrant.upsert(collection_name=collection_name, points=points)
+    if summary_points:
+        qdrant.upsert(collection_name=summary_collection, points=summary_points)
+    if content_points:
+        qdrant.upsert(collection_name=content_collection, points=content_points)
 
     return point_count

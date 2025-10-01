@@ -134,7 +134,7 @@ def _stage1_select_documents(
         flt, qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary"))
     )
     sum_search = qdrant.search(
-        collection_name=settings.collection_name,
+        collection_name=settings.qdrant_summary_collection,
         query_vector=(SUMMARY_VECTOR_NAME, q_vec),
         query_filter=point_type_filter,
         limit=max(50, req.top_m),
@@ -211,7 +211,7 @@ def _stage2_select_chunks(
         ]
     )
     cont_search = qdrant.search(
-        collection_name=settings.collection_name,
+        collection_name=settings.qdrant_content_collection,
         query_vector=(CONTENT_VECTOR_NAME, q_vec),
         query_filter=flt2,
         limit=req.top_m,
