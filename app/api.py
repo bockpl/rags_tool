@@ -483,7 +483,9 @@ def search_query(req: SearchQuery):
     if not cand_doc_ids:
         return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
 
-    final_hits, mmr_pool, rel2 = _stage2_select_chunks(cand_doc_ids, q_vec, content_sparse_query, req)
+    final_hits, mmr_pool, rel2 = _stage2_select_chunks(
+        cand_doc_ids, q_vec, content_sparse_query, doc_map, req
+    )
     if not final_hits:
         return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
 

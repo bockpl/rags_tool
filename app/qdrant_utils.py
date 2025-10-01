@@ -161,6 +161,31 @@ def build_and_upsert_points(
             sparse_chunks = [([], []) for _ in chunks]
             summary_sparse = ([], [])
 
+        summary_payload: Dict[str, Any] = {
+            "doc_id": doc_id,
+            "path": path,
+            "is_active": True,
+            "point_type": "summary",
+            "summary": doc_summary,
+            "signature": doc_signature,
+        }
+        summary_vectors: Dict[str, Any] = {
+            SUMMARY_VECTOR_NAME: summary_dense_vec,
+            CONTENT_VECTOR_NAME: summary_dense_vec,
+        }
+        if SPARSE_ENABLED and enable_sparse and summary_sparse[0]:
+            summary_vectors[SUMMARY_SPARSE_NAME] = qm.SparseVector(
+                indices=summary_sparse[0], values=summary_sparse[1]
+            )
+            summary_payload["summary_sparse_indices"] = summary_sparse[0]
+            summary_payload["summary_sparse_values"] = summary_sparse[1]
+
+        summary_pid = int(str(int(sha1(f"{doc_id}:summary")[0:12], 16))[:12])
+        points.append(
+            qm.PointStruct(id=summary_pid, vector=summary_vectors, payload=summary_payload)
+        )
+        point_count += 1
+
         for i, chunk_item in enumerate(chunks):
             if isinstance(chunk_item, dict):
                 chunk_text_val = chunk_item.get("text", "")
@@ -174,9 +199,8 @@ def build_and_upsert_points(
                 "path": path,
                 "chunk_id": i,
                 "is_active": True,
-                "summary": doc_summary,
+                "point_type": "chunk",
                 "text": chunk_text_val,
-                "signature": doc_signature,
             }
             if section_label:
                 payload["section"] = section_label
@@ -192,10 +216,6 @@ def build_and_upsert_points(
                     vectors[CONTENT_SPARSE_NAME] = qm.SparseVector(indices=indices, values=values)
                     payload["content_sparse_indices"] = indices
                     payload["content_sparse_values"] = values
-                if summary_sparse[0]:
-                    vectors[SUMMARY_SPARSE_NAME] = qm.SparseVector(indices=summary_sparse[0], values=summary_sparse[1])
-                    payload["summary_sparse_indices"] = summary_sparse[0]
-                    payload["summary_sparse_values"] = summary_sparse[1]
 
             points.append(qm.PointStruct(id=pid, vector=vectors, payload=payload))
             point_count += 1

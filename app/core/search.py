@@ -93,6 +93,17 @@ def _cosine_dense(a: List[float], b: List[float]) -> float:
     return float(np.dot(va, vb) / denom)
 
 
+def _with_must_condition(
+    flt: Optional[qm.Filter], condition: qm.FieldCondition
+) -> qm.Filter:
+    if flt is None:
+        return qm.Filter(must=[condition])
+    must_items = list(flt.must or []) + [condition]
+    should_items = list(flt.should or []) if flt.should else None
+    must_not_items = list(flt.must_not or []) if flt.must_not else None
+    return qm.Filter(must=must_items, should=should_items, must_not=must_not_items)
+
+
 def _build_sparse_queries_for_query(query: str, use_hybrid: bool) -> Tuple[
     Optional[Tuple[List[int], List[float]]], Optional[Tuple[List[int], List[float]]]
 ]:
@@ -119,10 +130,13 @@ def _stage1_select_documents(
     summary_sparse_query: Optional[Tuple[List[int], List[float]]],
     req: Any,
 ) -> Tuple[List[str], Dict[str, Any]]:
+    point_type_filter = _with_must_condition(
+        flt, qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary"))
+    )
     sum_search = qdrant.search(
         collection_name=settings.collection_name,
         query_vector=(SUMMARY_VECTOR_NAME, q_vec),
-        query_filter=flt,
+        query_filter=point_type_filter,
         limit=max(50, req.top_m),
         with_payload=True,
         with_vectors=[SUMMARY_VECTOR_NAME] if req.mmr_stage1 else False,
@@ -136,6 +150,8 @@ def _stage1_select_documents(
     doc_map: Dict[str, Dict[str, Any]] = {}
     for r in sum_search:
         payload = r.payload or {}
+        if payload.get("point_type") and payload.get("point_type") != "summary":
+            continue
         did = payload.get("doc_id")
         if not did or did in doc_map:
             continue
@@ -153,6 +169,8 @@ def _stage1_select_documents(
             "dense_score": dense_score,
             "sparse_score": sparse_dot,
             "path": payload.get("path"),
+            "doc_summary": payload.get("summary"),
+            "doc_signature": payload.get("signature"),
         }
 
     if not doc_map:
@@ -183,9 +201,15 @@ def _stage2_select_chunks(
     cand_doc_ids: List[str],
     q_vec: List[float],
     content_sparse_query: Optional[Tuple[List[int], List[float]]],
+    doc_map: Dict[str, Any],
     req: Any,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[float]]:
-    flt2 = qm.Filter(must=[qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=cand_doc_ids))])
+    flt2 = qm.Filter(
+        must=[
+            qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=cand_doc_ids)),
+            qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
+        ]
+    )
     cont_search = qdrant.search(
         collection_name=settings.collection_name,
         query_vector=(CONTENT_VECTOR_NAME, q_vec),
@@ -198,11 +222,18 @@ def _stage2_select_chunks(
     mmr_pool: List[Dict[str, Any]] = []
     for hit in cont_search:
         payload = hit.payload or {}
+        if payload.get("point_type") and payload.get("point_type") != "chunk":
+            continue
         dense_score = float(hit.score or 0.0)
         sparse_dot = 0.0
         if content_sparse_query is not None and payload.get("content_sparse_indices") and payload.get("content_sparse_values"):
             q_lookup = dict(zip(content_sparse_query[0], content_sparse_query[1]))
             sparse_dot = _sparse_dot(q_lookup, payload.get("content_sparse_indices", []), payload.get("content_sparse_values", []))
+        doc_info = doc_map.get(payload.get("doc_id", ""), {})
+        if doc_info:
+            payload.setdefault("summary", doc_info.get("doc_summary"))
+            if doc_info.get("doc_signature") is not None:
+                payload.setdefault("signature", doc_info.get("doc_signature"))
         mmr_pool.append({
             "hit": hit,
             "doc_id": payload.get("doc_id", ""),
@@ -243,6 +274,11 @@ def _stage2_select_chunks(
     for idx, item in zip(sel_idx, selected):
         hit = item["hit"]
         payload = hit.payload or {}
+        doc_info = doc_map.get(payload.get("doc_id", ""), {})
+        if doc_info:
+            payload.setdefault("summary", doc_info.get("doc_summary"))
+            if doc_info.get("doc_signature") is not None:
+                payload.setdefault("signature", doc_info.get("doc_signature"))
         final_score = float(rel2[idx])
         final_hits.append({"hit": hit, "score": float(final_score), "payload": payload})
     final_hits.sort(key=lambda x: x["score"], reverse=True)
