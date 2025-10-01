@@ -7,8 +7,9 @@ import logging
 import pathlib
 import re
 import sys
+import tempfile
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -16,7 +17,7 @@ from fastapi.routing import APIRoute
 
 from app.core.chunking import chunk_text_by_sections
 from qdrant_client.http import models as qm
-from app.core.embedding import prepare_tfidf
+from app.core.embedding import IterableCorpus, prepare_tfidf
 from app.core.embedding import embed_text
 from app.core.parsing import SUPPORTED_EXT, extract_text
 from app.core.search import (
@@ -63,12 +64,9 @@ def _scan_files(base: pathlib.Path, pattern: str, recursive: bool) -> List[pathl
     return [p for p in iterator if p.is_file() and p.suffix.lower() in SUPPORTED_EXT]
 
 
-def _collect_documents(
+def _iter_document_records(
     file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int
-) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
-    all_chunks: List[str] = []
-    summary_corpus: List[str] = []
-    doc_records: List[Dict[str, Any]] = []
+) -> Iterable[Dict[str, Any]]:
     for path in file_paths:
         logger.debug("Processing document %s", path)
         raw = extract_text(path)
@@ -89,17 +87,40 @@ def _collect_documents(
             "doc_signature": summary_signature,
             "summary_sparse_text": summary_sparse_text,
         }
-        doc_records.append(rec)
-        all_chunks.extend([c.get("text", "") for c in chunks])
-        if summary_sparse_text:
-            summary_corpus.append(summary_sparse_text)
         logger.debug(
             "Document %s parsed | chunks=%d summary_len=%d",
             path,
             len(chunks),
             len(rec["doc_summary"] or ""),
         )
-    return doc_records, all_chunks, summary_corpus
+        yield rec
+
+
+def _iter_saved_records(path: pathlib.Path) -> Iterable[Dict[str, Any]]:
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def _iter_chunk_texts(path: pathlib.Path) -> Iterable[str]:
+    for rec in _iter_saved_records(path):
+        for chunk in rec.get("chunks", []):
+            if isinstance(chunk, dict):
+                text = chunk.get("text", "")
+            else:
+                text = str(chunk)
+            if text:
+                yield text
+
+
+def _iter_summary_texts(path: pathlib.Path) -> Iterable[str]:
+    for rec in _iter_saved_records(path):
+        summary = rec.get("summary_sparse_text")
+        if summary:
+            yield summary
 
 
 ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
@@ -311,26 +332,60 @@ def ingest_build(req: IngestBuildRequest):
     if not file_paths:
         return {"ok": True, "indexed": 0, "took_ms": int((time.time() - t0) * 1000)}
 
-    doc_records, all_chunks, summary_corpus = _collect_documents(file_paths, req.chunk_tokens, req.chunk_overlap)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store_path = pathlib.Path(tmpdir) / "doc_records.jsonl"
+        doc_count = 0
+        chunk_count = 0
+        summary_count = 0
 
-    content_vec, summary_vec = prepare_tfidf(all_chunks, summary_corpus, req.enable_sparse, req.rebuild_tfidf)
+        with store_path.open("w", encoding="utf-8") as fh:
+            for record in _iter_document_records(file_paths, req.chunk_tokens, req.chunk_overlap):
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                doc_count += 1
+                chunk_count += len(record.get("chunks", []))
+                if record.get("summary_sparse_text"):
+                    summary_count += 1
 
-    point_count = build_and_upsert_points(
-        doc_records,
-        content_vec,
-        summary_vec,
-        enable_sparse=req.enable_sparse,
-        collection_name=req.collection_name,
-    )
+        if doc_count == 0:
+            took_ms = int((time.time() - t0) * 1000)
+            return {"ok": True, "indexed": 0, "documents": 0, "took_ms": took_ms}
+
+        if req.enable_sparse:
+            chunk_corpus = IterableCorpus(
+                size=chunk_count,
+                factory=lambda: _iter_chunk_texts(store_path),
+            )
+            summary_corpus = IterableCorpus(
+                size=summary_count,
+                factory=lambda: _iter_summary_texts(store_path),
+            )
+        else:
+            chunk_corpus = None
+            summary_corpus = None
+
+        content_vec, summary_vec = prepare_tfidf(
+            chunk_corpus,
+            summary_corpus,
+            req.enable_sparse,
+            req.rebuild_tfidf,
+        )
+
+        point_count = build_and_upsert_points(
+            _iter_saved_records(store_path),
+            content_vec,
+            summary_vec,
+            enable_sparse=req.enable_sparse,
+            collection_name=req.collection_name,
+        )
 
     took_ms = int((time.time() - t0) * 1000)
     logger.debug(
         "Ingest build finished | documents=%d points=%d took_ms=%d",
-        len(doc_records),
+        doc_count,
         point_count,
         took_ms,
     )
-    return {"ok": True, "indexed": point_count, "documents": len(doc_records), "took_ms": took_ms}
+    return {"ok": True, "indexed": point_count, "documents": doc_count, "took_ms": took_ms}
 
 
 @app.post(

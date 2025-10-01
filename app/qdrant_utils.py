@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
@@ -128,7 +128,7 @@ def ensure_collection(collection: Optional[str] = None, dim: Optional[int] = Non
 
 
 def build_and_upsert_points(
-    doc_records: List[Dict[str, Any]],
+    doc_records: Iterable[Dict[str, Any]],
     content_vec,
     summary_vec,
     *,

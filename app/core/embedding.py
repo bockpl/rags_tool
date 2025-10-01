@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from openai import OpenAI
@@ -22,6 +22,20 @@ SUMMARY_VECTORIZER_PATH = VECTOR_STORE_DIR / "tfidf_vectorizer_summary.json"
 
 # OpenAI-compatible embedding client
 embedding_client = OpenAI(base_url=settings.embedding_api_url, api_key=settings.embedding_api_key)
+
+
+class IterableCorpus:
+    """Re-iterable corpus proxy storing size metadata for TF-IDF fitting."""
+
+    def __init__(self, size: int, factory: Callable[[], Iterable[str]]):
+        self.size = size
+        self._factory = factory
+
+    def __len__(self) -> int:
+        return self.size
+
+    def __iter__(self):
+        yield from self._factory()
 
 
 def embed_text(texts: List[str]) -> List[List[float]]:
@@ -62,8 +76,10 @@ def _vectorizer_params_for_corpus(corpus_size: int) -> Dict[str, Any]:
     return {"lowercase": True, "ngram_range": (1, 2), "min_df": 2, "max_df": 0.9}
 
 
-def fit_vectorizer(corpus: List[str], path: Path = VECTORIZER_PATH) -> TfidfVectorizer:
-    vec = TfidfVectorizer(**_vectorizer_params_for_corpus(len(corpus)))
+def fit_vectorizer(
+    corpus: Iterable[str], corpus_size: int, path: Path = VECTORIZER_PATH
+) -> TfidfVectorizer:
+    vec = TfidfVectorizer(**_vectorizer_params_for_corpus(corpus_size))
     vec.fit(corpus)
     save_vectorizer(vec, path=path)
     return vec
@@ -87,9 +103,21 @@ def tfidf_vector(
     return results
 
 
+def _normalize_corpus(corpus: Optional[Iterable[str]]) -> Tuple[Optional[Iterable[str]], int]:
+    if corpus is None:
+        return None, 0
+    try:
+        size = len(corpus)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise TypeError("Corpus object must define __len__ for TF-IDF preparation") from exc
+    if size == 0:
+        return None, 0
+    return corpus, int(size)
+
+
 def prepare_tfidf(
-    all_chunks: List[str],
-    summary_corpus: List[str],
+    all_chunks: Optional[Iterable[str]],
+    summary_corpus: Optional[Iterable[str]],
     enable_sparse: bool,
     rebuild_tfidf: bool,
 ) -> Tuple[Optional[TfidfVectorizer], Optional[TfidfVectorizer]]:
@@ -97,23 +125,27 @@ def prepare_tfidf(
         return None, None
     content_vec: Optional[TfidfVectorizer] = None
     summary_vec: Optional[TfidfVectorizer] = None
-    if all_chunks:
+
+    chunk_iter, chunk_size = _normalize_corpus(all_chunks)
+    summary_iter, summary_size = _normalize_corpus(summary_corpus)
+
+    if chunk_iter is not None:
         if rebuild_tfidf or not VECTORIZER_PATH.exists():
-            content_vec = fit_vectorizer(all_chunks)
+            content_vec = fit_vectorizer(chunk_iter, chunk_size)
         else:
             content_vec = load_vectorizer()
             if content_vec is None:
-                content_vec = fit_vectorizer(all_chunks)
+                content_vec = fit_vectorizer(chunk_iter, chunk_size)
     else:
         content_vec = load_vectorizer()
 
-    if summary_corpus:
+    if summary_iter is not None:
         if rebuild_tfidf or not SUMMARY_VECTORIZER_PATH.exists():
-            summary_vec = fit_vectorizer(summary_corpus, path=SUMMARY_VECTORIZER_PATH)
+            summary_vec = fit_vectorizer(summary_iter, summary_size, path=SUMMARY_VECTORIZER_PATH)
         else:
             summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
             if summary_vec is None:
-                summary_vec = fit_vectorizer(summary_corpus, path=SUMMARY_VECTORIZER_PATH)
+                summary_vec = fit_vectorizer(summary_iter, summary_size, path=SUMMARY_VECTORIZER_PATH)
     else:
         summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
 
