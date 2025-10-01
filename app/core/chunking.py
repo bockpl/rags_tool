@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import spacy
@@ -26,15 +26,15 @@ if tiktoken is not None:  # pragma: no cover - runtime path
         _TOKENIZER = None
 
 SECTION_HIERARCHY: Tuple[str, ...] = (
-    "attachment",
-    "regulamin",
     "chapter",
     "par",
     "ust",
     "pkt",
     "lit",
-    "dash",
 )
+
+CHAPTER_KEYWORDS: Tuple[str, ...] = ("Załącznik", "REGULAMIN", "Rozdział")
+_CHAPTER_KEYWORDS_LOWER = {kw.lower() for kw in CHAPTER_KEYWORDS}
 
 
 def _clean_value(value: Optional[str]) -> Optional[str]:
@@ -60,10 +60,6 @@ def _format_level(level: str, value: Optional[str]) -> Optional[str]:
     value = value.strip()
     if not value:
         return None
-    if level == "attachment":
-        return value
-    if level == "regulamin":
-        return value.upper()
     if level == "chapter":
         return value
     if level == "par":
@@ -78,9 +74,7 @@ def _format_level(level: str, value: Optional[str]) -> Optional[str]:
     if level == "lit":
         value = value.rstrip(".)").strip().lower()
         return f"lit. {value}" if value else None
-    if level == "dash":
-        return value
-    return value
+    return None
 
 
 def _format_section_label(hierarchy: Dict[str, Optional[str]]) -> str:
@@ -90,6 +84,27 @@ def _format_section_label(hierarchy: Dict[str, Optional[str]]) -> str:
         if formatted:
             parts.append(formatted)
     return " ".join(parts).strip() or "Preambuła"
+
+
+def _is_chapter_token(text: str) -> bool:
+    if not text:
+        return False
+    if not text[0].isupper():
+        return False
+    return text.lower() in _CHAPTER_KEYWORDS_LOWER
+
+
+def _expand_span_to_line(doc: "Doc", span: "Span") -> Optional["Span"]:
+    if span is None:
+        return None
+    start_char = span.start_char
+    end_char = span.end_char
+    text = doc.text
+    n = len(text)
+    while end_char < n and text[end_char] not in "\r\n":
+        end_char += 1
+    expanded = doc.char_span(start_char, end_char, alignment_mode="expand")
+    return expanded
 
 
 def count_tokens(text: str) -> int:
@@ -204,25 +219,19 @@ def _get_nlp_pipeline() -> Optional[Language]:
     @Language.component("section_annotator_v2")
     def section_annotator_v2(doc: Doc) -> Doc:
         patterns = {
-            "attachment": [[{"LOWER": "załącznik"}]],
-            "regulamin": [[{"LOWER": "regulamin"}]],
-            "chapter": [[{"LOWER": {"IN": ["rozdział", "dział"]}}, {"IS_SPACE": True, "OP": "+"}, {"LIKE_NUM": True}]],
+            "chapter": [[{"TEXT": {"REGEX": r"^(Załącznik|REGULAMIN|Rozdział)$"}}]],
             "par": [[{"TEXT": "§"}, {"IS_SPACE": True, "OP": "*"}, {"LIKE_NUM": True}]],
             "ust": [[{"IS_DIGIT": True}, {"TEXT": "."}]],
             "pkt": [[{"LIKE_NUM": True}, {"TEXT": ")"}]],
             "lit": [[{"IS_ALPHA": True, "LENGTH": 1}, {"TEXT": ")"}]],
-            "dash": [[{"TEXT": {"IN": ["-", "–", "—", "•"]}}]],
         }
 
         extractors = {
-            "attachment": lambda s: _clean_value(s.text),
-            "regulamin": lambda s: _clean_value(s.text.upper()),
             "chapter": lambda s: _clean_value(s.text),
             "par": lambda s: _extract_number(s.text),
             "ust": lambda s: _extract_number(s.text),
             "pkt": lambda s: _extract_number(s.text),
             "lit": lambda s: _extract_letter(s.text),
-            "dash": lambda s: "•",
         }
 
         matcher = Matcher(doc.vocab)
@@ -232,9 +241,20 @@ def _get_nlp_pipeline() -> Optional[Language]:
         matches: List[Tuple[str, Span]] = []
         for match_id, start, end in matcher(doc):
             span = doc[start:end]
+            name = doc.vocab.strings[match_id]
+
+            if name == "chapter":
+                token_text = span[0].text if len(span) else ""
+                if not _is_chapter_token(token_text):
+                    continue
+                expanded = _expand_span_to_line(doc, span)
+                if not expanded or not expanded.text.strip():
+                    continue
+                span = expanded
+
             is_line_start = span.start == 0 or doc.text[span.start_char - 1] in "\n\r"
             if is_line_start:
-                matches.append((doc.vocab.strings[match_id], span))
+                matches.append((name, span))
 
         matches.sort(key=lambda item: item[1].start)
 
@@ -253,6 +273,9 @@ def _get_nlp_pipeline() -> Optional[Language]:
                     content_span._.section_hierarchy = current_hierarchy.copy()
                     section_spans.append(content_span)
 
+            # Skip markers not defined in SECTION_HIERARCHY (e.g., "dash")
+            if name not in SECTION_HIERARCHY:
+                continue
             level_index = SECTION_HIERARCHY.index(name)
             value = extractors[name](marker_span)
             current_hierarchy[name] = value
@@ -348,42 +371,66 @@ def chunk_text_by_sections(
 
     # Merge consecutive chunks according to the requested hierarchy level
     merged: List[Dict[str, Any]] = []
-    prev_key: Optional[tuple] = None
-    for item in out:
-        cur_key: tuple
-        if merge_up_to:
-            try:
-                level_idx = SECTION_HIERARCHY.index(merge_up_to)
-                # Build a tuple of hierarchy values up to the requested level
-                cur_key = tuple(
-                    item["hierarchy"].get(level)
-                    for level in SECTION_HIERARCHY[: level_idx + 1]
-                )
-            except Exception:
-                # Fallback to full label if something goes wrong
-                cur_key = (item["section"],)
-        else:
+    level_idx: Optional[int] = None
+    if merge_up_to:
+        try:
+            level_idx = SECTION_HIERARCHY.index(merge_up_to)
+        except ValueError:
+            level_idx = None
+
+    if level_idx is not None:
+        grouped: Dict[tuple, Dict[str, Any]] = {}
+        order: List[tuple] = []
+
+        for item in out:
+            hierarchy = item.get("hierarchy", {})
+            cur_key = tuple(
+                hierarchy.get(level) for level in SECTION_HIERARCHY[: level_idx + 1]
+            )
+            if cur_key not in grouped:
+                order.append(cur_key)
+                trimmed_hierarchy = {
+                    level: hierarchy.get(level) if idx <= level_idx else None
+                    for idx, level in enumerate(SECTION_HIERARCHY)
+                }
+                grouped[cur_key] = {
+                    "section": _format_section_label(trimmed_hierarchy),
+                    "texts": [item["text"]],
+                }
+            else:
+                grouped[cur_key]["texts"].append(item["text"])
+
+        for key in order:
+            bucket = grouped[key]
+            label = bucket["section"]
+            partial: Optional[str] = None
+            for piece in bucket["texts"]:
+                normalized = piece if partial is None else partial.rstrip() + "\n\n" + piece.lstrip()
+                if partial is None:
+                    partial = piece
+                    continue
+                if count_tokens(normalized) <= target_tokens:
+                    partial = normalized
+                else:
+                    merged.append({"text": partial, "section": label})
+                    partial = piece
+            if partial:
+                merged.append({"text": partial, "section": label})
+    else:
+        prev_key: Optional[tuple] = None
+        for item in out:
             cur_key = (item["section"],)
-
-        if not merged:
-            merged.append(
-                {
-                    "text": item["text"],
-                    "section": item["section"],
-                }
-            )
+            if merged and prev_key == cur_key:
+                merged[-1]["text"] = (
+                    merged[-1]["text"].rstrip() + "\n\n" + item["text"].lstrip()
+                )
+            else:
+                merged.append(
+                    {
+                        "text": item["text"],
+                        "section": item["section"],
+                    }
+                )
             prev_key = cur_key
-            continue
-
-        if prev_key == cur_key:
-            merged[-1]["text"] = merged[-1]["text"].rstrip() + "\n\n" + item["text"].lstrip()
-        else:
-            merged.append(
-                {
-                    "text": item["text"],
-                    "section": item["section"],
-                }
-            )
-        prev_key = cur_key
 
     return merged or _fallback()

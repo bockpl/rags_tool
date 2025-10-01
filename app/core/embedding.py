@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from openai import OpenAI
@@ -54,8 +54,16 @@ def save_vectorizer(vec: TfidfVectorizer, path: Path = VECTORIZER_PATH):
     path.write_text(json.dumps(payload))
 
 
+def _vectorizer_params_for_corpus(corpus_size: int) -> Dict[str, Any]:
+    if corpus_size <= 1:
+        return {"lowercase": True, "ngram_range": (1, 2), "min_df": 1, "max_df": 1.0}
+    if corpus_size == 2:
+        return {"lowercase": True, "ngram_range": (1, 2), "min_df": 1, "max_df": 1.0}
+    return {"lowercase": True, "ngram_range": (1, 2), "min_df": 2, "max_df": 0.9}
+
+
 def fit_vectorizer(corpus: List[str], path: Path = VECTORIZER_PATH) -> TfidfVectorizer:
-    vec = TfidfVectorizer(lowercase=True, ngram_range=(1, 2), min_df=2, max_df=0.9)
+    vec = TfidfVectorizer(**_vectorizer_params_for_corpus(len(corpus)))
     vec.fit(corpus)
     save_vectorizer(vec, path=path)
     return vec
@@ -110,4 +118,3 @@ def prepare_tfidf(
         summary_vec = load_vectorizer(path=SUMMARY_VECTORIZER_PATH)
 
     return content_vec, summary_vec
-

@@ -72,7 +72,7 @@ def _collect_documents(
     for path in file_paths:
         logger.debug("Processing document %s", path)
         raw = extract_text(path)
-        chunk_items = chunk_text_by_sections(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap, merge_up_to="par")
+        chunk_items = chunk_text_by_sections(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap, merge_up_to="ust")
         chunks = chunk_items
         if not chunks:
             logger.debug("Document %s produced no chunks; skipping", path)
