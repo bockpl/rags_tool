@@ -72,7 +72,7 @@ def _collect_documents(
     for path in file_paths:
         logger.debug("Processing document %s", path)
         raw = extract_text(path)
-        chunk_items = chunk_text_by_sections(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap)
+        chunk_items = chunk_text_by_sections(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap, merge_up_to="par")
         chunks = chunk_items
         if not chunks:
             logger.debug("Document %s produced no chunks; skipping", path)
@@ -339,18 +339,81 @@ def ingest_build(req: IngestBuildRequest):
     summary="rags_tool search (LLM tool)",
     operation_id="rags_tool_search",
     tags=["tools"],
-    description=(
-        "Two-stage retrieval for LLM tools. Stage-1 ranks document summaries; "
-        "Stage-2 ranks full-text chunks within selected documents using hybrid scoring (dense+TF-IDF) and MMR.\n\n"
-        "Usage guidance for tools:\n"
-        "- Prefer `result_format=\"blocks\"` with `merge_chunks=true` to receive consolidated blocks.\n"
-        "- Set `top_k` to 5–10 and keep defaults for other params unless you know why to change them.\n"
-        "- `summary_mode=first` includes a single document summary per document.\n"
-        "- `mode=auto` auto-detects current/archival, or force with `current|archival|all`.\n"
-        "Returned fields: use `blocks[].text` as evidence; cite `blocks[].path` and chunk id range."
-    ),
+    description="Two-stage hybrid retrieval for LLM tools. Detailed parameter documentation is available in the function docstring.",
 )
 def search_query(req: SearchQuery):
+    """
+    Endpoint: /search/query (POST)
+
+    Purpose
+    -------
+    Provides two‑stage hybrid retrieval for LLM‑powered tools. Stage 1 ranks document
+    summaries, Stage 2 ranks full‑text chunks within the selected documents using a
+    combination of dense embeddings and TF‑IDF sparse vectors, with optional MMR
+    diversification.
+
+    Parameters (SearchQuery)
+    ------------------------
+    - **query** (str): user query.
+    - **top_m** (int): number of top documents for stage 1 (default 10).
+    - **top_k** (int): number of top chunks per document for stage 2 (default 5).
+    - **mode** (str): `"auto"` (detect current/archival), `"current"`, `"archival"` or `"all"`.
+    - **use_hybrid** (bool): enable dense + sparse scoring.
+    - **dense_weight** / **sparse_weight** (float): weighting of dense vs sparse scores.
+    - **mmr_lambda** (float): trade‑off between relevance and diversity (default 0.3).
+    - **per_doc_limit** (int): max chunks per document after MMR.
+    - **score_norm** (str): `"minmax"`, `"zscore"` or `"none"` for score normalisation.
+    - **rep_alpha** (float): weighting between dense and sparse similarity in MMR.
+    - **mmr_stage1** (bool): apply MMR already at document selection.
+    - **summary_mode** (str): `"first"` (include one summary per doc) or `"none"`.
+    - **merge_chunks** (bool): consolidate consecutive chunks into blocks.
+    - **merge_group_budget_tokens** (int): token budget per merged block.
+    - **max_merged_per_group** (int): max blocks per document.
+    - **expand_neighbors** (int): include surrounding chunks around a block.
+    - **result_format** (str): `"blocks"` (recommended), `"hits"` or `"grouped"`.
+
+    Recommendations for LLM callers
+    --------------------------------
+    * Use `result_format="blocks"` together with `merge_chunks=true` to obtain
+      concise evidence blocks.
+    * Keep `top_k` between 5‑10 unless you need finer granularity.
+    * `summary_mode="first"` returns a single document summary per hit, useful for
+      citation.
+    * The returned payload contains `blocks` where each block includes:
+        - `text` – concatenated chunk text (evidence).
+        - `path` – source file path.
+        - `first_chunk_id` / `last_chunk_id` – range of original chunk IDs.
+        - `score` – relevance score.
+
+    Returns
+    -------
+    SearchResponse containing timing, hits (if not using blocks), optional groups,
+    and a list of `blocks` when `result_format="blocks"`.
+
+    Example request (JSON):
+    {
+        "query": "Jak działa rags_tool?",
+        "top_m": 10,
+        "top_k": 5,
+        "mode": "auto",
+        "use_hybrid": true,
+        "dense_weight": 0.6,
+        "sparse_weight": 0.4,
+        "mmr_lambda": 0.3,
+        "per_doc_limit": 2,
+        "score_norm": "minmax",
+        "rep_alpha": 0.6,
+        "mmr_stage1": true,
+        "summary_mode": "first",
+        "merge_chunks": true,
+        "merge_group_budget_tokens": 1200,
+        "max_merged_per_group": 1,
+        "expand_neighbors": 1,
+        "result_format": "blocks"
+    }
+
+    The endpoint returns a JSON with `blocks` ready for citation by the LLM.
+    """
     t0 = time.time()
     ensure_collection()
 
