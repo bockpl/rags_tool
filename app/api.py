@@ -73,6 +73,7 @@ def _iter_document_records(
     file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int
 ) -> Iterable[Dict[str, Any]]:
     for path in file_paths:
+        doc_start = time.time()
         logger.debug("Processing document %s", path)
         raw = extract_text(path)
         chunk_items = chunk_text_by_sections(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap, merge_up_to="ust")
@@ -80,7 +81,7 @@ def _iter_document_records(
         if not chunks:
             logger.debug("Document %s produced no chunks; skipping", path)
             continue
-        doc_sum = llm_summary(raw[:12000])
+        doc_sum = llm_summary(raw)
         doc_id = sha1(str(path.resolve()))
         doc_title = str(doc_sum.get("title", "") or "").strip() or path.stem
         summary_signature = doc_sum.get("signature", [])
@@ -105,10 +106,11 @@ def _iter_document_records(
             "summary_sparse_text": summary_sparse_text,
         }
         logger.debug(
-            "Document %s parsed | chunks=%d summary_len=%d",
+            "Document %s parsed | chunks=%d summary_len=%d took_ms=%d",
             path,
             len(chunks),
             len(rec["doc_summary"] or ""),
+            int((time.time() - doc_start) * 1000),
         )
         yield rec
 

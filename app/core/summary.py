@@ -32,6 +32,7 @@ SUMMARY_PROMPT_JSON = (
     "'replacement' (string; krótkie tytuły aktów zastępowanych, separator ';'; wpisz dokładnie 'brak', jeśli brak informacji)."
 )
 
+MAX_DOC_TO_SUMMARY=75000
 
 def _default_title_from_text(text: str) -> str:
     for line in text.splitlines():
@@ -43,8 +44,8 @@ def _default_title_from_text(text: str) -> str:
 
 def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int = 300) -> Dict[str, Any]:
     text = text.strip()
-    if len(text) > 8000:
-        text = text[:8000]
+    if len(text) > MAX_DOC_TO_SUMMARY:
+        text = text[:MAX_DOC_TO_SUMMARY]
 
     if getattr(settings, "summary_json_mode", True):
         try:
