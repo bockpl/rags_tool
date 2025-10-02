@@ -15,16 +15,18 @@ settings = get_settings()
 summary_client = OpenAI(base_url=settings.summary_api_url, api_key=settings.summary_api_key)
 
 SUMMARY_PROMPT = (
-    "Streść poniższy tekst w maks. 5 zdaniach, wypisz też 'SIGNATURE' (10–20 lematów kluczowych) "
-    "i 'ENTITIES' (nazwy własne/ID/zakres dat). Bez komentarzy.\n\n"
-    "FORMAT:\nSUMMARY: ...\nSIGNATURE: lemma1, lemma2, ...\nENTITIES: ...\n\nTEKST:\n"
+    "Streść poniższy tekst w maks. 5 zdaniach, wypisz też 'SIGNATURE' (10–20 lematów kluczowych), "
+    "'ENTITIES' (nazwy własne/ID/zakres dat) oraz 'REPLACEMENT' (jakie akty zastępuje lub przez co jest "
+    "zastąpiony, wpisz 'brak' jeśli brak informacji). Bez komentarzy.\n\n"
+    "FORMAT:\nSUMMARY: ...\nSIGNATURE: lemma1, lemma2, ...\nENTITIES: ...\nREPLACEMENT: ...\n\nTEKST:\n"
 )
 
 SUMMARY_PROMPT_JSON = (
     "Zwróć wyłącznie poprawny JSON bez komentarzy i bez kodu. Klucze: "
     "'summary' (string, max 5 zdań po polsku), "
     "'signature' (lista 10–20 lematów kluczowych jako strings), "
-    "'entities' (string z nazwami własnymi/ID/zakresami dat)."
+    "'entities' (string z nazwami własnymi/ID/zakresami dat), "
+    "'replacement' (string opisujący listę aktów zastąpionych lub słowo 'brak')."
 )
 
 
@@ -60,8 +62,19 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
                 entities_str = ", ".join(str(x) for x in entities_val)
             else:
                 entities_str = str(entities_val)
+            replacement_val = data.get("replacement", "")
+            if isinstance(replacement_val, list):
+                replacement_str = ", ".join(str(x).strip() for x in replacement_val if str(x).strip())
+            else:
+                replacement_str = str(replacement_val or "").strip()
+            replacement_str = replacement_str or "brak"
             if summary_val:
-                return {"summary": summary_val, "signature": signature_list, "entities": entities_str}
+                return {
+                    "summary": summary_val,
+                    "signature": signature_list,
+                    "entities": entities_str,
+                    "replacement": replacement_str,
+                }
         except Exception:
             pass
 
@@ -78,6 +91,7 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
     summary = ""
     signature_list: List[str] = []
     entities_str = ""
+    replacement_str = "brak"
     for line in out.splitlines():
         m = re.match(r"^\s*summary\s*:\s*(.*)$", line, re.IGNORECASE)
         if m:
@@ -92,7 +106,17 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
         if m:
             entities_str = m.group(1).strip()
             continue
+        m = re.match(r"^\s*replacement\s*:\s*(.*)$", line, re.IGNORECASE)
+        if m:
+            replacement_candidate = m.group(1).strip()
+            replacement_str = replacement_candidate or "brak"
+            continue
     if not summary:
         summary = out.strip()[:600]
-    return {"summary": summary, "signature": signature_list, "entities": entities_str}
-
+    replacement_str = replacement_str or "brak"
+    return {
+        "summary": summary,
+        "signature": signature_list,
+        "entities": entities_str,
+        "replacement": replacement_str,
+    }

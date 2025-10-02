@@ -83,13 +83,17 @@ def _iter_document_records(
         doc_sum = llm_summary(raw[:12000])
         doc_id = sha1(str(path.resolve()))
         summary_signature = doc_sum.get("signature", [])
-        summary_sparse_text = " ".join([doc_sum.get("summary", ""), " ".join(summary_signature)]).strip()
+        replacement_info = doc_sum.get("replacement", "brak") or "brak"
+        summary_sparse_text = " ".join(
+            [doc_sum.get("summary", ""), " ".join(summary_signature), replacement_info]
+        ).strip()
         rec = {
             "doc_id": doc_id,
             "path": str(path.resolve()),
             "chunks": chunks,
             "doc_summary": doc_sum.get("summary", ""),
             "doc_signature": summary_signature,
+            "replacement": replacement_info,
             "summary_sparse_text": summary_sparse_text,
         }
         logger.debug(
@@ -488,6 +492,7 @@ def search_query(req: SearchQuery):
     The endpoint returns a JSON with `blocks` ready for citation by the LLM.
     """
     t0 = time.time()
+    query_hash = sha1(req.query)
     ensure_collections()
 
     mode = _classify_mode(req.query, req.mode)
@@ -499,19 +504,48 @@ def search_query(req: SearchQuery):
 
     cand_doc_ids, doc_map = _stage1_select_documents(q_vec, flt, summary_sparse_query, req)
     if not cand_doc_ids:
-        return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
+        took_ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "Search finished | took_ms=%d query_hash=%s stage=documents hits=0",
+            took_ms,
+            query_hash,
+        )
+        return SearchResponse(took_ms=took_ms, hits=[])
 
     final_hits, mmr_pool, rel2 = _stage2_select_chunks(
         cand_doc_ids, q_vec, content_sparse_query, doc_map, req
     )
     if not final_hits:
-        return SearchResponse(took_ms=int((time.time() - t0) * 1000), hits=[])
+        took_ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "Search finished | took_ms=%d query_hash=%s stage=chunks hits=0",
+            took_ms,
+            query_hash,
+        )
+        return SearchResponse(took_ms=took_ms, hits=[])
 
     results, groups_payload, blocks_payload = _shape_results(final_hits, doc_map, mmr_pool, rel2, req)
 
     if req.result_format == "blocks":
         took_ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "Search finished | took_ms=%d query_hash=%s mode=%s fmt=blocks blocks=%d",
+            took_ms,
+            query_hash,
+            mode,
+            len(blocks_payload or []),
+        )
         return SearchResponse(took_ms=took_ms, hits=[], groups=None, blocks=blocks_payload)
 
     took_ms = int((time.time() - t0) * 1000)
+    logger.info(
+        "Search finished | took_ms=%d query_hash=%s mode=%s fmt=%s hits=%d groups=%d blocks=%d",
+        took_ms,
+        query_hash,
+        mode,
+        req.result_format,
+        len(results or []),
+        len(groups_payload or []),
+        len(blocks_payload or []),
+    )
     return SearchResponse(took_ms=took_ms, hits=results, groups=groups_payload, blocks=blocks_payload)

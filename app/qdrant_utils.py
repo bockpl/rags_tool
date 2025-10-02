@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import pathlib
+import re
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
@@ -169,6 +171,8 @@ def build_and_upsert_points(
     summary_points: List[qm.PointStruct] = []
     content_points: List[qm.PointStruct] = []
     point_count = 0
+    replacement_relations: Dict[str, List[str]] = {}
+    doc_paths: Dict[str, str] = {}
 
     for rec in doc_records:
         doc_id = rec["doc_id"]
@@ -177,6 +181,12 @@ def build_and_upsert_points(
         doc_summary = rec["doc_summary"]
         doc_signature = rec["doc_signature"]
         summary_sparse_text = rec["summary_sparse_text"]
+        replacement_info = str(rec.get("replacement", "") or "brak").strip() or "brak"
+
+        doc_paths[doc_id] = path
+        normalized_refs = _parse_replacement_list(replacement_info)
+        if normalized_refs:
+            replacement_relations[doc_id] = normalized_refs
 
         summary_dense_vec = embed_text([doc_summary])[0]
         content_texts = [c.get("text", c) if isinstance(c, dict) else str(c) for c in chunks]
@@ -202,6 +212,7 @@ def build_and_upsert_points(
             "summary": doc_summary,
             "signature": doc_signature,
         }
+        summary_payload["replacement"] = replacement_info
         summary_vectors: Dict[str, Any] = {
             SUMMARY_VECTOR_NAME: summary_dense_vec,
         }
@@ -262,4 +273,145 @@ def build_and_upsert_points(
     if content_points:
         qdrant.upsert(collection_name=content_collection, points=content_points)
 
+    _apply_replacement_statuses(
+        summary_collection,
+        content_collection,
+        replacement_relations,
+        doc_paths,
+    )
+
     return point_count
+
+
+def _parse_replacement_list(raw: str) -> List[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    if text.lower() == "brak":
+        return []
+    parts = re.split(r"[,;\n]", text)
+    items = [part.strip() for part in parts if part.strip()]
+    return items
+
+
+def _normalize_reference(value: str) -> str:
+    norm = value.strip().lower()
+    norm = norm.replace("\\", "/")
+    norm = re.sub(r"\s+", " ", norm)
+    return norm
+
+
+def _apply_replacement_statuses(
+    summary_collection: str,
+    content_collection: str,
+    replacements: Dict[str, List[str]],
+    doc_paths: Dict[str, str],
+):
+    if not replacements:
+        return
+
+    name_to_doc: Dict[str, str] = {}
+    for doc_id, path in doc_paths.items():
+        norm_path = _normalize_reference(path)
+        name_to_doc[norm_path] = doc_id
+        path_obj = pathlib.Path(path)
+        name_to_doc[_normalize_reference(path_obj.name)] = doc_id
+        name_to_doc[_normalize_reference(path_obj.stem)] = doc_id
+        name_to_doc[doc_id] = doc_id
+
+    deactivate: Set[str] = set()
+    keep_active: Set[str] = set(replacements.keys())
+
+    for replacer_id, refs in replacements.items():
+        for ref in refs:
+            norm_ref = _normalize_reference(ref)
+            candidate = name_to_doc.get(norm_ref)
+            if not candidate and norm_ref:
+                # try unique substring match across known names
+                matches = {
+                    doc
+                    for name, doc in name_to_doc.items()
+                    if norm_ref in name and doc != replacer_id
+                }
+                if len(matches) == 1:
+                    candidate = matches.pop()
+            if candidate and candidate != replacer_id:
+                deactivate.add(candidate)
+            elif candidate is None:
+                logger.debug(
+                    "Replacement reference not matched | doc_id=%s reference=%s",
+                    replacer_id,
+                    ref,
+                )
+
+    for doc_id in deactivate:
+        _set_is_active_flag(summary_collection, content_collection, doc_id, False)
+
+    for doc_id in keep_active:
+        if doc_id in deactivate:
+            continue
+        _set_is_active_flag(summary_collection, content_collection, doc_id, True)
+
+
+def _set_is_active_flag(
+    summary_collection: str,
+    content_collection: str,
+    doc_id: str,
+    is_active: bool,
+):
+    payload = {"is_active": is_active}
+    for collection in (summary_collection, content_collection):
+        filter_clause = qm.Filter(
+            must=[qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=doc_id))]
+        )
+        point_ids = _collect_point_ids(collection, filter_clause)
+        if not point_ids:
+            continue
+        try:
+            qdrant.set_payload(
+                collection_name=collection,
+                payload=payload,
+                points=point_ids,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to update is_active flag | collection=%s doc_id=%s error=%s",
+                collection,
+                doc_id,
+                exc,
+            )
+
+
+def _collect_point_ids(collection: str, flt: qm.Filter) -> List[int]:
+    ids: List[int] = []
+    offset = None
+    try:
+        while True:
+            res = qdrant.scroll(
+                collection_name=collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if isinstance(res, tuple):
+                records, offset = res
+            else:
+                records = getattr(res, "points", None)
+                offset = getattr(res, "next_page_offset", None)
+                if records is None:
+                    records = []
+            if not records:
+                break
+            ids.extend([rec.id for rec in records if rec.id is not None])
+            if offset is None:
+                break
+    except Exception as exc:
+        logger.warning(
+            "Failed to collect point ids | collection=%s error=%s",
+            collection,
+            exc,
+        )
+        return []
+    return ids
