@@ -173,6 +173,7 @@ def build_and_upsert_points(
     point_count = 0
     replacement_relations: Dict[str, List[str]] = {}
     doc_paths: Dict[str, str] = {}
+    doc_titles: Dict[str, str] = {}
 
     for rec in doc_records:
         doc_id = rec["doc_id"]
@@ -182,8 +183,18 @@ def build_and_upsert_points(
         doc_signature = rec["doc_signature"]
         summary_sparse_text = rec["summary_sparse_text"]
         replacement_info = str(rec.get("replacement", "") or "brak").strip() or "brak"
+        if replacement_info.lower() == "brak":
+            replacement_info = "brak"
+        doc_title = str(rec.get("doc_title") or rec.get("title") or "").strip()
+        if not doc_title:
+            try:
+                doc_title = pathlib.Path(path).stem
+            except Exception:
+                doc_title = ""
 
         doc_paths[doc_id] = path
+        if doc_title:
+            doc_titles[doc_id] = doc_title
         normalized_refs = _parse_replacement_list(replacement_info)
         if normalized_refs:
             replacement_relations[doc_id] = normalized_refs
@@ -209,6 +220,7 @@ def build_and_upsert_points(
             "path": path,
             "is_active": True,
             "point_type": "summary",
+            "title": doc_title,
             "summary": doc_summary,
             "signature": doc_signature,
         }
@@ -278,6 +290,7 @@ def build_and_upsert_points(
         content_collection,
         replacement_relations,
         doc_paths,
+        doc_titles,
     )
 
     return point_count
@@ -306,11 +319,13 @@ def _apply_replacement_statuses(
     content_collection: str,
     replacements: Dict[str, List[str]],
     doc_paths: Dict[str, str],
+    doc_titles: Optional[Dict[str, str]] = None,
 ):
     if not replacements:
         return
 
     name_to_doc: Dict[str, str] = {}
+    titles = doc_titles or {}
     for doc_id, path in doc_paths.items():
         norm_path = _normalize_reference(path)
         name_to_doc[norm_path] = doc_id
@@ -318,6 +333,9 @@ def _apply_replacement_statuses(
         name_to_doc[_normalize_reference(path_obj.name)] = doc_id
         name_to_doc[_normalize_reference(path_obj.stem)] = doc_id
         name_to_doc[doc_id] = doc_id
+        title_val = titles.get(doc_id)
+        if title_val:
+            name_to_doc[_normalize_reference(title_val)] = doc_id
 
     deactivate: Set[str] = set()
     keep_active: Set[str] = set(replacements.keys())

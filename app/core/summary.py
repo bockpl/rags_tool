@@ -15,19 +15,30 @@ settings = get_settings()
 summary_client = OpenAI(base_url=settings.summary_api_url, api_key=settings.summary_api_key)
 
 SUMMARY_PROMPT = (
-    "Streść poniższy tekst w maks. 5 zdaniach, wypisz też 'SIGNATURE' (10–20 lematów kluczowych), "
-    "'ENTITIES' (nazwy własne/ID/zakres dat) oraz 'REPLACEMENT' (jakie akty zastępuje lub przez co jest "
-    "zastąpiony, wpisz 'brak' jeśli brak informacji). Bez komentarzy.\n\n"
-    "FORMAT:\nSUMMARY: ...\nSIGNATURE: lemma1, lemma2, ...\nENTITIES: ...\nREPLACEMENT: ...\n\nTEKST:\n"
+    "Streść poniższy tekst w maks. 5 zdaniach. Wypisz też sekcje: 'TITLE' (krótki, jednoznaczny tytuł "
+    "dokumentu — preferuj pierwszą linię lub numer aktu; pojedyncza fraza, bez dodatkowego komentarza), "
+    "'SIGNATURE' (10–20 lematów kluczowych), 'ENTITIES' (nazwy własne/ID/zakresy dat) oraz 'REPLACEMENT' "
+    "(krótka lista tytułów aktów, które dokument zastępuje; rozdziel średnikami; wpisz dokładnie 'brak', "
+    "jeżeli brak danych). Bez komentarzy.\n\n"
+    "FORMAT:\nTITLE: ...\nSUMMARY: ...\nSIGNATURE: lemma1, lemma2, ...\nENTITIES: ...\nREPLACEMENT: ...\n\nTEKST:\n"
 )
 
 SUMMARY_PROMPT_JSON = (
     "Zwróć wyłącznie poprawny JSON bez komentarzy i bez kodu. Klucze: "
-    "'summary' (string, max 5 zdań po polsku), "
+    "'title' (string; krótki jednoznaczny tytuł, preferuj pierwszą linię lub numer dokumentu; max 200 znaków), "
+    "'summary' (string; max 5 zdań po polsku), "
     "'signature' (lista 10–20 lematów kluczowych jako strings), "
     "'entities' (string z nazwami własnymi/ID/zakresami dat), "
-    "'replacement' (string opisujący listę aktów zastąpionych lub słowo 'brak')."
+    "'replacement' (string; krótkie tytuły aktów zastępowanych, separator ';'; wpisz dokładnie 'brak', jeśli brak informacji)."
 )
+
+
+def _default_title_from_text(text: str) -> str:
+    for line in text.splitlines():
+        candidate = line.strip()
+        if candidate:
+            return candidate[:200]
+    return ""
 
 
 def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int = 300) -> Dict[str, Any]:
@@ -49,6 +60,11 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
             )
             content = rsp.choices[0].message.content or "{}"
             data = json.loads(content)
+            title_val = data.get("title", "")
+            if isinstance(title_val, list):
+                title_str = " ".join(str(s).strip() for s in title_val if str(s).strip())
+            else:
+                title_str = str(title_val or "").strip()
             summary_val = str(data.get("summary", "")).strip()
             signature_val = data.get("signature", [])
             if isinstance(signature_val, str):
@@ -68,8 +84,12 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
             else:
                 replacement_str = str(replacement_val or "").strip()
             replacement_str = replacement_str or "brak"
+            if replacement_str.lower() == "brak":
+                replacement_str = "brak"
+            title_str = title_str or _default_title_from_text(text)
             if summary_val:
                 return {
+                    "title": title_str,
                     "summary": summary_val,
                     "signature": signature_list,
                     "entities": entities_str,
@@ -89,10 +109,17 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
     )
     out = rsp.choices[0].message.content or ""
     summary = ""
+    title = ""
     signature_list: List[str] = []
     entities_str = ""
     replacement_str = "brak"
     for line in out.splitlines():
+        m = re.match(r"^\s*title\s*:\s*(.*)$", line, re.IGNORECASE)
+        if m:
+            title_candidate = m.group(1).strip()
+            if title_candidate:
+                title = title_candidate
+            continue
         m = re.match(r"^\s*summary\s*:\s*(.*)$", line, re.IGNORECASE)
         if m:
             summary = m.group(1).strip()
@@ -114,7 +141,11 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
     if not summary:
         summary = out.strip()[:600]
     replacement_str = replacement_str or "brak"
+    if replacement_str.lower() == "brak":
+        replacement_str = "brak"
+    title = title or _default_title_from_text(text)
     return {
+        "title": title,
         "summary": summary,
         "signature": signature_list,
         "entities": entities_str,

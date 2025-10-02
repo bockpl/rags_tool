@@ -82,15 +82,23 @@ def _iter_document_records(
             continue
         doc_sum = llm_summary(raw[:12000])
         doc_id = sha1(str(path.resolve()))
+        doc_title = str(doc_sum.get("title", "") or "").strip() or path.stem
         summary_signature = doc_sum.get("signature", [])
         replacement_info = doc_sum.get("replacement", "brak") or "brak"
-        summary_sparse_text = " ".join(
-            [doc_sum.get("summary", ""), " ".join(summary_signature), replacement_info]
-        ).strip()
+        if isinstance(replacement_info, str) and replacement_info.lower() == "brak":
+            replacement_info = "brak"
+        summary_sparse_parts = [
+            doc_title,
+            doc_sum.get("summary", ""),
+            " ".join(summary_signature),
+            replacement_info,
+        ]
+        summary_sparse_text = " ".join(part for part in summary_sparse_parts if part).strip()
         rec = {
             "doc_id": doc_id,
             "path": str(path.resolve()),
             "chunks": chunks,
+            "doc_title": doc_title,
             "doc_summary": doc_sum.get("summary", ""),
             "doc_signature": summary_signature,
             "replacement": replacement_info,
