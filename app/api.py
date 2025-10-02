@@ -9,7 +9,8 @@ import re
 import sys
 import tempfile
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from threading import Lock
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -43,6 +44,7 @@ from app.qdrant_utils import (
     derive_collection_names,
     ensure_collections,
     qdrant,
+    sha1,
 )
 from app.settings import get_settings
 
@@ -58,10 +60,34 @@ logger.setLevel(logging.DEBUG if settings.debug else logging.INFO)
 logger.propagate = False
 
 
-def sha1(s: str) -> str:
-    import hashlib
+_collection_init_lock = Lock()
+_initialized_collections: Set[str] = set()
 
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+def _collection_cache_key(base: Optional[str]) -> str:
+    summary_collection, content_collection = derive_collection_names(base)
+    return f"{summary_collection}::{content_collection}"
+
+
+def _mark_collections_initialized(base: Optional[str]) -> None:
+    key = _collection_cache_key(base)
+    with _collection_init_lock:
+        _initialized_collections.add(key)
+
+
+def _clear_collection_cache(base: Optional[str]) -> None:
+    key = _collection_cache_key(base)
+    with _collection_init_lock:
+        _initialized_collections.discard(key)
+
+
+def _ensure_collections_cached(base: Optional[str] = None) -> None:
+    key = _collection_cache_key(base)
+    with _collection_init_lock:
+        if key in _initialized_collections:
+            return
+        ensure_collections(base)
+        _initialized_collections.add(key)
 
 
 def _scan_files(base: pathlib.Path, pattern: str, recursive: bool) -> List[pathlib.Path]:
@@ -92,8 +118,9 @@ def _iter_document_records(
             doc_title,
             doc_sum.get("summary", ""),
             " ".join(summary_signature),
-            replacement_info,
         ]
+        if replacement_info.lower() != "brak":
+            summary_sparse_parts.append(replacement_info)
         summary_sparse_text = " ".join(part for part in summary_sparse_parts if part).strip()
         rec = {
             "doc_id": doc_id,
@@ -216,7 +243,6 @@ async def admin_ui_debug_middleware(request: Request, call_next):
     header_value = request.headers.get(ADMIN_UI_REQUEST_HEADER)
     if header_value and header_value.lower() in {"1", "true", "yes"} and not _admin_debug_activated:
         _admin_debug_activated = True
-        settings.debug = True
         logger.setLevel(logging.DEBUG)
         logger.info("Admin UI request detected — DEBUG logging enabled")
     response = await call_next(request)
@@ -280,6 +306,7 @@ def collections_init(req: InitCollectionsRequest):
 
     dim = get_embedding_dim() if req.force_dim_probe else None
     ensure_collections(req.collection_name, dim)
+    _mark_collections_initialized(req.collection_name)
     summary_collection, content_collection = derive_collection_names(req.collection_name)
     return {
         "ok": True,
@@ -343,6 +370,7 @@ def ingest_build(req: IngestBuildRequest):
     summary_collection, content_collection = derive_collection_names(req.collection_name)
 
     if req.reindex:
+        _clear_collection_cache(req.collection_name)
         for coll_name in (summary_collection, content_collection):
             try:
                 qdrant.delete_collection(collection_name=coll_name)
@@ -354,6 +382,7 @@ def ingest_build(req: IngestBuildRequest):
                     "Delete collection '%s' skipped or failed: %s", coll_name, exc
                 )
     ensure_collections(req.collection_name)
+    _mark_collections_initialized(req.collection_name)
 
     base = pathlib.Path(req.base_dir)
     if not base.exists():
@@ -503,7 +532,7 @@ def search_query(req: SearchQuery):
     """
     t0 = time.time()
     query_hash = sha1(req.query)
-    ensure_collections()
+    _ensure_collections_cached()
 
     mode = _classify_mode(req.query, req.mode)
     q_vec = embed_text([req.query])[0]

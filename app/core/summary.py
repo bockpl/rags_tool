@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, List
 
@@ -13,6 +14,8 @@ from app.settings import get_settings
 settings = get_settings()
 
 summary_client = OpenAI(base_url=settings.summary_api_url, api_key=settings.summary_api_key)
+
+logger = logging.getLogger("rags_tool.summary")
 
 SUMMARY_PROMPT = (
     "Streść poniższy tekst w maks. 5 zdaniach. Wypisz też sekcje: 'TITLE' (krótki, jednoznaczny tytuł "
@@ -32,7 +35,7 @@ SUMMARY_PROMPT_JSON = (
     "'replacement' (string; krótkie tytuły aktów zastępowanych, separator ';'; wpisz dokładnie 'brak', jeśli brak informacji)."
 )
 
-MAX_DOC_TO_SUMMARY=75000
+MAX_DOC_TO_SUMMARY = 75_000
 
 def _default_title_from_text(text: str) -> str:
     for line in text.splitlines():
@@ -96,8 +99,8 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
                     "entities": entities_str,
                     "replacement": replacement_str,
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("JSON-mode summary failed; falling back to text parser: %s", exc)
 
     rsp = summary_client.chat.completions.create(
         model=model,
