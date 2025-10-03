@@ -14,9 +14,10 @@ import time
 from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.routing import APIRoute
+from pydantic import ValidationError
 
 from app.core.chunking import chunk_text_by_sections
 from qdrant_client.http import models as qm
@@ -197,6 +198,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "method": "POST",
         "label": "Import kolekcji z archiwum",
         "body": "{\n  \"archive_base64\": \"<wklej_archiwum_base64>\",\n  \"replace_existing\": true\n}",
+        "accepts_file": True,
     },
     {
         "id": "ingest-scan",
@@ -252,6 +254,7 @@ def build_admin_operations() -> List[Dict[str, Any]]:
                 "path": path,
                 "doc": "\n\n".join(doc_parts),
                 "body": spec.get("body"),
+                "accepts_file": spec.get("accepts_file", False),
             }
         )
     return operations
@@ -363,15 +366,89 @@ def collections_export(req: CollectionsExportRequest):
     "/collections/import",
     include_in_schema=False,
     summary="Import kolekcji Qdrant",
-    description="Przyjmuje archiwum .tar.gz (base64) wygenerowane przez /collections/export i odtwarza kolekcje ze snapshotów Qdrant oraz indeksy TF-IDF (domyślnie nadpisując istniejące).",
+    description=(
+        "Przyjmuje archiwum .tar.gz wygenerowane przez /collections/export (plik lub base64) i odtwarza kolekcje ze snapshotów Qdrant oraz indeksy TF-IDF."
+    ),
 )
-def collections_import(req: CollectionsImportRequest):
-    try:
-        raw = base64.b64decode(req.archive_base64)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Nie udało się zdekodować base64: {exc}") from exc
+async def collections_import(
+    request: Request,
+    archive_file: UploadFile | None = File(
+        default=None,
+        description="Archiwum .tar.gz wygenerowane przez /collections/export.",
+    ),
+    replace_existing_form: bool | None = Form(
+        default=None,
+        description="Czy nadpisać istniejące kolekcje (gdy wysyłasz formularz).",
+    ),
+    replace_existing_query: bool = Query(
+        default=True,
+        description="Czy nadpisać istniejące kolekcje (dla zapytań bez formularza).",
+    ),
+):
+    binary_archive: bytes | None = None
+    replace_existing = replace_existing_query
 
-    summary = import_collections_bundle(raw, replace_existing=req.replace_existing)
+    if archive_file is not None:
+        binary_archive = await archive_file.read()
+        await archive_file.close()
+        if replace_existing_form is not None:
+            replace_existing = replace_existing_form
+    else:
+        content_type = request.headers.get("content-type", "").lower()
+        if "application/json" in content_type:
+            try:
+                payload_data = await request.json()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Nie udało się wczytać JSON: {exc}") from exc
+
+            try:
+                payload = CollectionsImportRequest(**payload_data)
+            except ValidationError as exc:
+                raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+            try:
+                binary_archive = base64.b64decode(payload.archive_base64)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Nie udało się zdekodować base64: {exc}") from exc
+            replace_existing = payload.replace_existing
+        elif "application/octet-stream" in content_type or "application/gzip" in content_type:
+            binary_archive = await request.body()
+        elif content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            if "archive_base64" in form:
+                try:
+                    payload = CollectionsImportRequest(
+                        archive_base64=str(form["archive_base64"]),
+                        replace_existing=replace_existing_form if replace_existing_form is not None else replace_existing_query,
+                    )
+                except ValidationError as exc:
+                    raise HTTPException(status_code=422, detail=exc.errors()) from exc
+                try:
+                    binary_archive = base64.b64decode(payload.archive_base64)
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=f"Nie udało się zdekodować base64: {exc}") from exc
+                replace_existing = payload.replace_existing
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Formularz multipart musi zawierać pole 'archive_file' z plikiem archiwum lub 'archive_base64'."
+                    ),
+                )
+        else:
+            body_bytes = await request.body()
+            if body_bytes:
+                binary_archive = body_bytes
+
+    if not binary_archive:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Brak archiwum do importu. Wyślij JSON z polem 'archive_base64', formularz multipart z polem 'archive_file' lub surowe archiwum .tar.gz."
+            ),
+        )
+
+    summary = import_collections_bundle(binary_archive, replace_existing=replace_existing)
     with _collection_init_lock:
         _initialized_collections.clear()
     return {"status": "ok", **summary}

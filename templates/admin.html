@@ -44,6 +44,13 @@
             <label for="payload">Treść żądania (JSON)</label>
             <textarea id="payload" spellcheck="false"></textarea>
         </div>
+        <div id="file-wrapper" style="display:none;">
+            <label for="file-input">Archiwum z eksportu (.tar.gz)</label>
+            <input type="file" id="file-input" accept=".tar.gz,application/gzip,application/octet-stream" />
+            <label for="replace-existing" style="font-weight:400; margin-top:8px; display:flex; gap:8px; align-items:center;">
+                <input type="checkbox" id="replace-existing" checked /> Nadpisz istniejące kolekcje
+            </label>
+        </div>
         <button id="send">Wyślij żądanie</button>
         <pre id="result">Odpowiedź pojawi się tutaj.</pre>
     </div>
@@ -58,6 +65,9 @@
         const payloadEl = document.getElementById("payload");
         const resultEl = document.getElementById("result");
         const sendBtn = document.getElementById("send");
+        const fileWrapper = document.getElementById("file-wrapper");
+        const fileInput = document.getElementById("file-input");
+        const replaceCheckbox = document.getElementById("replace-existing");
 
         function detectDownloadFilename(disposition, fallback) {
             if (!disposition) return fallback;
@@ -100,6 +110,14 @@
                 bodyWrapper.style.display = "none";
                 payloadEl.value = "";
             }
+            if (fileWrapper) {
+                const acceptsFile = op.accepts_file === true;
+                fileWrapper.style.display = acceptsFile ? "block" : "none";
+                if (!acceptsFile) {
+                    fileInput.value = "";
+                }
+                replaceCheckbox.checked = true;
+            }
             resultEl.textContent = "Odpowiedź pojawi się tutaj.";
             sendBtn.disabled = false;
             sendBtn.dataset.op = op.id;
@@ -112,30 +130,40 @@
             sendBtn.disabled = true;
             resultEl.textContent = "Wysyłanie...";
 
-            let bodyPayload = undefined;
+            let requestBody = undefined;
+            let useFilePayload = op.accepts_file === true && fileInput && fileInput.files.length === 1;
+            const headers = {
+                "X-Admin-UI": "1"
+            };
+
             if (op.method !== "GET") {
-                const raw = payloadEl.value.trim();
-                if (raw.length) {
-                    try {
-                        bodyPayload = JSON.stringify(JSON.parse(raw));
-                    } catch (err) {
-                        resultEl.textContent = `Błąd parsowania JSON: ${err}`;
-                        sendBtn.disabled = false;
-                        return;
-                    }
+                if (useFilePayload) {
+                    const formData = new FormData();
+                    formData.append("archive_file", fileInput.files[0]);
+                    formData.append("replace_existing", replaceCheckbox.checked ? "true" : "false");
+                    requestBody = formData;
                 } else {
-                    bodyPayload = "{}";
+                    const raw = payloadEl.value.trim();
+                    if (raw.length) {
+                        try {
+                            requestBody = JSON.stringify(JSON.parse(raw));
+                        } catch (err) {
+                            resultEl.textContent = `Błąd parsowania JSON: ${err}`;
+                            sendBtn.disabled = false;
+                            return;
+                        }
+                    } else {
+                        requestBody = "{}";
+                    }
+                    headers["Content-Type"] = "application/json";
                 }
             }
 
             try {
                 const response = await fetch(op.path, {
                     method: op.method,
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-Admin-UI": "1"
-                    },
-                    body: op.method === "GET" ? undefined : bodyPayload
+                    headers,
+                    body: op.method === "GET" ? undefined : requestBody
                 });
 
                 const ct = response.headers.get("content-type") || "";

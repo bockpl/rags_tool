@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir \
     openai \
     pydantic \
     pydantic-settings \
+    python-multipart \
     tiktoken \
     scikit-learn \
     numpy \

@@ -49,6 +49,29 @@ qdrant = QdrantClient(
 )
 
 
+def _clear_dir_contents(target: pathlib.Path) -> None:
+    """Remove all contents of a directory without removing the directory itself.
+
+    This is safe for cases where `target` is a mountpoint (e.g., Docker volume),
+    where removing the directory would raise 'Device or resource busy' (EBUSY).
+    """
+    if not target.exists():
+        return
+    for entry in target.iterdir():
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink(missing_ok=True)  # type: ignore[call-arg]
+        except Exception as exc:
+            # Attempt a best-effort rename to sidestep EBUSY/permission issues
+            try:
+                fallback = entry.with_name(f"{entry.name}.old-{uuid.uuid4().hex[:8]}")
+                entry.rename(fallback)
+            except Exception:
+                logger.warning("Nie udało się usunąć/przenieść '%s': %s", entry, exc)
+
+
 def sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
@@ -496,15 +519,12 @@ def import_collections_bundle(bundle: bytes, *, replace_existing: bool = True) -
                 summary["errors"].append({"collection": name, "error": str(exc)})
 
         vector_dir = settings.vector_store_dir
+        vector_dir.mkdir(parents=True, exist_ok=True)
         if replace_existing:
             try:
-                shutil.rmtree(vector_dir)
-            except FileNotFoundError:
-                pass
+                _clear_dir_contents(vector_dir)
             except Exception as exc:
-                logger.warning("Nie udało się oczyścić katalogu vector_store '%s': %s", vector_dir, exc)
-
-        vector_dir.mkdir(parents=True, exist_ok=True)
+                logger.warning("Nie udało się wyczyścić zawartości vector_store '%s': %s", vector_dir, exc)
 
         for member in tar.getmembers():
             if not member.isfile():

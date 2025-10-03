@@ -38,7 +38,10 @@ class CollectionsExportRequest(BaseModel):
 class CollectionsImportRequest(BaseModel):
     archive_base64: str = Field(
         ...,
-        description="Base64-encoded tar.gz snapshot bundle (Qdrant + TF-IDF) produced by /collections/export.",
+        description=(
+            "Base64-encoded tar.gz snapshot bundle (Qdrant + TF-IDF) produced by /collections/export. "
+            "Prefer multipart upload with 'archive_file' when using HTTP clients."
+        ),
     )
     replace_existing: bool = Field(
         True,

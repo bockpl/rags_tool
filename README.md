@@ -1,6 +1,19 @@
-# rags_tool (1.3.1)
+# rags_tool (1.4.2)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 1.4.2
+
+- Import: czyszczenie `VECTOR_STORE_DIR` nie usuwa już samego katalogu (co kończyło się błędem „Device or resource busy” przy montażu jako wolumen Dockera). Czyścimy zawartość katalogu, a brakujące pliki są nadpisywane podczas importu.
+
+## Nowości w 1.4.1
+
+- Dodano zależność `python-multipart` wymaganą do obsługi importu pliku w endpointzie `/collections/import` (multipart/form-data). Obraz Dockera i instrukcja lokalnej instalacji zostały zaktualizowane.
+
+## Nowości w 1.4.0
+
+- Endpoint `/collections/import` przyjmuje teraz archiwum `.tar.gz` bezpośrednio jako przesyłany plik (multipart/form-data) albo surowe body HTTP, co upraszcza wykorzystanie plików wygenerowanych przez eksport.
+- Panel Admin UI pozwala wskazać plik eksportu z dysku i wysłać go do API bez ręcznego kodowania base64; wciąż można użyć JSON-a z `archive_base64` dla automatyzacji.
 
 ## Nowości w 1.3.1
 
@@ -179,7 +192,7 @@ Możesz także umieścić te wartości w pliku `.env`; aplikacja wczyta je autom
 1. Utwórz i aktywuj wirtualne środowisko.
 2. Zainstaluj zależności:
    ```bash
-   pip install fastapi uvicorn qdrant-client openai pydantic pydantic-settings tiktoken scikit-learn markdown2 beautifulsoup4 html2text PyPDF2
+   pip install fastapi uvicorn qdrant-client openai pydantic pydantic-settings python-multipart tiktoken scikit-learn markdown2 beautifulsoup4 html2text PyPDF2
    ```
 3. Start serwera:
    ```bash
