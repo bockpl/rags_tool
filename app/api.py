@@ -593,7 +593,7 @@ def ingest_build(req: IngestBuildRequest):
     summary="rags_tool search (LLM tool)",
     operation_id="rags_tool_search",
     tags=["tools"],
-    description="Two-stage hybrid retrieval for LLM tools. Detailed parameter documentation is available in the function docstring.",
+    description=settings.search_tool_description,
 )
 def search_query(req: SearchQuery):
     """
@@ -602,15 +602,16 @@ def search_query(req: SearchQuery):
     Purpose
     -------
     Provides two‑stage hybrid retrieval for LLM‑powered tools. Stage 1 ranks document
-    summaries, Stage 2 ranks full‑text chunks within the selected documents using a
-    combination of dense embeddings and TF‑IDF sparse vectors, with optional MMR
-    diversification.
+    summaries; Stage 2 ranks full‑text chunks within the selected documents using a
+    combination of dense embeddings and TF‑IDF sparse vectors, with optional hybrid MMR
+    diversification and a per‑document cap.
 
     Parameters (SearchQuery)
     ------------------------
-    - **query** (str): user query.
-    - **top_m** (int): number of top documents for stage 1 (default 10).
-    - **top_k** (int): number of top chunks per document for stage 2 (default 5).
+    - **query** (str): concise user question (3–12 words; prefer titles/signatures/dates).
+    - **top_m** (int): candidate documents for Stage 1 (default 100; typical 50–200).
+    - **top_k** (int): global number of final results after Stage 2 (typical 5–10).
+      Use `per_doc_limit` to prevent dominance of a single document.
     - **mode** (str): `"auto"` (detect current/archival), `"current"`, `"archival"` or `"all"`.
     - **use_hybrid** (bool): enable dense + sparse scoring.
     - **dense_weight** / **sparse_weight** (float): weighting of dense vs sparse scores.
@@ -619,17 +620,17 @@ def search_query(req: SearchQuery):
     - **score_norm** (str): `"minmax"`, `"zscore"` or `"none"` for score normalisation.
     - **rep_alpha** (float): weighting between dense and sparse similarity in MMR.
     - **mmr_stage1** (bool): apply MMR already at document selection.
-    - **summary_mode** (str): `"first"` (include one summary per doc) or `"none"`.
+    - **summary_mode** (str): `"none" | "first" | "all"` (summary duplication strategy).
     - **merge_chunks** (bool): consolidate consecutive chunks into blocks.
     - **merge_group_budget_tokens** (int): token budget per merged block.
     - **max_merged_per_group** (int): max blocks per document.
     - **expand_neighbors** (int): include surrounding chunks around a block.
-    - **result_format** (str): `"blocks"` (recommended), `"hits"` or `"grouped"`.
+    - **result_format** (str): `"flat" | "grouped" | "blocks"` (`"blocks"` is default and recommended for tools).
 
     Recommendations for LLM callers
     --------------------------------
-    * Use `result_format="blocks"` together with `merge_chunks=true` to obtain
-      concise evidence blocks.
+    * Prefer `result_format="blocks"` to obtain concise evidence blocks; blocks are
+      constructed even if `merge_chunks=false`.
     * Keep `top_k` between 5‑10 unless you need finer granularity.
     * `summary_mode="first"` returns a single document summary per hit, useful for
       citation.

@@ -68,6 +68,19 @@ class SummRAGSettings(BaseSettings):
     # Prefer JSON responses for summaries (OpenAI JSON mode). Fallback to text parser if unsupported.
     summary_json_mode: bool = Field(default=True, alias="SUMMARY_JSON_MODE")
 
+    # OpenAPI / tool description used by the /search/query endpoint. Can be overridden
+    # via .env to tailor the wording for a specific corpus (e.g., PŁ documents).
+    search_tool_description: str = Field(
+        default=(
+            "Two-stage hybrid retrieval (dense + TF‑IDF) for RAG tools. Stage 1 ranks "
+            "document summaries; Stage 2 ranks full‑text chunks with hybrid MMR and a per‑document cap. "
+            "Use when the question should be grounded in the indexed corpus; not for general knowledge. "
+            "Prefer result_format='blocks' for concise evidence blocks (text + path + score); "
+            "if results are empty or scores are very low, ask the user to clarify or narrow the topic."
+        ),
+        alias="SEARCH_TOOL_DESCRIPTION",
+    )
+
     @property
     def qdrant_summary_collection(self) -> str:
         return self.summary_collection_name or f"{self.collection_name}_summaries"

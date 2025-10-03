@@ -180,6 +180,7 @@ export SUMMARY_MODEL="gpt-4o-mini"
 export SUMMARY_SYSTEM_PROMPT="Jesteś zwięzłym ekstrakcyjnym streszczaczem."  # opcjonalna rola systemowa
 export SUMMARY_PROMPT="..."         # opcjonalnie nadpisz instrukcję tekstowego promptu
 export SUMMARY_PROMPT_JSON="..."     # opcjonalnie nadpisz instrukcję promptu JSON
+export SEARCH_TOOL_DESCRIPTION="..." # opcjonalny opis endpointu /search/query widoczny w OpenAPI i narzędziu LLM
 export COLLECTION_NAME="rags_tool"
 export VECTOR_STORE_DIR=".rags_tool_store"
 export DEBUG="false"  # ustaw na "true", aby włączyć logi debugujące
@@ -370,7 +371,7 @@ Wartości `SECTION_LEVELS` to unia poziomów znalezionych we wszystkich dokument
 - `rep_alpha`: udział dense w repulsji MMR (domyślnie = `dense_weight`).
 - `mmr_stage1`: MMR po stronie streszczeń (domyślnie true).
 - `summary_mode`: `none` | `first` | `all` — kontrola tego, czy i kiedy dołączać streszczenie dokumentu do trafień (domyślnie `first`).
-- `result_format`: `flat` | `grouped` | `blocks` — kształt odpowiedzi; w `grouped` otrzymasz listę grup dokumentów z fragmentami; w `blocks` zwracane są wyłącznie scalone bloki.
+- `result_format`: `flat` | `grouped` | `blocks` — kształt odpowiedzi; domyślnie `blocks` (zalecane dla narzędzi); w `grouped` otrzymasz listę grup dokumentów z fragmentami; w `blocks` zwracane są wyłącznie scalone bloki.
 - `merge_chunks`: włącza scalanie sąsiadujących chunków do bloków (działa dla `flat`, `grouped` – jako dodatkowe pole `blocks` oraz dla `blocks` – jako główna odpowiedź).
 - `merge_group_budget_tokens`: budżet na łączony tekst bloku w ramach grupy `(doc_id, section)` (heurystyka ~4 znaki/token).
 - `max_merged_per_group`: maksymalna liczba bloków na grupę.
