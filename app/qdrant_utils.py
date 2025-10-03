@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import datetime
 import hashlib
+import io
+import json
 import logging
+import os
 import pathlib
 import re
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+import shutil
+import tarfile
+import tempfile
+import time
+import uuid
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from urllib import request as _urlreq
+from urllib import parse as _urlparse
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
@@ -156,6 +167,716 @@ def ensure_collections(collection_base: Optional[str] = None, dim: Optional[int]
     )
     _ensure_single_collection(summary_collection, summary_vectors, summary_sparse)
     _ensure_single_collection(content_collection, content_vectors, content_sparse)
+
+
+def export_collections_bundle(collection_names: Optional[Iterable[str]] = None) -> Tuple[bytes, Dict[str, Any]]:
+    """Serialise all Qdrant collections and lokalne indeksy TF-IDF do archiwum tar.gz."""
+
+    try:
+        listed = qdrant.get_collections()
+    except Exception as exc:  # pragma: no cover - network dependency
+        raise HTTPException(status_code=502, detail=f"Nie udało się pobrać listy kolekcji: {exc}") from exc
+
+    available = sorted({item.name for item in getattr(listed, "collections", []) or []})
+    if collection_names:
+        requested = sorted({name for name in collection_names if name})
+        missing = sorted(set(requested) - set(available))
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Brak kolekcji: {', '.join(missing)}",
+            )
+
+    bundle_buffer = io.BytesIO()
+    metadata: Dict[str, Any] = {
+        "meta": {
+            "generated_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "app_version": settings.app_version,
+        },
+        "collections": [],
+    }
+
+    vector_store_dir = settings.vector_store_dir
+    vector_files: List[str] = []
+    if vector_store_dir.exists():
+        for path in vector_store_dir.rglob("*"):
+            if path.is_file():
+                vector_files.append(str(path.relative_to(vector_store_dir)))
+
+    with tempfile.TemporaryDirectory(prefix="qdrant-export-") as scratch_dir:
+        scratch_path = pathlib.Path(scratch_dir)
+        with tarfile.open(fileobj=bundle_buffer, mode="w:gz") as tar:
+            for name in available:
+                logger.debug("Eksport kolekcji '%s'", name)
+                try:
+                    info = qdrant.get_collection(name)
+                except Exception as exc:  # pragma: no cover - remote failure
+                    logger.error("Nie udało się pobrać konfiguracji '%s': %s", name, exc)
+                    raise HTTPException(status_code=502, detail=f"Nie udało się pobrać konfiguracji kolekcji '{name}': {exc}") from exc
+
+                snapshot = _create_collection_snapshot(name)
+                snapshot_name = _extract_snapshot_name(snapshot)
+                if not snapshot_name:
+                    raise HTTPException(status_code=502, detail=f"Snapshot dla kolekcji '{name}' nie zwrócił nazwy")
+
+                snapshot_local = _download_collection_snapshot(
+                    collection_name=name,
+                    snapshot_name=snapshot_name,
+                    scratch_dir=scratch_path / name,
+                )
+
+                snapshot_arcname = pathlib.Path("snapshots") / name / snapshot_local.name
+                tar.add(snapshot_local, arcname=str(snapshot_arcname))
+
+                try:
+                    _delete_remote_snapshot(name, snapshot_name)
+                except Exception:
+                    logger.debug("Nie udało się usunąć snapshotu '%s' dla '%s' po pobraniu", snapshot_name, name)
+
+                metadata_entry = {
+                    "name": name,
+                    "snapshot": str(snapshot_arcname),
+                    "points_estimate": getattr(info, "points_count", None),
+                    "snapshot_name": snapshot_name,
+                    "snapshot_size": _extract_snapshot_size(snapshot),
+                }
+                metadata["collections"].append(metadata_entry)
+
+            for relative in vector_files:
+                source = vector_store_dir / relative
+                tar.add(source, arcname=str(pathlib.Path("vector_store") / relative))
+
+            metadata["vector_store"] = {
+                "base": str(vector_store_dir),
+                "files": vector_files,
+            }
+
+            meta_bytes = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+            meta_info = tarfile.TarInfo(name="metadata.json")
+            meta_info.size = len(meta_bytes)
+            meta_info.mtime = int(time.time())
+            tar.addfile(meta_info, io.BytesIO(meta_bytes))
+
+    stamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    filename = f"qdrant-export-{stamp}.tar.gz"
+    return bundle_buffer.getvalue(), {
+        "filename": filename,
+        "collections": available,
+        "count": len(available),
+        "vector_store_files": vector_files,
+        "snapshots": [
+            entry.get("snapshot_name")
+            for entry in metadata.get("collections", [])
+            if entry.get("snapshot_name")
+        ],
+    }
+
+
+def _create_collection_snapshot(collection_name: str):
+    # Prefer client method if available; otherwise use REST
+    method = getattr(qdrant, "create_snapshot", None)
+    if method is not None:
+        try:
+            try:
+                return method(collection_name=collection_name, wait=True)
+            except TypeError:
+                return method(collection_name)
+        except Exception as exc:
+            logger.debug("Client snapshot create failed, fallback to REST: %s", exc)
+    # REST fallback
+    base = settings.qdrant_url.rstrip("/")
+    url = f"{base}/collections/{_urlparse.quote(collection_name)}/snapshots"
+    data = json.dumps({}).encode("utf-8")
+    req = _urlreq.Request(url, data=data, method="POST", headers=_qdrant_headers_json())
+    try:
+        with _urlreq.urlopen(req, timeout=settings.qdrant_request_timeout) as resp:
+            body = resp.read().decode("utf-8")
+            try:
+                return json.loads(body)
+            except Exception:
+                return {"name": None, "raw": body}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nie udało się utworzyć snapshotu kolekcji '{collection_name}': {exc}") from exc
+
+
+def _extract_snapshot_name(snapshot: Any) -> Optional[str]:
+    if snapshot is None:
+        return None
+    if isinstance(snapshot, dict):
+        for key in ("name", "snapshot_name", "id"):
+            candidate = snapshot.get(key)
+            if candidate:
+                return candidate
+        return None
+    return next(
+        (
+            getattr(snapshot, attr)
+            for attr in ("name", "snapshot_name", "id")
+            if getattr(snapshot, attr, None)
+        ),
+        None,
+    )
+
+
+def _extract_snapshot_size(snapshot: Any) -> Optional[int]:
+    if snapshot is None:
+        return None
+    if isinstance(snapshot, dict):
+        return snapshot.get("size") or snapshot.get("size_bytes")
+    return getattr(snapshot, "size", None) or getattr(snapshot, "size_bytes", None)
+
+
+def _download_collection_snapshot(
+    *,
+    collection_name: str,
+    snapshot_name: str,
+    scratch_dir: pathlib.Path,
+) -> pathlib.Path:
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    target_path = scratch_dir / snapshot_name
+    # REST download with ?download=true
+    base = settings.qdrant_url.rstrip("/")
+    quoted = _urlparse.quote
+    url = f"{base}/collections/{quoted(collection_name)}/snapshots/{quoted(snapshot_name)}?download=true"
+    req = _urlreq.Request(url, method="GET", headers=_qdrant_headers_binary())
+    try:
+        with _urlreq.urlopen(req, timeout=settings.qdrant_request_timeout) as resp, target_path.open("wb") as out:
+            shutil.copyfileobj(resp, out)
+    except Exception as exc:
+        # Try without query param
+        url = f"{base}/collections/{quoted(collection_name)}/snapshots/{quoted(snapshot_name)}"
+        req = _urlreq.Request(url, method="GET", headers=_qdrant_headers_binary())
+        try:
+            with _urlreq.urlopen(req, timeout=settings.qdrant_request_timeout) as resp, target_path.open("wb") as out:
+                shutil.copyfileobj(resp, out)
+        except Exception as exc2:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Pobranie snapshotu '{snapshot_name}' kolekcji '{collection_name}' nie powiodło się: {exc2}"
+                ),
+            ) from exc2
+    if target_path.stat().st_size <= 0:
+        raise HTTPException(status_code=502, detail=f"Snapshot '{snapshot_name}' jest pusty po pobraniu")
+    return target_path
+
+
+def _attempt_download_snapshot(
+    collection_name: str,
+    snapshot_name: str,
+    destination: pathlib.Path,
+    *,
+    expect_file: bool = True,
+) -> bool:
+    # Kept for backward compatibility; now delegates to REST
+    try:
+        tmp = _download_collection_snapshot(
+            collection_name=collection_name,
+            snapshot_name=snapshot_name,
+            scratch_dir=destination if destination.is_dir() else destination.parent,
+        )
+        if destination.is_dir():
+            return tmp.exists()
+        if tmp != destination:
+            shutil.move(str(tmp), str(destination))
+        return destination.exists() and destination.stat().st_size > 0
+    except Exception as exc:
+        if expect_file:
+            logger.debug(
+                "REST download snapshot failed for '%s': %s",
+                snapshot_name,
+                exc,
+            )
+        return False
+
+
+def _delete_remote_snapshot(collection_name: str, snapshot_name: str) -> None:
+    # Try client methods
+    for name in ("delete_snapshot", "delete_collection_snapshot"):
+        method = getattr(qdrant, name, None)
+        if method is None:
+            continue
+        try:
+            try:
+                method(collection_name=collection_name, snapshot_name=snapshot_name)
+            except TypeError:
+                method(collection_name, snapshot_name)
+            return
+        except Exception as exc:
+            logger.debug("Client delete snapshot failed, trying REST: %s", exc)
+            break
+    # REST fallback
+    base = settings.qdrant_url.rstrip("/")
+    url = f"{base}/collections/{_urlparse.quote(collection_name)}/snapshots/{_urlparse.quote(snapshot_name)}"
+    req = _urlreq.Request(url, method="DELETE", headers=_qdrant_headers_json())
+    try:
+        with _urlreq.urlopen(req, timeout=settings.qdrant_request_timeout) as _:
+            return
+    except Exception as exc:
+        logger.debug("REST delete snapshot failed: %s", exc)
+        return
+
+
+def import_collections_bundle(bundle: bytes, *, replace_existing: bool = True) -> Dict[str, Any]:
+    """Restore collections and indeksy TF-IDF z archiwum tar.gz."""
+
+    try:
+        tar_context = tarfile.open(fileobj=io.BytesIO(bundle), mode="r:gz")
+    except tarfile.TarError as exc:
+        raise HTTPException(status_code=400, detail=f"Nie udało się odczytać archiwum: {exc}") from exc
+
+    with tar_context as tar:
+        restored = _extract_json_member(tar, "metadata.json")
+        if not isinstance(restored, dict):
+            raise HTTPException(status_code=400, detail="Plik metadata.json ma nieprawidłowy format")
+
+        collections = restored.get("collections") or []
+        if not isinstance(collections, list):
+            raise HTTPException(status_code=400, detail="Zły format archiwum: pole 'collections' musi być listą")
+
+        summary: Dict[str, Any] = {
+            "restored": [],
+            "skipped": [],
+            "errors": [],
+            "meta": restored.get("meta") or {},
+            "vector_store": {"restored": [], "base": str(settings.vector_store_dir)},
+        }
+
+        for entry in collections:
+            name = (entry or {}).get("name")
+            if not name:
+                summary["errors"].append({"collection": None, "error": "Brak nazwy kolekcji w wpisie"})
+                continue
+
+            try:
+                snapshot_ref = entry.get("snapshot")
+                if snapshot_ref:
+                    restored = _restore_collection_from_snapshot(
+                        tar,
+                        snapshot_ref,
+                        collection_name=name,
+                        replace_existing=replace_existing,
+                    )
+                    if restored:
+                        summary["restored"].append(name)
+                    else:
+                        summary["skipped"].append(name)
+                    continue
+
+                config_ref = entry.get("config")
+                indexes_ref = entry.get("indexes")
+                points_ref = entry.get("points")
+
+                if isinstance(config_ref, dict):
+                    config = config_ref
+                else:
+                    config = _extract_json_member(tar, config_ref)
+                if not isinstance(config, dict):
+                    raise HTTPException(status_code=400, detail=f"Konfiguracja kolekcji '{name}' ma nieprawidłowy format")
+
+                if isinstance(indexes_ref, list):
+                    indexes = indexes_ref
+                elif indexes_ref:
+                    indexes = _extract_json_member(tar, indexes_ref)
+                else:
+                    indexes = []
+                if indexes and not isinstance(indexes, list):
+                    raise HTTPException(status_code=400, detail=f"Lista indeksów kolekcji '{name}' ma nieprawidłowy format")
+
+                _prepare_collection(name, config, indexes, replace_existing=replace_existing)
+                if isinstance(points_ref, list):
+                    _restore_points_from_list(points_ref, collection_name=name)
+                else:
+                    _restore_points_from_tar(tar, points_ref, collection_name=name)
+                summary["restored"].append(name)
+            except HTTPException as exc:
+                summary["errors"].append({"collection": name, "error": exc.detail})
+            except Exception as exc:  # pragma: no cover - depends on remote behaviour
+                logger.exception("Nie udało się odtworzyć kolekcji '%s'", name)
+                summary["errors"].append({"collection": name, "error": str(exc)})
+
+        vector_dir = settings.vector_store_dir
+        if replace_existing:
+            try:
+                shutil.rmtree(vector_dir)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                logger.warning("Nie udało się oczyścić katalogu vector_store '%s': %s", vector_dir, exc)
+
+        vector_dir.mkdir(parents=True, exist_ok=True)
+
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            if not member.name.startswith("vector_store/"):
+                continue
+            relative_path = pathlib.Path(member.name).relative_to("vector_store")
+            destination = vector_dir / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with tar.extractfile(member) as src, destination.open("wb") as dst:
+                    if src is None:
+                        raise ValueError(f"Brak danych dla pliku {member.name}")
+                    shutil.copyfileobj(src, dst)
+                summary["vector_store"]["restored"].append(str(relative_path))
+            except Exception as exc:
+                logger.error("Nie udało się odtworzyć pliku indeksu '%s': %s", member.name, exc)
+                summary["errors"].append({"collection": None, "error": f"vector_store:{member.name}: {exc}"})
+
+    return summary
+
+
+def _restore_collection_from_snapshot(
+    tar: tarfile.TarFile,
+    snapshot_member: str,
+    *,
+    collection_name: str,
+    replace_existing: bool,
+) -> bool:
+    if not replace_existing and _collection_exists(collection_name):
+        return False
+
+    if replace_existing:
+        _drop_collection_if_exists(collection_name)
+
+    snapshot_path = _extract_tar_member_to_tempfile(tar, snapshot_member)
+    snapshot_filename = pathlib.Path(snapshot_member).name
+
+    try:
+        _upload_snapshot_file(collection_name, snapshot_filename, snapshot_path)
+        _recover_uploaded_snapshot(collection_name, snapshot_filename)
+    finally:
+        try:
+            snapshot_path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.debug(
+                "Nie udało się usunąć pliku tymczasowego snapshotu '%s': %s",
+                snapshot_path,
+                exc,
+            )
+
+    return True
+
+
+def _collection_exists(collection_name: str) -> bool:
+    try:
+        qdrant.get_collection(collection_name)
+        return True
+    except Exception:
+        return False
+
+
+def _drop_collection_if_exists(collection_name: str) -> None:
+    try:
+        qdrant.delete_collection(collection_name)
+    except UnexpectedResponse as exc:
+        if getattr(exc, "status_code", None) != 404 and "not found" not in str(exc).lower():
+            raise HTTPException(
+                status_code=502,
+                detail=f"Usunięcie kolekcji '{collection_name}' nie powiodło się: {exc}",
+            ) from exc
+    except Exception as exc:
+        err_text = str(exc).lower()
+        if "not found" not in err_text:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Usunięcie kolekcji '{collection_name}' nie powiodło się: {exc}",
+            ) from exc
+
+
+def _extract_tar_member_to_tempfile(tar: tarfile.TarFile, member_name: str) -> pathlib.Path:
+    try:
+        member = tar.getmember(member_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"Brak pliku '{member_name}' w archiwum") from exc
+
+    temp_file = tempfile.NamedTemporaryFile(delete=False)
+    temp_path = pathlib.Path(temp_file.name)
+    with temp_file as dst:
+        with tar.extractfile(member) as src:
+            if src is None:
+                raise HTTPException(status_code=400, detail=f"Brak danych snapshotu '{member_name}'")
+            shutil.copyfileobj(src, dst)
+    if temp_path.stat().st_size == 0:
+        raise HTTPException(status_code=400, detail=f"Snapshot '{member_name}' jest pusty")
+    return temp_path
+
+
+def _upload_snapshot_file(collection_name: str, snapshot_name: str, path: pathlib.Path) -> None:
+    # Try client method if present
+    method = getattr(qdrant, "upload_snapshot", None)
+    if method is not None:
+        try:
+            try:
+                method(collection_name=collection_name, snapshot_name=snapshot_name, snapshot_path=str(path))
+            except TypeError:
+                try:
+                    method(collection_name=collection_name, snapshot_path=str(path))
+                except TypeError:
+                    method(collection_name, str(path))
+            return
+        except Exception as exc:
+            logger.debug("Client upload snapshot failed, fallback to REST: %s", exc)
+    # REST multipart upload: POST /collections/{collection}/snapshots/upload?wait=true
+    base = settings.qdrant_url.rstrip("/")
+    url = f"{base}/collections/{_urlparse.quote(collection_name)}/snapshots/upload?wait=true"
+    boundary = f"----qdrantBoundary{uuid.uuid4().hex}"
+    body = _build_multipart(boundary, {
+        "snapshot": (snapshot_name, path.read_bytes(), "application/octet-stream"),
+    })
+    headers = _qdrant_headers_multipart(boundary)
+    req = _urlreq.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with _urlreq.urlopen(req, timeout=settings.qdrant_request_timeout) as resp:
+            _ = resp.read()
+            return
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upload snapshotu '{snapshot_name}' dla '{collection_name}' (REST) nie powiódł się: {exc}",
+        ) from exc
+
+
+def _recover_uploaded_snapshot(collection_name: str, snapshot_name: str) -> None:
+    # For REST upload endpoint, recovery happens automatically; this is a no-op.
+    method = getattr(qdrant, "recover_snapshot", None)
+    if method is None:
+        return
+    try:
+        try:
+            method(collection_name=collection_name, snapshot_name=snapshot_name)
+        except TypeError:
+            method(collection_name, snapshot_name)
+    except Exception:
+        # Ignore if unsupported; upload already performed recovery.
+        return
+
+
+def _qdrant_headers_json() -> Dict[str, str]:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if settings.qdrant_api_key:
+        headers["api-key"] = settings.qdrant_api_key
+    return headers
+
+
+def _qdrant_headers_binary() -> Dict[str, str]:
+    headers = {}
+    if settings.qdrant_api_key:
+        headers["api-key"] = settings.qdrant_api_key
+    return headers
+
+
+def _qdrant_headers_multipart(boundary: str) -> Dict[str, str]:
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if settings.qdrant_api_key:
+        headers["api-key"] = settings.qdrant_api_key
+    return headers
+
+
+def _build_multipart(boundary: str, files: Dict[str, tuple]) -> bytes:
+    # files: name -> (filename, content_bytes, content_type)
+    lines: List[bytes] = []
+    b = boundary
+    for field, (filename, content, ctype) in files.items():
+        lines.append((f"--{b}\r\n").encode("utf-8"))
+        disp = f"Content-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\n"
+        lines.append(disp.encode("utf-8"))
+        lines.append((f"Content-Type: {ctype}\r\n\r\n").encode("utf-8"))
+        lines.append(content)
+        lines.append(b"\r\n")
+    lines.append((f"--{b}--\r\n").encode("utf-8"))
+    return b"".join(lines)
+
+
+def _prepare_collection(
+    name: str,
+    config: Dict[str, Any],
+    indexes: List[Dict[str, Any]],
+    *,
+    replace_existing: bool,
+) -> None:
+    if replace_existing:
+        try:
+            qdrant.delete_collection(name)
+        except UnexpectedResponse as exc:
+            if getattr(exc, "status_code", None) != 404 and "not found" not in str(exc).lower():
+                raise HTTPException(status_code=502, detail=f"Usunięcie kolekcji '{name}' nie powiodło się: {exc}") from exc
+        except Exception as exc:
+            err_text = str(exc).lower()
+            if "not found" not in err_text:
+                raise HTTPException(status_code=502, detail=f"Usunięcie kolekcji '{name}' nie powiodło się: {exc}") from exc
+    else:
+        try:
+            qdrant.get_collection(name)
+            return  # Kolekcja istnieje — pomijamy, aby nie nadpisywać
+        except Exception:
+            pass
+
+    params = (config or {}).get("params") or {}
+    vectors_config = _inflate_vectors_config(params.get("vectors"))
+    sparse_vectors_config = _inflate_sparse_vectors_config(params.get("sparse_vectors"))
+
+    kwargs: Dict[str, Any] = {}
+    if vectors_config is not None:
+        kwargs["vectors_config"] = vectors_config
+    if sparse_vectors_config is not None:
+        kwargs["sparse_vectors_config"] = sparse_vectors_config
+
+    for field in ("shard_number", "replication_factor", "write_consistency_factor", "on_disk_payload"):
+        value = params.get(field)
+        if value is not None:
+            kwargs[field] = value
+
+    if params.get("hnsw_config"):
+        kwargs["hnsw_config"] = qm.HnswConfigDiff(**params["hnsw_config"])
+    if params.get("optimizer_config"):
+        kwargs["optimizers_config"] = qm.OptimizersConfigDiff(**params["optimizer_config"])
+    if params.get("wal_config"):
+        kwargs["wal_config"] = qm.WalConfigDiff(**params["wal_config"])
+
+    try:
+        qdrant.recreate_collection(collection_name=name, **kwargs)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nie udało się utworzyć kolekcji '{name}': {exc}") from exc
+
+    for index in indexes or []:
+        if not isinstance(index, dict):
+            continue
+        field_name = index.get("field_name")
+        params_dict = index.get("params") or index.get("field_schema") or {}
+        if not field_name or not isinstance(params_dict, dict):
+            continue
+        try:
+            qdrant.create_payload_index(
+                collection_name=name,
+                field_name=field_name,
+                field_schema=qm.PayloadIndexParams(**params_dict),
+            )
+        except Exception:
+            logger.debug("Nie udało się odtworzyć indeksu pola '%s' w '%s'", field_name, name)
+
+
+def _restore_points_from_tar(
+    tar: tarfile.TarFile,
+    member_name: Optional[str],
+    *,
+    collection_name: str,
+    batch_size: int = 256,
+) -> None:
+    if not member_name:
+        raise HTTPException(status_code=400, detail=f"Brak ścieżki do punktów dla kolekcji '{collection_name}'")
+    try:
+        member = tar.getmember(member_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"Brak pliku '{member_name}' w archiwum") from exc
+
+    with tar.extractfile(member) as fh:
+        if fh is None:
+            raise HTTPException(status_code=400, detail=f"Brak danych punktów dla '{collection_name}'")
+        batch: List[qm.PointStruct] = []
+        for raw_line in fh:
+            line = raw_line.decode("utf-8").strip()
+            if not line:
+                continue
+            try:
+                point_data = json.loads(line)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Błędny JSON w '{member_name}': {exc}") from exc
+            point_struct = _point_struct_from_dump(point_data)
+            batch.append(point_struct)
+            if len(batch) >= batch_size:
+                _flush_points(collection_name, batch)
+        if batch:
+            _flush_points(collection_name, batch)
+
+
+def _restore_points_from_list(
+    points: Iterable[Dict[str, Any]],
+    *,
+    collection_name: str,
+    batch_size: int = 256,
+) -> None:
+    batch: List[qm.PointStruct] = []
+    for point in points:
+        point_struct = _point_struct_from_dump(point)
+        batch.append(point_struct)
+        if len(batch) >= batch_size:
+            _flush_points(collection_name, batch)
+    if batch:
+        _flush_points(collection_name, batch)
+
+
+def _flush_points(collection_name: str, batch: List[qm.PointStruct]) -> None:
+    try:
+        qdrant.upsert(collection_name=collection_name, wait=True, points=batch)
+    finally:
+        batch.clear()
+
+
+def _extract_json_member(tar: tarfile.TarFile, member_name: Optional[str]):
+    if not member_name:
+        raise HTTPException(status_code=400, detail="Brak referencji do pliku w archiwum")
+    try:
+        member = tar.getmember(member_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"Brak pliku '{member_name}' w archiwum") from exc
+    with tar.extractfile(member) as fh:
+        if fh is None:
+            raise HTTPException(status_code=400, detail=f"Brak danych dla '{member_name}'")
+        raw = fh.read().decode("utf-8")
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Nie udało się zinterpretować JSON z '{member_name}': {exc}") from exc
+
+
+def _inflate_vectors_config(raw: Optional[Dict[str, Any]]):
+    if raw is None:
+        return None
+    if isinstance(raw, dict) and raw.get("size") is not None:
+        return qm.VectorParams(**raw)
+    mapping = raw
+    if isinstance(raw, dict) and "map" in raw:
+        mapping = raw.get("map") or {}
+    result = {}
+    for key, value in (mapping or {}).items():
+        if isinstance(value, dict):
+            result[key] = qm.VectorParams(**value)
+    return result or None
+
+
+def _inflate_sparse_vectors_config(raw: Optional[Dict[str, Any]]):
+    if raw is None:
+        return None
+    mapping = raw
+    if isinstance(raw, dict) and "map" in raw:
+        mapping = raw.get("map") or {}
+    result = {}
+    for key, value in (mapping or {}).items():
+        params = value or {}
+        result[key] = qm.SparseVectorParams(**params)
+    return result or None
+
+
+def _point_struct_from_dump(point: Dict[str, Any]) -> qm.PointStruct:
+    if not isinstance(point, dict):
+        raise HTTPException(status_code=400, detail="Zły format wpisu punktu w archiwum")
+    try:
+        return qm.PointStruct.model_validate(point)
+    except Exception:
+        data: Dict[str, Any] = {
+            "id": point.get("id"),
+            "payload": point.get("payload"),
+        }
+        for key in ("vector", "vectors", "sparse_vector", "sparse_vectors"):
+            if key in point:
+                data[key] = point[key]
+        return qm.PointStruct(**data)
 
 
 def build_and_upsert_points(

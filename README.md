@@ -1,6 +1,38 @@
-# rags_tool (0.9.5)
+# rags_tool (1.2.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 1.2.1
+
+- Poprawiono eksport/import snapshotów: jeśli klient Python nie udostępnia metod snapshot, używamy bezpośrednich endpointów REST (tworzenie, pobieranie, upload). Gdy snapshoty nie są dostępne, eksport automatycznie przełącza się na tryb JSONL.
+
+## Nowości w 1.2.0
+
+- Eksport kolekcji wykorzystuje natywne snapshoty Qdrant; archiwum zawiera pliki snapshotów (`snapshots/<kolekcja>/<plik>.snapshot`) gotowe do ponownego wgrania.
+- Import odtwarza kolekcje przez upload i recovery snapshotów (z zachowaniem opcji `replace_existing`).
+- Zachowana kompatybilność wstecz: archiwa 1.1.x oparte na JSON-ach są nadal obsługiwane.
+- W odpowiedzi eksportu pojawia się nagłówek `X-Rags-Snapshots` z listą wygenerowanych plików snapshotów.
+
+## Nowości w 1.1.2
+
+- Naprawiono eksport punktów Qdrant: stronicowanie wykorzystuje teraz iterator odporny na różnice w typie zwracanym przez `qdrant.scroll`, dzięki czemu pliki `points.jsonl` zawierają pełną zawartość nawet dla dużych kolekcji.
+
+## Nowości w 1.1.1
+
+- Eksport kolekcji działa strumieniowo (plik `points.jsonl` per kolekcja) i nie buforuje już całej zawartości w pamięci, dzięki czemu obsługuje duże zbiory.
+- Import wspiera zarówno nowe archiwum `.tar.gz`, jak i format z wersji 1.1.0; pliki TF-IDF są odtwarzane po stronie serwera, a istniejące zasoby mogą zostać zachowane lub nadpisane.
+- W odpowiedzi eksportu dodano nagłówek `X-Rags-Vector-Store` z listą plików TF-IDF do szybkiej inspekcji archiwum.
+
+## Nowości w 1.1.0
+
+- Eksport zawsze obejmuje wszystkie kolekcje Qdrant oraz artefakty TF-IDF z katalogu `VECTOR_STORE_DIR`; dane trafiają do archiwum `.tar.gz` kompatybilnego z nowym importem.
+- Import odtwarza kolekcje i pliki indeksów, opcjonalnie zastępując istniejące zasoby (w tym katalog TF-IDF) po ustawieniu `replace_existing=true`.
+- Panel Admin UI aktualizuje helper eksportu/importu do nowego formatu (archiwum `.tar.gz`).
+
+## Nowości w 1.0.0
+
+- Panel Admin UI otrzymał dwa helpery: eksport wszystkich kolekcji Qdrant do pojedynczego archiwum JSON.gz (`/collections/export`) oraz import plików wygenerowanych w ten sposób (`/collections/import`) z opcją zastąpienia istniejących kolekcji.
+- UI automatycznie pobiera plik eksportu (bezpośredni download z przeglądarki) i przyjmuje dane importu w formacie base64.
 
 ## Nowości w 0.9.5
 

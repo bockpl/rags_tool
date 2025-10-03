@@ -28,6 +28,24 @@ class InitCollectionsRequest(BaseModel):
     force_dim_probe: bool = False
 
 
+class CollectionsExportRequest(BaseModel):
+    collection_names: Optional[List[str]] = Field(
+        default=None,
+        description="Deprecated filter; eksporter zawsze pobiera wszystkie kolekcje.",
+    )
+
+
+class CollectionsImportRequest(BaseModel):
+    archive_base64: str = Field(
+        ...,
+        description="Base64-encoded tar.gz snapshot bundle (Qdrant + TF-IDF) produced by /collections/export.",
+    )
+    replace_existing: bool = Field(
+        True,
+        description="Drop (and recreate) existing collections and TF-IDF artifacts before import. Should stay true in most cases.",
+    )
+
+
 class ScanRequest(BaseModel):
     base_dir: str
     glob: str = "**/*"
@@ -122,4 +140,3 @@ class MergedBlock(BaseModel):
 
 # Rebuild forward refs
 SearchResponse.model_rebuild()
-

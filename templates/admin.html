@@ -59,6 +59,23 @@
         const resultEl = document.getElementById("result");
         const sendBtn = document.getElementById("send");
 
+        function detectDownloadFilename(disposition, fallback) {
+            if (!disposition) return fallback;
+            const utfMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+            if (utfMatch && utfMatch[1]) {
+                try {
+                    return decodeURIComponent(utfMatch[1]);
+                } catch (_) {
+                    return utfMatch[1];
+                }
+            }
+            const simpleMatch = disposition.match(/filename="?([^";]+)"?/i);
+            if (simpleMatch && simpleMatch[1]) {
+                return simpleMatch[1];
+            }
+            return fallback;
+        }
+
         function populateOptions() {
             operations.forEach((op, idx) => {
                 const option = document.createElement("option");
@@ -122,15 +139,34 @@
                 });
 
                 const ct = response.headers.get("content-type") || "";
+                const disposition = response.headers.get("content-disposition") || "";
+                let downloaded = false;
                 if (ct.includes("application/json")) {
                     const data = await response.json();
                     resultEl.textContent = JSON.stringify(data, null, 2);
+                } else if (ct.includes("application/gzip") || ct.includes("application/octet-stream") || disposition.toLowerCase().includes("attachment")) {
+                    const buffer = await response.arrayBuffer();
+                    const mime = ct || "application/octet-stream";
+                    const blob = new Blob([buffer], { type: mime });
+                    const filename = detectDownloadFilename(disposition, `download-${Date.now()}.bin`);
+                    const url = URL.createObjectURL(blob);
+                    const anchor = document.createElement("a");
+                    anchor.href = url;
+                    anchor.download = filename;
+                    document.body.appendChild(anchor);
+                    anchor.click();
+                    document.body.removeChild(anchor);
+                    setTimeout(() => URL.revokeObjectURL(url), 0);
+                    resultEl.textContent = `Pobrano plik: ${filename}`;
+                    downloaded = true;
                 } else {
                     const text = await response.text();
                     resultEl.textContent = text;
                 }
                 if (!response.ok) {
                     resultEl.textContent = `HTTP ${response.status}\n\n${resultEl.textContent}`;
+                } else if (downloaded) {
+                    resultEl.textContent = `${resultEl.textContent}\n\nStatus: ${response.status}`;
                 }
             } catch (err) {
                 resultEl.textContent = `Błąd wywołania: ${err}`;
@@ -146,4 +182,3 @@
     </script>
 </body>
 </html>
-

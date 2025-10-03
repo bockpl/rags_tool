@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import pathlib
@@ -13,7 +15,7 @@ from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.routing import APIRoute
 
 from app.core.chunking import chunk_text_by_sections
@@ -31,6 +33,8 @@ from app.core.search import (
 from app.core.summary import llm_summary
 from app.models import (
     About,
+    CollectionsExportRequest,
+    CollectionsImportRequest,
     IngestBuildRequest,
     InitCollectionsRequest,
     ScanRequest,
@@ -43,6 +47,8 @@ from app.qdrant_utils import (
     build_and_upsert_points,
     derive_collection_names,
     ensure_collections,
+    export_collections_bundle,
+    import_collections_bundle,
     qdrant,
     sha1,
 )
@@ -177,6 +183,20 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "path": "/collections/init",
         "method": "POST",
         "body": "{\n  \"collection_name\": \"rags_tool\",\n  \"force_dim_probe\": false\n}",
+    },
+    {
+        "id": "collections-export",
+        "path": "/collections/export",
+        "method": "POST",
+        "label": "Eksport kolekcji (plik .tar.gz)",
+        "body": "{}",
+    },
+    {
+        "id": "collections-import",
+        "path": "/collections/import",
+        "method": "POST",
+        "label": "Import kolekcji z archiwum",
+        "body": "{\n  \"archive_base64\": \"<wklej_archiwum_base64>\",\n  \"replace_existing\": true\n}",
     },
     {
         "id": "ingest-scan",
@@ -314,6 +334,47 @@ def collections_init(req: InitCollectionsRequest):
         "summary_collection": summary_collection,
         "content_collection": content_collection,
     }
+
+
+@app.post(
+    "/collections/export",
+    include_in_schema=False,
+    summary="Eksport kolekcji Qdrant",
+    description="Eksportuje wszystkie kolekcje do archiwum .tar.gz zawierającego snapshoty Qdrant oraz lokalne artefakty TF-IDF.",
+)
+def collections_export(req: CollectionsExportRequest):
+    if req.collection_names:
+        logger.info(
+            "Parametr collection_names=%s został przesłany, ale eksport obejmuje wszystkie kolekcje.",
+            req.collection_names,
+        )
+    bundle, meta = export_collections_bundle(req.collection_names)
+    filename = meta.get("filename") or "qdrant-export.tar.gz"
+    headers = {
+        "Content-Disposition": f"attachment; filename={filename}",
+        "X-Rags-Collections": ",".join(meta.get("collections", [])),
+        "X-Rags-Vector-Store": ",".join(meta.get("vector_store_files", [])),
+        "X-Rags-Snapshots": ",".join(meta.get("snapshots", [])),
+    }
+    return StreamingResponse(io.BytesIO(bundle), media_type="application/gzip", headers=headers)
+
+
+@app.post(
+    "/collections/import",
+    include_in_schema=False,
+    summary="Import kolekcji Qdrant",
+    description="Przyjmuje archiwum .tar.gz (base64) wygenerowane przez /collections/export i odtwarza kolekcje ze snapshotów Qdrant oraz indeksy TF-IDF (domyślnie nadpisując istniejące).",
+)
+def collections_import(req: CollectionsImportRequest):
+    try:
+        raw = base64.b64decode(req.archive_base64)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Nie udało się zdekodować base64: {exc}") from exc
+
+    summary = import_collections_bundle(raw, replace_existing=req.replace_existing)
+    with _collection_init_lock:
+        _initialized_collections.clear()
+    return {"status": "ok", **summary}
 
 
 @app.post(
