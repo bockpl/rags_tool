@@ -17,24 +17,6 @@ summary_client = OpenAI(base_url=settings.summary_api_url, api_key=settings.summ
 
 logger = logging.getLogger("rags_tool.summary")
 
-SUMMARY_PROMPT = (
-    "Streść poniższy tekst w maks. 5 zdaniach. Wypisz też sekcje: 'TITLE' (krótki, jednoznaczny tytuł "
-    "dokumentu — preferuj pierwszą linię lub numer aktu; pojedyncza fraza, bez dodatkowego komentarza), "
-    "'SIGNATURE' (10–20 lematów kluczowych), 'ENTITIES' (nazwy własne/ID/zakresy dat) oraz 'REPLACEMENT' "
-    "(krótka lista tytułów aktów, które dokument zastępuje, jeśli tekst jednolity wypisz wszystkie akty które ujednolica; rozdziel średnikami; wpisz dokładnie 'brak', "
-    "jeżeli brak danych). Bez komentarzy.\n\n"
-    "FORMAT:\nTITLE: ...\nSUMMARY: ...\nSIGNATURE: lemma1, lemma2, ...\nENTITIES: ...\nREPLACEMENT: ...\n\nTEKST:\n"
-)
-
-SUMMARY_PROMPT_JSON = (
-    "Zwróć wyłącznie poprawny JSON bez komentarzy i bez kodu. Klucze: "
-    "'title' (string; krótki jednoznaczny tytuł, preferuj pierwszą linię lub numer dokumentu; max 200 znaków), "
-    "'summary' (string; max 5 zdań po polsku), "
-    "'signature' (lista 10–20 lematów kluczowych jako strings), "
-    "'entities' (string z nazwami własnymi/ID/zakresami dat), "
-    "'replacement' (string; krótkie tytuły aktów zastępowanych, jeśli tekst jednolity wypisz wszystkie akty które ujednolica, separator ';'; wpisz dokładnie 'brak', jeśli brak informacji)."
-)
-
 MAX_DOC_TO_SUMMARY = 75_000
 
 def _default_title_from_text(text: str) -> str:
@@ -57,8 +39,11 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
                 temperature=0.0,
                 response_format={"type": "json_object"},
                 messages=[
-                    {"role": "system", "content": "Jesteś zwięzłym ekstrakcyjnym streszczaczem."},
-                    {"role": "user", "content": SUMMARY_PROMPT_JSON + "\n\nTEKST:\n" + text},
+                    {"role": "system", "content": settings.summary_system_prompt},
+                    {
+                        "role": "user",
+                        "content": settings.summary_prompt_json + "\n\nTEKST:\n" + text,
+                    },
                 ],
                 max_tokens=max_tokens,
             )
@@ -106,8 +91,8 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
         model=model,
         temperature=0.0,
         messages=[
-            {"role": "system", "content": "Jesteś zwięzłym ekstrakcyjnym streszczaczem."},
-            {"role": "user", "content": SUMMARY_PROMPT + text},
+            {"role": "system", "content": settings.summary_system_prompt},
+            {"role": "user", "content": settings.summary_prompt + text},
         ],
         max_tokens=max_tokens,
     )

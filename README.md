@@ -1,6 +1,14 @@
-# rags_tool (1.2.1)
+# rags_tool (1.3.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 1.3.1
+
+- Systemowy prompt używany przy generowaniu streszczeń (`SUMMARY_SYSTEM_PROMPT`) przeniesiono do konfiguracji `.env`, co pozwala sterować tonem i rolą modelu bez edycji kodu.
+
+## Nowości w 1.3.0
+
+- Prompty do streszczeń (`SUMMARY_PROMPT`, `SUMMARY_PROMPT_JSON`) są teraz konfigurowalne przez zmienne środowiskowe, dzięki czemu można łatwo dostosować instrukcje dla modeli LLM bez zmian w kodzie.
 
 ## Nowości w 1.2.1
 
@@ -156,6 +164,9 @@ export EMBEDDING_DIM="1024"          # stały wymiar wektora dla używanego mode
 export SUMMARY_API_URL="http://127.0.0.1:8001/v1"
 export SUMMARY_API_KEY="sk-summary-xxx"
 export SUMMARY_MODEL="gpt-4o-mini"
+export SUMMARY_SYSTEM_PROMPT="Jesteś zwięzłym ekstrakcyjnym streszczaczem."  # opcjonalna rola systemowa
+export SUMMARY_PROMPT="..."         # opcjonalnie nadpisz instrukcję tekstowego promptu
+export SUMMARY_PROMPT_JSON="..."     # opcjonalnie nadpisz instrukcję promptu JSON
 export COLLECTION_NAME="rags_tool"
 export VECTOR_STORE_DIR=".rags_tool_store"
 export DEBUG="false"  # ustaw na "true", aby włączyć logi debugujące
