@@ -21,7 +21,7 @@ SUMMARY_PROMPT = (
     "Streść poniższy tekst w maks. 5 zdaniach. Wypisz też sekcje: 'TITLE' (krótki, jednoznaczny tytuł "
     "dokumentu — preferuj pierwszą linię lub numer aktu; pojedyncza fraza, bez dodatkowego komentarza), "
     "'SIGNATURE' (10–20 lematów kluczowych), 'ENTITIES' (nazwy własne/ID/zakresy dat) oraz 'REPLACEMENT' "
-    "(krótka lista tytułów aktów, które dokument zastępuje; rozdziel średnikami; wpisz dokładnie 'brak', "
+    "(krótka lista tytułów aktów, które dokument zastępuje, jeśli tekst jednolity wypisz wszystkie akty które ujednolica; rozdziel średnikami; wpisz dokładnie 'brak', "
     "jeżeli brak danych). Bez komentarzy.\n\n"
     "FORMAT:\nTITLE: ...\nSUMMARY: ...\nSIGNATURE: lemma1, lemma2, ...\nENTITIES: ...\nREPLACEMENT: ...\n\nTEKST:\n"
 )
@@ -32,7 +32,7 @@ SUMMARY_PROMPT_JSON = (
     "'summary' (string; max 5 zdań po polsku), "
     "'signature' (lista 10–20 lematów kluczowych jako strings), "
     "'entities' (string z nazwami własnymi/ID/zakresami dat), "
-    "'replacement' (string; krótkie tytuły aktów zastępowanych, separator ';'; wpisz dokładnie 'brak', jeśli brak informacji)."
+    "'replacement' (string; krótkie tytuły aktów zastępowanych, jeśli tekst jednolity wypisz wszystkie akty które ujednolica, separator ';'; wpisz dokładnie 'brak', jeśli brak informacji)."
 )
 
 MAX_DOC_TO_SUMMARY = 75_000
