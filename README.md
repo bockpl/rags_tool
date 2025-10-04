@@ -1,6 +1,12 @@
-# rags_tool (1.4.2)
+# rags_tool (1.5.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 1.5.0
+
+- Wyszukiwanie: pole `query` przyjmuje teraz listę zapytań (`List[str]`). Każde zapytanie jest wykonywane kolejno, a wyniki są łączone metodą RRF (Reciprocal Rank Fusion) i ograniczane globalnym `top_k`.
+- Parametry łączenia są wewnętrzne (brak nowych pól w modelu) i mają sensowne domyślne wartości; domyślna strategia to `rrf`.
+- Scalanie chunków do pełnych bloków/sekcji odbywa się po zakończeniu wszystkich zapytań i po uporządkowaniu połączonych wyników (lepsza spójność bloków w odpowiedzi `blocks`).
 
 ## Nowości w 1.4.2
 
@@ -361,6 +367,7 @@ Wartości `SECTION_LEVELS` to unia poziomów znalezionych we wszystkich dokument
 
 ### Parametry wyszukiwania (`POST /search/query`)
 
+- `query`: lista zapytań (`List[str]`), każde krótkie i konkretne (3–12 słów). Dodanie synonimów/wariantów zwiększa recall; wyniki są łączone i sortowane globalnie.
 - `top_m`: liczba docelowych dokumentów po Etapie 1 (streszczenia).
 - `top_k`: końcowa liczba wyników (po Etapie 2).
 - `use_hybrid`: włącza TF‑IDF po stronie zapytania (domyślnie true).
@@ -382,7 +389,7 @@ Przykładowe zapytanie (flat, bez duplikacji streszczeń):
 
 ```json
 {
-  "query": "Jak działa rags_tool?",
+  "query": ["Jak działa rags_tool?", "architektura rags_tool"],
   "top_m": 10,
   "top_k": 5,
   "mode": "auto",
@@ -403,7 +410,7 @@ Przykładowe zapytanie (grouped):
 
 ```json
 {
-  "query": "Jak działa rags_tool?",
+  "query": ["Jak działa rags_tool?"],
   "top_m": 10,
   "top_k": 5,
   "result_format": "grouped",
@@ -415,7 +422,7 @@ Przykładowe zapytanie (blocks):
 
 ```json
 {
-  "query": "Jak działa rags_tool?",
+  "query": ["Jak działa rags_tool?", "architektura rags_tool"],
   "top_m": 10,
   "top_k": 5,
   "merge_chunks": true,

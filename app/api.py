@@ -222,7 +222,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "search-query",
         "path": "/search/query",
         "method": "POST",
-        "body": "{\n  \"query\": \"Jak działa rags_tool?\",\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"merge_chunks\": true,\n  \"merge_group_budget_tokens\": 1200,\n  \"max_merged_per_group\": 1,\n  \"expand_neighbors\": 1,\n  \"result_format\": \"blocks\"\n}",
+        "body": "{\n  \"query\": [\n    \"Jak działa rags_tool?\",\n    \"architektura rags_tool\"\n  ],\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"merge_chunks\": true,\n  \"merge_group_budget_tokens\": 1200,\n  \"max_merged_per_group\": 1,\n  \"expand_neighbors\": 1,\n  \"result_format\": \"blocks\"\n}",
     },
 ]
 
@@ -608,7 +608,7 @@ def search_query(req: SearchQuery):
 
     Parameters (SearchQuery)
     ------------------------
-    - **query** (str): concise user question (3–12 words; prefer titles/signatures/dates).
+    - **query** (List[str]): list of focused queries (3–12 words each; prefer titles/signatures/dates). All queries are executed and results are fused.
     - **top_m** (int): candidate documents for Stage 1 (default 100; typical 50–200).
     - **top_k** (int): global number of final results after Stage 2 (typical 5–10).
       Use `per_doc_limit` to prevent dominance of a single document.
@@ -647,7 +647,10 @@ def search_query(req: SearchQuery):
 
     Example request (JSON):
     {
-        "query": "Jak działa rags_tool?",
+        "query": [
+            "Jak działa rags_tool?",
+            "architektura rags_tool"
+        ],
         "top_m": 10,
         "top_k": 5,
         "mode": "auto",
@@ -670,39 +673,96 @@ def search_query(req: SearchQuery):
     The endpoint returns a JSON with `blocks` ready for citation by the LLM.
     """
     t0 = time.time()
-    query_hash = sha1(req.query)
+    # Internal fusion defaults (hidden from tool schema/LLM)
+    RRF_K = 60
+    OVERSAMPLE = 2
+    DEDUPE_BY = "chunk"  # other option could be "doc", kept internal
+
+    queries = [q.strip() for q in (req.query or []) if str(q or "").strip()]
+    if not queries:
+        raise HTTPException(status_code=422, detail="Field 'query' must contain at least one non-empty string")
+
+    query_hash = sha1(json.dumps(queries, ensure_ascii=False))
     _ensure_collections_cached()
 
-    mode = _classify_mode(req.query, req.mode)
-    q_vec = embed_text([req.query])[0]
-    content_sparse_query, summary_sparse_query = _build_sparse_queries_for_query(req.query, req.use_hybrid)
+    # Determine unified mode when 'auto' is requested
+    if req.mode != "auto":
+        mode = req.mode
+    else:
+        modes = {_classify_mode(q, "auto") for q in queries}
+        if modes == {"current"}:
+            mode = "current"
+        elif modes == {"archival"}:
+            mode = "archival"
+        else:
+            mode = "all"
+
     flt = None
     if mode in ("current", "archival"):
         flt = qm.Filter(must=[qm.FieldCondition(key="is_active", match=qm.MatchValue(value=(mode == "current")))])
 
-    cand_doc_ids, doc_map = _stage1_select_documents(q_vec, flt, summary_sparse_query, req)
-    if not cand_doc_ids:
+    # Batch-embed queries
+    q_vecs = embed_text(queries)
+
+    # Accumulators for fusion and neighbor expansion
+    fused: Dict[tuple, Dict[str, Any]] = {}
+    global_mmr_pool: List[Dict[str, Any]] = []
+    global_rel2: List[float] = []
+
+    # Oversampled per-query limit to keep enough candidates after dedup/fusion
+    per_query_limit = max(1, int(req.top_k) * OVERSAMPLE)
+
+    any_docs = False
+    for qi, (q, q_vec) in enumerate(zip(queries, q_vecs)):
+        content_sparse_query, summary_sparse_query = _build_sparse_queries_for_query(q, req.use_hybrid)
+        cand_doc_ids, doc_map = _stage1_select_documents(q_vec, flt, summary_sparse_query, req)
+        if not cand_doc_ids:
+            continue
+        any_docs = True
+        # Clone request with per-query top_k oversampled
+        req_i = req.model_copy(update={"top_k": per_query_limit})
+        final_hits, mmr_pool, rel2 = _stage2_select_chunks(cand_doc_ids, q_vec, content_sparse_query, doc_map, req_i)
+        # Append to global neighbor pools (used later for optional neighbor expansion)
+        global_mmr_pool.extend(mmr_pool)
+        global_rel2.extend(rel2)
+        # RRF fusion on chunk identity
+        for rank, fh in enumerate(final_hits, start=1):
+            payload = fh.get("payload") or {}
+            did = payload.get("doc_id") or ""
+            sec = payload.get("section")
+            cid = payload.get("chunk_id")
+            if not did or cid is None:
+                continue
+            key = (did, sec, int(cid)) if DEDUPE_BY == "chunk" else (did, None, -1)
+            entry = fused.get(key)
+            incr = 1.0 / (RRF_K + rank)
+            if entry is None:
+                fused[key] = {
+                    "payload": payload,
+                    "score": incr,
+                }
+            else:
+                entry["score"] += incr
+
+    if not any_docs or not fused:
         took_ms = int((time.time() - t0) * 1000)
         logger.info(
-            "Search finished | took_ms=%d query_hash=%s stage=documents hits=0",
+            "Search finished | took_ms=%d query_hash=%s stage=fusion hits=0",
             took_ms,
             query_hash,
         )
         return SearchResponse(took_ms=took_ms, hits=[])
 
-    final_hits, mmr_pool, rel2 = _stage2_select_chunks(
-        cand_doc_ids, q_vec, content_sparse_query, doc_map, req
-    )
-    if not final_hits:
-        took_ms = int((time.time() - t0) * 1000)
-        logger.info(
-            "Search finished | took_ms=%d query_hash=%s stage=chunks hits=0",
-            took_ms,
-            query_hash,
-        )
-        return SearchResponse(took_ms=took_ms, hits=[])
+    # Build final fused list and apply global limit
+    fused_list = [
+        {"payload": v.get("payload"), "score": float(v.get("score", 0.0))}
+        for v in fused.values()
+    ]
+    fused_list.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+    final_hits = fused_list[: max(1, int(req.top_k))]
 
-    results, groups_payload, blocks_payload = _shape_results(final_hits, doc_map, mmr_pool, rel2, req)
+    # Shape results; merged blocks are built AFTER fusion, preserving the requirement
+    results, groups_payload, blocks_payload = _shape_results(final_hits, {}, global_mmr_pool, global_rel2, req)
 
     if req.result_format == "blocks":
         took_ms = int((time.time() - t0) * 1000)

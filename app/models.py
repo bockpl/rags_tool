@@ -77,11 +77,10 @@ class SummariesGenerateRequest(BaseModel):
 
 
 class SearchQuery(BaseModel):
-    query: str = Field(
+    query: List[str] = Field(
         ...,
         description=(
-            "User question in natural language (3–12 words). Prefer proper names, titles/signatures, or dates; "
-            "avoid tool/system instructions."
+            "List of focused queries (each 3–12 words). Provide synonyms or variants to improve recall."
         ),
     )
     top_m: int = Field(
