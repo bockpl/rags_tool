@@ -31,6 +31,7 @@ from app.core.search import (
     _stage1_select_documents,
     _stage2_select_chunks,
     _shape_results,
+    _truncate_head_tail,
 )
 from app.core.summary import llm_summary
 from app.core.ranker_client import OpenAIReranker
@@ -739,13 +740,38 @@ def search_query(req: SearchQuery):
         )
         return SearchResponse(took_ms=took_ms, hits=[])
 
-    # Build final fused list; nie ograniczamy tutaj do top_k jeśli ranker jest włączony
+    # Build final fused list (RRF over unique chunks)
     fused_list = [
         {"payload": v.get("payload"), "score": float(v.get("score", 0.0))}
         for v in fused.values()
     ]
     fused_list.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-    final_hits = fused_list if ranker_enabled else fused_list[: max(1, int(req.top_k))]
+    # Global rerank after fusion + hard cut to K when ranker is enabled
+    if ranker_enabled:
+        try:
+            client = OpenAIReranker(settings.ranker_base_url or "", settings.ranker_api_key, settings.ranker_model or "")
+            passages = [
+                _truncate_head_tail(str((it.get("payload") or {}).get("text", "")), max(1, int(settings.ranker_max_length)))
+                for it in fused_list
+            ]
+            # Użyj połączonych zapytań jako jednego promptu rerankera
+            q_joined = " | ".join(queries)
+            top_n = min(max(1, int(settings.return_top_k)), len(passages))
+            rr = client.rerank(query=q_joined, documents=passages, top_n=top_n)
+            # Posortuj wg relevance_score malejąco i wybierz indeksy
+            rr_sorted = sorted(rr, key=lambda r: float(r.get("relevance_score", 0.0)), reverse=True)[:top_n]
+            sel_idx = [int(r.get("index")) for r in rr_sorted if 0 <= int(r.get("index", -1)) < len(fused_list)]
+            # Zamień score na ocenę rankera, aby kolejność bloków odpowiadała globalnemu rerankowi
+            final_hits = []
+            for i, r in zip(sel_idx, rr_sorted):
+                item = dict(fused_list[i])
+                item["score"] = float(r.get("relevance_score", item.get("score", 0.0)))
+                final_hits.append(item)
+        except Exception:
+            # W razie problemów z rankerem — zachowaj dotychczasowe zachowanie z przycięciem do top_k
+            final_hits = fused_list[: max(1, int(settings.return_top_k))]
+    else:
+        final_hits = fused_list[: max(1, int(req.top_k))]
 
     # Shape results; merged blocks are built AFTER fusion, preserving the requirement
     results, groups_payload, blocks_payload = _shape_results(final_hits, {}, global_mmr_pool, global_rel2, req)

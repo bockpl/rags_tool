@@ -1,4 +1,4 @@
-# rags_tool (2.2.5)
+# rags_tool (2.3.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
@@ -26,6 +26,13 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 
 ## Nowości w 2.2.5
 - Usunięto z kodu stary single‑debug (embed/stage1/stage2/shape) wraz z modelami — został tylko debug (multi), który odtwarza `/search/query` krok po kroku.
+
+## Nowości w 2.3.0
+- Globalny rerank po fuzji (RRF) i twarde cięcie do K, gdy reranker jest włączony:
+  - Po zebraniu kandydatów z wielu zapytań i deduplikacji (po `(doc_id, section, chunk_id)`), wykonywany jest jeden globalny rerank wszystkich bloków.
+  - Zwracane są najwyżej `RETURN_TOP_K` bloków (konfigurowalne w `.env`; domyślnie 5). Parametry `RERANK_TOP_N` oraz `RETURN_TOP_K` są kontrolowane tylko po stronie serwera.
+  - Jeżeli reranker jest wyłączony, zachowanie bez zmian: wynik jest ucinany do `top_k` z żądania.
+  - Dzięki temu, niezależnie od liczby wariantów zapytania, klient otrzymuje „te kilka najlepszych” bloków.
 
 ## Nowości w 2.0.0
 
