@@ -1,6 +1,31 @@
-# rags_tool (2.0.0)
+# rags_tool (2.2.5)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.1.0
+- Debug krok‑po‑kroku (`/search/debug/*`) ma teraz pełną zgodność parametrów z `/search/query`:
+  - przekazywane są `top_k`, `per_doc_limit`, `result_format`, `summary_mode`, `rep_alpha`, a także wszystkie wagi i tryby,
+  - mapa dokumentów z Etapu 1 jest przekazywana w całości (bez obcinania pól), co pozwala wiernie odtworzyć Etap 2,
+  - gdy globalnie pominięty jest Etap 1, do Etapu 2 przekazywany jest filtr trybu (`current`/`archival`) — zgodnie z zachowaniem `/search/query`.
+  Dzięki temu porównania wyników między debug a wyszukiwaniem są 1:1 (różnić się może jedynie skala score w wyniku fuzji RRF).
+
+## Nowości w 2.1.1
+- `/search/debug/embed` przyjmuje teraz również `result_format` i `summary_mode`, co pozwala uruchomić debug od 1. etapu z kompletem parametrów identycznych jak w `/search/query`.
+
+## Nowości w 2.2.1
+- Poprawka: błąd inicjalizacji Admin UI (literówka `true` → `True` w specyfikacji operacji importu) uniemożliwiał start serwisu.
+
+## Nowości w 2.2.2
+- UI: usunięto z listy operacji stary debug single (1–4). Zostaje tylko debug (multi), który odwzorowuje `/search/query`. Endpointy single nie są rejestrowane.
+
+## Nowości w 2.2.3
+- Poprawka: brakujące pola (`top_k`, `per_doc_limit`, `result_format`, `summary_mode`) w modelu `DebugMultiStage1Request` powodowały błąd 500 w `POST /search/debug/stage1_multi`. Dodano pola dla pełnej zgodności parametrów.
+
+## Nowości w 2.2.4
+- Poprawka: `POST /search/debug/stage2_multi` — obsługa `content_sparse_queries` jako obiektów Pydantic lub słowników (błąd `SparseQuery` nie ma `get`). Ujednolicono dekodowanie i wzmocniono odporność na format wejścia.
+
+## Nowości w 2.2.5
+- Usunięto z kodu stary single‑debug (embed/stage1/stage2/shape) wraz z modelami — został tylko debug (multi), który odtwarza `/search/query` krok po kroku.
 
 ## Nowości w 2.0.0
 
@@ -501,3 +526,12 @@ MIT
 ## Nowości w 1.9.1
 
 - Refaktor: wydzielono kod Admin UI i endpointy debug (`/admin`, `/search/debug/*`) do oddzielnego modułu `app/admin_routes.py` i podpinane są przez `attach_admin_routes(app)`. Kod funkcjonalny pozostaje w `app/api.py`.
+## Nowości w 2.2.0
+- Nowy tryb debugowania dla wielu zapytań, wiernie odzwierciedlający `/search/query` krok po kroku:
+  - `POST /search/debug/embed_multi` – embeduje wszystkie zapytania i buduje zapytania TF‑IDF per‑query.
+  - `POST /search/debug/stage1_multi` – selekcja dokumentów dla każdego zapytania (Etap 1).
+  - `POST /search/debug/stage2_multi` – selekcja chunków per‑query (Etap 2) z takim samym oversamplingiem i fuzją RRF (1/(60+rank)) jak w `/search/query`.
+  - `POST /search/debug/shape_multi` – kształtowanie wyników po fuzji (flat/grouped/blocks).
+  Debug multi‑query przyjmuje ten sam zestaw parametrów co `/search/query` już od pierwszego kroku i przenosi je między etapami bez obcinania.
+-## Nowości w 2.2.1
+- Poprawka: błąd inicjalizacji Admin UI (literówka `true` → `True` w specyfikacji operacji importu) uniemożliwiał start serwisu.

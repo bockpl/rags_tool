@@ -201,30 +201,33 @@ class MergedBlock(BaseModel):
 SearchResponse.model_rebuild()
 
 
-# --- Debug (step-by-step) search models ---
+class SparseQuery(BaseModel):
+    indices: List[int]
+    values: List[float]
 
-class DebugEmbedRequest(BaseModel):
-    # Accept single query or list of queries (like /search/query)
+
+# --- Multi-query debug models (mirror /search/query with step-by-step outputs) ---
+
+class DebugMultiEmbedRequest(BaseModel):
+    # Accept single query or list of queries (flattened)
     query: object
     mode: str = "auto"
     use_hybrid: bool = True
-    # Optional selection when multiple queries are provided
-    query_index: int = 0
-    # Scoring params to mirror /search/query (used to prefill next steps)
     top_m: int = 100
     top_k: int = 10
+    per_doc_limit: int = DEFAULT_PER_DOC_LIMIT
     score_norm: str = DEFAULT_SCORE_NORM
     dense_weight: float = 0.6
     sparse_weight: float = 0.4
-    mmr_stage1: bool = True
     mmr_lambda: float = DEFAULT_MMR_LAMBDA
     rep_alpha: Optional[float] = None
-    per_doc_limit: int = DEFAULT_PER_DOC_LIMIT
+    mmr_stage1: bool = True
+    result_format: str = "blocks"
+    summary_mode: str = "first"
 
     @field_validator("query", mode="before")
     @classmethod
-    def _coerce_query(cls, v):
-        # Reuse the same semantics as SearchQuery: accept string | List[str] | nested lists
+    def _coerce_query_multi(cls, v):
         def to_list_of_str(x):
             if x is None:
                 return []
@@ -238,69 +241,58 @@ class DebugEmbedRequest(BaseModel):
                 return acc
             s = str(x).strip()
             return [s] if s else []
-
         out = to_list_of_str(v)
         return out if out else v
 
 
-class SparseQuery(BaseModel):
-    indices: List[int]
-    values: List[float]
-
-
-class DebugEmbedResponse(BaseModel):
-    step: str = "embed"
-    q_text: str
+class DebugMultiEmbedResponse(BaseModel):
+    step: str = "embed_multi"
+    queries: List[str]
     mode: str
-    q_vec: List[float]
-    q_vec_len: int
-    content_sparse_query: Optional[SparseQuery] = None
-    summary_sparse_query: Optional[SparseQuery] = None
+    q_vecs: List[List[float]]
+    q_vec_lens: List[int]
+    content_sparse_queries: Optional[List[Optional[SparseQuery]]] = None
+    summary_sparse_queries: Optional[List[Optional[SparseQuery]]] = None
     _next: Optional[dict] = None
 
 
-class DebugStage1Request(BaseModel):
-    q_text: str
-    q_vec: List[float]
+class DebugMultiStage1Request(BaseModel):
+    queries: List[str]
+    q_vecs: List[List[float]]
     mode: str = "auto"
     use_hybrid: bool = True
-    # scoring params
     top_m: int = 100
+    top_k: int = 10
+    per_doc_limit: int = DEFAULT_PER_DOC_LIMIT
     score_norm: str = DEFAULT_SCORE_NORM
     dense_weight: float = 0.6
     sparse_weight: float = 0.4
     mmr_stage1: bool = True
     mmr_lambda: float = DEFAULT_MMR_LAMBDA
     rep_alpha: Optional[float] = None
-    # optional sparse built in embed step
-    summary_sparse_query: Optional[SparseQuery] = None
-    content_sparse_query: Optional[SparseQuery] = None
+    summary_sparse_queries: Optional[List[Optional[SparseQuery]]] = None
+    content_sparse_queries: Optional[List[Optional[SparseQuery]]] = None
+    # shaping params for parity
+    result_format: str = "blocks"
+    summary_mode: str = "first"
 
 
-class DebugDocInfo(BaseModel):
-    doc_id: str
-    path: Optional[str] = None
-    doc_summary: Optional[str] = None
-    doc_signature: Optional[list] = None
-    dense_score: float
-    sparse_score: float
-
-
-class DebugStage1Response(BaseModel):
-    step: str = "stage1"
-    cand_doc_ids: List[str]
-    doc_map: dict
+class DebugMultiStage1Response(BaseModel):
+    step: str = "stage1_multi"
+    cand_doc_ids_list: List[List[str]]
+    doc_maps: List[dict]
     _next: Optional[dict] = None
 
 
-class DebugStage2Request(BaseModel):
-    q_text: str
-    q_vec: List[float]
-    # inputs from stage1
-    cand_doc_ids: List[str]
-    doc_map: dict
-    # sparse from embed
-    content_sparse_query: Optional[SparseQuery] = None
+class DebugMultiStage2Request(BaseModel):
+    queries: List[str]
+    q_vecs: List[List[float]]
+    mode: str = "auto"
+    # Stage-1 outputs
+    cand_doc_ids_list: Optional[List[List[str]]] = None
+    doc_maps: Optional[List[dict]] = None
+    # optional sparse from embed
+    content_sparse_queries: Optional[List[Optional[SparseQuery]]] = None
     # scoring params
     top_m: int = 100
     top_k: int = 10
@@ -310,9 +302,12 @@ class DebugStage2Request(BaseModel):
     sparse_weight: float = 0.4
     mmr_lambda: float = DEFAULT_MMR_LAMBDA
     rep_alpha: Optional[float] = None
+    # shaping params
+    result_format: str = "blocks"
+    summary_mode: str = "first"
 
 
-class DebugHit(BaseModel):
+class DebugMultiHit(BaseModel):
     doc_id: str
     path: Optional[str] = None
     section: Optional[str] = None
@@ -321,22 +316,21 @@ class DebugHit(BaseModel):
     snippet: Optional[str] = None
 
 
-class DebugStage2Response(BaseModel):
-    step: str = "stage2"
-    hits: List[DebugHit]
-    pool_size: int
+class DebugMultiStage2Response(BaseModel):
+    step: str = "stage2_multi"
+    per_query_hits: List[List[DebugMultiHit]]
+    fused_hits: List[DebugMultiHit]
     _next: Optional[dict] = None
 
 
-class DebugShapeRequest(BaseModel):
-    final_hits: List[DebugHit]
-    # shaping options
+class DebugMultiShapeRequest(BaseModel):
+    fused_hits: List[DebugMultiHit]
     result_format: str = "blocks"
     summary_mode: str = "first"
 
 
-class DebugShapeResponse(BaseModel):
-    step: str = "shape"
+class DebugMultiShapeResponse(BaseModel):
+    step: str = "shape_multi"
     results: List[SearchHit]
     groups: Optional[List[SearchGroup]] = None
     blocks: Optional[List[MergedBlock]] = None

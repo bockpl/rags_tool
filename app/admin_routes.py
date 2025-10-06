@@ -25,10 +25,10 @@ from app.core.search import (
     _shape_results,
 )
 from app.models import (
-    DebugEmbedRequest,
-    DebugStage1Request,
-    DebugStage2Request,
-    DebugShapeRequest,
+    DebugMultiEmbedRequest,
+    DebugMultiStage1Request,
+    DebugMultiStage2Request,
+    DebugMultiShapeRequest,
 )
 from app.settings import get_settings
 
@@ -38,10 +38,21 @@ logger = logging.getLogger("rags_tool")
 
 
 ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
-    {"id": "search-debug-embed", "path": "/search/debug/embed", "method": "POST", "label": "Search Debug: 1) embed", "body": "{\"query\":\"Jak działa rags_tool?\",\"mode\":\"auto\",\"use_hybrid\":true}"},
-    {"id": "search-debug-stage1", "path": "/search/debug/stage1", "method": "POST", "label": "Search Debug: 2) stage1", "body": "{\"q_text\":\"Jak działa rags_tool?\",\"q_vec\":[0.0],\"mode\":\"auto\",\"use_hybrid\":true,\"top_m\":100,\"score_norm\":\"minmax\",\"dense_weight\":0.6,\"sparse_weight\":0.4,\"mmr_stage1\":true,\"mmr_lambda\":0.3}"},
-    {"id": "search-debug-stage2", "path": "/search/debug/stage2", "method": "POST", "label": "Search Debug: 3) stage2", "body": "{\"q_text\":\"Jak działa rags_tool?\",\"q_vec\":[0.0],\"cand_doc_ids\":[\"<doc_id>\"],\"doc_map\":{},\"top_k\":10,\"per_doc_limit\":2,\"score_norm\":\"minmax\",\"dense_weight\":0.6,\"sparse_weight\":0.4,\"mmr_lambda\":0.3}"},
-    {"id": "search-debug-shape", "path": "/search/debug/shape", "method": "POST", "label": "Search Debug: 4) shape", "body": "{\"final_hits\":[{\"doc_id\":\"<doc_id>\",\"path\":\"/abs/path\",\"section\":null,\"chunk_id\":0,\"score\":0.5,\"snippet\":\"...\"}],\"result_format\":\"blocks\",\"summary_mode\":\"first\"}"},
+    # Multi-query flow mirroring /search/query
+    {"id": "search-debug-embed-multi", "path": "/search/debug/embed_multi", "method": "POST", "label": "Search Debug (multi): 1) embed", "body": "{\n  \"query\": [\n    \"pierwsze zapytanie\",\n    \"drugie zapytanie\"\n  ],\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"top_m\": 100,\n  \"top_k\": 10,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"mmr_stage1\": true,\n  \"result_format\": \"blocks\",\n  \"summary_mode\": \"first\"\n}"},
+    {"id": "search-debug-stage1-multi", "path": "/search/debug/stage1_multi", "method": "POST", "label": "Search Debug (multi): 2) stage1", "body": "{\n  \"queries\": [\n    \"pierwsze zapytanie\",\n    \"drugie zapytanie\"\n  ],\n  \"q_vecs\": [[0.0],[0.0]],\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"top_m\": 100,\n  \"score_norm\": \"minmax\",\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_stage1\": true,\n  \"mmr_lambda\": 0.3\n}"},
+    {"id": "search-debug-stage2-multi", "path": "/search/debug/stage2_multi", "method": "POST", "label": "Search Debug (multi): 3) stage2 + RRF", "body": "{\n  \"queries\": [\n    \"pierwsze zapytanie\",\n    \"drugie zapytanie\"\n  ],\n  \"q_vecs\": [[0.0],[0.0]],\n  \"mode\": \"auto\",\n  \"cand_doc_ids_list\": [[\"<doc_id>\"] , [\"<doc_id>\"]],\n  \"doc_maps\": [{}, {}],\n  \"top_m\": 100,\n  \"top_k\": 10,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"result_format\": \"blocks\",\n  \"summary_mode\": \"first\"\n}"},
+    {"id": "search-debug-shape-multi", "path": "/search/debug/shape_multi", "method": "POST", "label": "Search Debug (multi): 4) shape fused", "body": "{\n  \"fused_hits\": [ { \"doc_id\": \"<doc_id>\", \"chunk_id\": 0, \"score\": 0.04 } ],\n  \"result_format\": \"blocks\",\n  \"summary_mode\": \"first\"\n}"},
+    # Primary functional endpoints for convenience in Admin UI
+    {"id": "about", "path": "/about", "method": "GET"},
+    {"id": "health", "path": "/health", "method": "GET"},
+    {"id": "collections-init", "path": "/collections/init", "method": "POST", "body": "{\n  \"collection_name\": \"rags_tool\",\n  \"force_dim_probe\": false\n}"},
+    {"id": "collections-export", "path": "/collections/export", "method": "POST", "label": "Eksport kolekcji (plik .tar.gz)", "body": "{}"},
+    {"id": "collections-import", "path": "/collections/import", "method": "POST", "label": "Import kolekcji z archiwum", "body": "{\n  \"archive_base64\": \"<wklej_archiwum_base64>\",\n  \"replace_existing\": true\n}", "accepts_file": True},
+    {"id": "ingest-scan", "path": "/ingest/scan", "method": "POST", "body": "{\n  \"base_dir\": \"/app/data\",\n  \"glob\": \"**/*\",\n  \"recursive\": true\n}"},
+    {"id": "summaries-generate", "path": "/summaries/generate", "method": "POST", "body": "{\n  \"files\": [\n    \"/app/data/example.md\"\n  ]\n}"},
+    {"id": "ingest-build", "path": "/ingest/build", "method": "POST", "body": "{\n  \"base_dir\": \"/app/data\",\n  \"glob\": \"**/*\",\n  \"recursive\": true,\n  \"reindex\": false,\n  \"chunk_tokens\": 1200,\n  \"chunk_overlap\": 150,\n  \"collection_name\": \"rags_tool\",\n  \"enable_sparse\": true,\n  \"rebuild_tfidf\": true\n}"},
+    {"id": "search-query", "path": "/search/query", "method": "POST", "body": "{\n  \"query\": [\n    \"Jak działa rags_tool?\",\n    \"architektura rags_tool\"\n  ],\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"result_format\": \"blocks\"\n}"},
 ]
 
 ADMIN_UI_REQUEST_HEADER = "x-admin-ui"
@@ -136,10 +147,40 @@ def attach_admin_routes(app) -> None:
     if ("/admin", "GET") not in existing:
         app.get("/admin", include_in_schema=False, response_class=HTMLResponse, summary="Panel administracyjny", description="Statyczny panel HTML do testowania i debugowania endpointów rags_tool.")(admin_console)
 
-    # --- Debug endpoints ---
+    # --- Single debug removed (migrated to multi) ---
 
-    def search_debug_embed(req: DebugEmbedRequest):
-        # Coerce query to list[str]
+    # --- Multi-query debug endpoints (mirror /search/query pipeline) ---
+
+    def _sq_unpack_list(items: Optional[List[Optional[object]]]) -> Optional[List[Optional[Tuple[List[int], List[float]]]]]:
+        if items is None:
+            return None
+        out: List[Optional[Tuple[List[int], List[float]]]] = []
+        for it in items:
+            if not it:
+                out.append(None)
+                continue
+            idx: Optional[List[int]] = None
+            val: Optional[List[float]] = None
+            if isinstance(it, dict):
+                idx = it.get("indices", [])  # type: ignore[arg-type]
+                val = it.get("values", [])   # type: ignore[arg-type]
+            else:
+                # Pydantic model (SparseQuery) or similar
+                try:
+                    idx = getattr(it, "indices", None)
+                    val = getattr(it, "values", None)
+                    if (idx is None or val is None) and hasattr(it, "dict"):
+                        d = it.dict()  # type: ignore[attr-defined]
+                        idx = d.get("indices", [])
+                        val = d.get("values", [])
+                except Exception:
+                    idx = []
+                    val = []
+            out.append((list(map(int, idx or [])), list(map(float, val or []))))
+        return out
+
+    def search_debug_embed_multi(req: DebugMultiEmbedRequest):
+        # Canonicalize queries
         if isinstance(req.query, list):
             queries = [str(x).strip() for x in req.query if str(x or "").strip()]
         else:
@@ -147,25 +188,37 @@ def attach_admin_routes(app) -> None:
             queries = [qraw] if qraw else []
         if not queries:
             raise HTTPException(status_code=422, detail="Field 'query' must contain at least one non-empty string")
-        qi = max(0, min(int(req.query_index or 0), len(queries) - 1))
-        q = queries[qi]
 
-        # Mode detection like in /search/query but for a single (selected) query
+        # Determine unified mode like /search/query
         if req.mode != "auto":
             mode = req.mode
         else:
-            mode = _classify_mode(q, "auto")
+            modes = {_classify_mode(q, "auto") for q in queries}
+            if modes == {"current"}:
+                mode = "current"
+            elif modes == {"archival"}:
+                mode = "archival"
+            else:
+                mode = "all"
 
-        # Build filter descriptor info only (UI podgląd); właściwy qm.Filter w kolejnych etapach
-        filter_info = {"is_active": True} if mode == "current" else ({"is_active": False} if mode == "archival" else None)
+        # Embed all queries and build sparse queries per query
+        q_vecs = embed_query(queries)
+        content_sparse_queries: List[Optional[Tuple[List[int], List[float]]]] = []
+        summary_sparse_queries: List[Optional[Tuple[List[int], List[float]]]] = []
+        for q in queries:
+            c_sq, s_sq = _build_sparse_queries_for_query(q, req.use_hybrid)
+            content_sparse_queries.append(c_sq)
+            summary_sparse_queries.append(s_sq)
 
-        # Embed and (optional) sparse queries
-        q_vec = embed_query([q])[0]
-        content_sparse_query, summary_sparse_query = _build_sparse_queries_for_query(q, req.use_hybrid)
+        def pack_list(sqs):
+            out = []
+            for sq in sqs:
+                out.append(_sq_pack(sq))
+            return out
 
-        next_payload_stage1 = {
-            "q_text": q,
-            "q_vec": q_vec,
+        next_payload = {
+            "queries": queries,
+            "q_vecs": q_vecs,
             "mode": mode,
             "use_hybrid": bool(req.use_hybrid),
             "top_m": int(req.top_m),
@@ -174,66 +227,43 @@ def attach_admin_routes(app) -> None:
             "sparse_weight": float(req.sparse_weight),
             "mmr_stage1": bool(req.mmr_stage1),
             "mmr_lambda": float(req.mmr_lambda),
-            "summary_sparse_query": _sq_pack(summary_sparse_query),
-            "content_sparse_query": _sq_pack(content_sparse_query),
+            "rep_alpha": float(req.rep_alpha) if req.rep_alpha is not None else None,
+            "top_k": int(req.top_k),
+            "per_doc_limit": int(req.per_doc_limit),
+            "result_format": str(req.result_format),
+            "summary_mode": str(req.summary_mode),
+            "summary_sparse_queries": pack_list(summary_sparse_queries),
+            "content_sparse_queries": pack_list(content_sparse_queries),
         }
-
-        # Jeśli globalnie pomijamy Etap 1, pokieruj "Next step" bezpośrednio do Stage 2 (pełny korpus)
-        if bool(settings.search_skip_stage1_default):
-            next_spec = {
-                "operation_id": "search-debug-stage2",
-                "payload": {
-                    "q_text": q,
-                    "q_vec": q_vec,
-                    "cand_doc_ids": [],
-                    "doc_map": {},
-                    "top_k": int(req.top_k),
-                    "per_doc_limit": int(req.per_doc_limit),
-                    "score_norm": str(req.score_norm),
-                    "dense_weight": float(req.dense_weight),
-                    "sparse_weight": float(req.sparse_weight),
-                    "mmr_lambda": float(req.mmr_lambda),
-                    "content_sparse_query": _sq_pack(content_sparse_query),
-                },
-                "info": {"note": "Stage 1 skipped (full corpus)"},
-            }
-        else:
-            next_spec = {"operation_id": "search-debug-stage1", "payload": next_payload_stage1, "info": {"filter": filter_info}}
 
         return {
-            "step": "embed",
+            "step": "embed_multi",
             "queries": queries,
-            "selected_query_index": qi,
-            "q_text": q,
             "mode": mode,
-            "q_vec": q_vec,
-            "q_vec_len": len(q_vec),
-            "content_sparse_query": _sq_pack(content_sparse_query),
-            "summary_sparse_query": _sq_pack(summary_sparse_query),
-            "config": {
-                "skip_stage1_active": bool(settings.search_skip_stage1_default),
-                "use_hybrid": bool(req.use_hybrid),
-            },
-            "_next": next_spec,
+            "q_vecs": q_vecs,
+            "q_vec_lens": [len(v) for v in q_vecs],
+            "content_sparse_queries": pack_list(content_sparse_queries),
+            "summary_sparse_queries": pack_list(summary_sparse_queries),
+            "_next": {"operation_id": "search-debug-stage1-multi", "payload": next_payload},
         }
 
-    if ("/search/debug/embed", "POST") not in existing:
-        app.post("/search/debug/embed", include_in_schema=False, summary="Search Debug: Etap 1/4 — embed + sparse")(search_debug_embed)
+    if ("/search/debug/embed_multi", "POST") not in existing:
+        app.post("/search/debug/embed_multi", include_in_schema=False, summary="Search Debug (multi): Etap 1/4 — embed wszystkich zapytań")(search_debug_embed_multi)
 
-    def search_debug_stage1(req: DebugStage1Request):
+    def search_debug_stage1_multi(req: DebugMultiStage1Request):
         # Build filter for mode
         flt = None
         if req.mode in ("current", "archival"):
             flt = qm.Filter(must=[qm.FieldCondition(key="is_active", match=qm.MatchValue(value=(req.mode == "current")))])
 
-        # Prepare summary sparse query
-        summary_sq = None
-        if req.summary_sparse_query is not None:
-            summary_sq = (list(map(int, req.summary_sparse_query.indices)), list(map(float, req.summary_sparse_query.values)))
+        # Unpack sparse per query
+        s_list = _sq_unpack_list([sq.dict() if sq else None for sq in (req.summary_sparse_queries or [])]) if req.summary_sparse_queries is not None else None
 
-        # Build temporary request-like object with needed fields
+        cand_doc_ids_list: List[List[str]] = []
+        doc_maps: List[Dict[str, Any]] = []
+
         class _R:
-            def __init__(self, src: DebugStage1Request):
+            def __init__(self, src: DebugMultiStage1Request):
                 self.top_m = src.top_m
                 self.score_norm = src.score_norm
                 self.dense_weight = src.dense_weight
@@ -242,62 +272,63 @@ def attach_admin_routes(app) -> None:
                 self.mmr_lambda = src.mmr_lambda
                 self.rep_alpha = src.rep_alpha
 
-        cand_doc_ids, doc_map = _stage1_select_documents(req.q_text, req.q_vec, flt, summary_sq, _R(req))
-
-        # Trim doc_map for UI (bez wektorów)
-        ui_doc_map: Dict[str, Any] = {}
-        for did, info in doc_map.items():
-            ui_doc_map[did] = {
-                "doc_id": did,
-                "path": info.get("path"),
-                "doc_summary": info.get("doc_summary"),
-                "doc_signature": info.get("doc_signature"),
-                "dense_score": float(info.get("dense_score", 0.0)),
-                "sparse_score": float(info.get("sparse_score", 0.0)),
-            }
+        for i, (q, qv) in enumerate(zip(req.queries, req.q_vecs)):
+            s_sq = s_list[i] if s_list and i < len(s_list) else None
+            cand_doc_ids, doc_map = _stage1_select_documents(q, qv, flt, s_sq, _R(req))
+            cand_doc_ids_list.append(cand_doc_ids)
+            doc_maps.append(doc_map)
 
         next_payload = {
-            "q_text": req.q_text,
-            "q_vec": req.q_vec,
-            "cand_doc_ids": cand_doc_ids,
-            "doc_map": ui_doc_map,
-            "top_k": 10,
-            "per_doc_limit": 2,
+            "queries": req.queries,
+            "q_vecs": req.q_vecs,
+            "mode": req.mode,
+            "cand_doc_ids_list": cand_doc_ids_list,
+            "doc_maps": doc_maps,
+            "content_sparse_queries": [sq.dict() if sq else None for sq in (req.content_sparse_queries or [])] if req.content_sparse_queries is not None else None,
+            "top_m": req.top_m,
+            "top_k": req.top_k,
+            "per_doc_limit": req.per_doc_limit,
             "score_norm": req.score_norm,
             "dense_weight": req.dense_weight,
             "sparse_weight": req.sparse_weight,
             "mmr_lambda": req.mmr_lambda,
-            "content_sparse_query": req.content_sparse_query,
+            "rep_alpha": req.rep_alpha,
+            "result_format": req.result_format,
+            "summary_mode": req.summary_mode,
         }
 
         return {
-            "step": "stage1",
-            "cand_doc_ids": cand_doc_ids,
-            "doc_map": ui_doc_map,
-            "config": {
-                "skip_stage1_active": bool(settings.search_skip_stage1_default),
-                "score_norm": req.score_norm,
-                "dense_weight": req.dense_weight,
-                "sparse_weight": req.sparse_weight,
-                "mmr_stage1": req.mmr_stage1,
-                "mmr_lambda": req.mmr_lambda,
-            },
-            "_next": {"operation_id": "search-debug-stage2", "payload": next_payload},
+            "step": "stage1_multi",
+            "cand_doc_ids_list": cand_doc_ids_list,
+            "doc_maps": doc_maps,
+            "_next": {"operation_id": "search-debug-stage2-multi", "payload": next_payload},
         }
 
-    if ("/search/debug/stage1", "POST") not in existing:
-        app.post("/search/debug/stage1", include_in_schema=False, summary="Search Debug: Etap 2/4 — dokumenty (stage1)")(search_debug_stage1)
+    if ("/search/debug/stage1_multi", "POST") not in existing:
+        app.post("/search/debug/stage1_multi", include_in_schema=False, summary="Search Debug (multi): Etap 2/4 — dokumenty dla wszystkich zapytań")(search_debug_stage1_multi)
 
-    def search_debug_stage2(req: DebugStage2Request):
-        # Rebuild content sparse query
-        content_sq = None
-        if req.content_sparse_query is not None:
-            content_sq = (list(map(int, req.content_sparse_query.indices)), list(map(float, req.content_sparse_query.values)))
+    def search_debug_stage2_multi(req: DebugMultiStage2Request):
+        # Filter for mode
+        flt = None
+        if req.mode in ("current", "archival"):
+            flt = qm.Filter(must=[qm.FieldCondition(key="is_active", match=qm.MatchValue(value=(req.mode == "current")))])
+
+        # Settings parity with /search/query
+        ranker_enabled = bool(settings.ranker_base_url and settings.ranker_model)
+        RERANK_TOP_N = max(1, int(settings.rerank_top_n))
+        RRF_K = 60
+        OVERSAMPLE = 2
+
+        # Unpack content sparse per query
+        c_list = _sq_unpack_list([sq.dict() if sq else None for sq in (req.content_sparse_queries or [])]) if req.content_sparse_queries is not None else None
+
+        per_query_hits: List[List[Dict[str, Any]]] = []
+        fused: Dict[tuple, Dict[str, Any]] = {}
 
         class _R2:
-            def __init__(self, src: DebugStage2Request):
+            def __init__(self, src: DebugMultiStage2Request, top_k_override: int):
                 self.top_m = src.top_m
-                self.top_k = src.top_k
+                self.top_k = top_k_override
                 self.per_doc_limit = src.per_doc_limit
                 self.score_norm = src.score_norm
                 self.dense_weight = src.dense_weight
@@ -307,14 +338,52 @@ def attach_admin_routes(app) -> None:
                 self.result_format = "flat"
                 self.summary_mode = "first"
 
-        # Note: doc_map passed in here is already trimmed (no vectors) — it's enough to enrich payloads
-        final_hits, mmr_pool, rel2 = _stage2_select_chunks(req.cand_doc_ids, req.q_text, req.q_vec, content_sq, req.doc_map, _R2(req))
+        for i, (q, qv) in enumerate(zip(req.queries, req.q_vecs)):
+            per_query_limit = RERANK_TOP_N if ranker_enabled else max(1, int(req.top_k) * OVERSAMPLE)
+            cand_ids = None
+            doc_map = {}
+            if req.cand_doc_ids_list is not None and i < len(req.cand_doc_ids_list):
+                cand_ids = req.cand_doc_ids_list[i]
+            if req.doc_maps is not None and i < len(req.doc_maps):
+                doc_map = req.doc_maps[i] or {}
+            c_sq = c_list[i] if c_list and i < len(c_list) else None
+            final_hits, mmr_pool, rel2 = _stage2_select_chunks(cand_ids if cand_ids else None, q, qv, c_sq, doc_map, _R2(req, per_query_limit), flt)
+            # Convert to debug hits and accumulate RRF
+            dbg_hits: List[Dict[str, Any]] = []
+            for rank, fh in enumerate(final_hits, start=1):
+                payload = fh.get("payload") or {}
+                did = payload.get("doc_id", "")
+                sec = payload.get("section")
+                cid = int(payload.get("chunk_id", 0))
+                snippet = (payload.get("text") or "").strip()[:400] if payload.get("text") else (payload.get("summary", "")[:400])
+                dbg_hits.append({
+                    "doc_id": did,
+                    "path": payload.get("path"),
+                    "section": sec,
+                    "chunk_id": cid,
+                    "score": float(fh.get("score", 0.0)),
+                    "snippet": snippet,
+                })
+                key = (did, sec, cid)
+                incr = 1.0 / (RRF_K + rank)
+                entry = fused.get(key)
+                if entry is None:
+                    fused[key] = {"payload": payload, "score": incr}
+                else:
+                    entry["score"] += incr
+            per_query_hits.append(dbg_hits)
 
-        # Convert to debug hits
-        dbg_hits: List[Dict[str, Any]] = []
-        for fh in final_hits:
+        fused_list = [
+            {"payload": v.get("payload"), "score": float(v.get("score", 0.0))}
+            for v in fused.values()
+        ]
+        fused_list.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        final_fused = fused_list  # nie obcinamy tu; shaping może ograniczyć
+
+        fused_hits_dbg = []
+        for fh in final_fused:
             payload = fh.get("payload") or {}
-            dbg_hits.append({
+            fused_hits_dbg.append({
                 "doc_id": payload.get("doc_id", ""),
                 "path": payload.get("path"),
                 "section": payload.get("section"),
@@ -324,33 +393,25 @@ def attach_admin_routes(app) -> None:
             })
 
         next_payload = {
-            "final_hits": dbg_hits,
-            "result_format": "blocks",
-            "summary_mode": "first",
+            "fused_hits": fused_hits_dbg[: max(1, int(req.top_k))] if not ranker_enabled else fused_hits_dbg,
+            "result_format": req.result_format,
+            "summary_mode": req.summary_mode,
         }
 
         return {
-            "step": "stage2",
-            "hits": dbg_hits,
-            "pool_size": len(mmr_pool),
-            "config": {
-                "skip_stage1_active": bool(settings.search_skip_stage1_default),
-                "score_norm": req.score_norm,
-                "dense_weight": req.dense_weight,
-                "sparse_weight": req.sparse_weight,
-                "mmr_lambda": req.mmr_lambda,
-                "per_doc_limit": req.per_doc_limit,
-            },
-            "_next": {"operation_id": "search-debug-shape", "payload": next_payload}
+            "step": "stage2_multi",
+            "per_query_hits": per_query_hits,
+            "fused_hits": fused_hits_dbg,
+            "_next": {"operation_id": "search-debug-shape-multi", "payload": next_payload},
         }
 
-    if ("/search/debug/stage2", "POST") not in existing:
-        app.post("/search/debug/stage2", include_in_schema=False, summary="Search Debug: Etap 3/4 — chunki (stage2)")(search_debug_stage2)
+    if ("/search/debug/stage2_multi", "POST") not in existing:
+        app.post("/search/debug/stage2_multi", include_in_schema=False, summary="Search Debug (multi): Etap 3/4 — chunki + fuzja RRF")(search_debug_stage2_multi)
 
-    def search_debug_shape(req: DebugShapeRequest):
-        # Build final_hits in expected shape for _shape_results
+    def search_debug_shape_multi(req: DebugMultiShapeRequest):
+        # Build final_hits acceptable by _shape_results
         final_hits = []
-        for h in req.final_hits:
+        for h in req.fused_hits:
             payload = {
                 "doc_id": h.doc_id,
                 "path": h.path,
@@ -360,23 +421,18 @@ def attach_admin_routes(app) -> None:
             }
             final_hits.append({"payload": payload, "score": float(h.score)})
 
-        class _R3:
-            def __init__(self, src: DebugShapeRequest):
+        class _R4:
+            def __init__(self, src: DebugMultiShapeRequest):
                 self.result_format = src.result_format
                 self.summary_mode = src.summary_mode
 
-        results, groups, blocks = _shape_results(final_hits, {}, [], [], _R3(req))
+        results, groups, blocks = _shape_results(final_hits, {}, [], [], _R4(req))
         return {
-            "step": "shape",
+            "step": "shape_multi",
             "results": results,
             "groups": groups,
             "blocks": blocks,
-            "config": {
-                "skip_stage1_active": bool(settings.search_skip_stage1_default),
-                "summary_mode": req.summary_mode,
-                "result_format": req.result_format,
-            }
         }
 
-    if ("/search/debug/shape", "POST") not in existing:
-        app.post("/search/debug/shape", include_in_schema=False, summary="Search Debug: Etap 4/4 — kształtowanie wyników")(search_debug_shape)
+    if ("/search/debug/shape_multi", "POST") not in existing:
+        app.post("/search/debug/shape_multi", include_in_schema=False, summary="Search Debug (multi): Etap 4/4 — kształtowanie fuzji")(search_debug_shape_multi)
