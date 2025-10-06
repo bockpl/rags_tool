@@ -207,3 +207,114 @@ class MergedBlock(BaseModel):
 
 # Rebuild forward refs
 SearchResponse.model_rebuild()
+
+
+# --- Debug (step-by-step) search models ---
+
+class DebugEmbedRequest(BaseModel):
+    query: str
+    mode: str = "auto"
+    use_hybrid: bool = True
+
+
+class SparseQuery(BaseModel):
+    indices: List[int]
+    values: List[float]
+
+
+class DebugEmbedResponse(BaseModel):
+    step: str = "embed"
+    q_text: str
+    mode: str
+    q_vec: List[float]
+    q_vec_len: int
+    content_sparse_query: Optional[SparseQuery] = None
+    summary_sparse_query: Optional[SparseQuery] = None
+    _next: Optional[dict] = None
+
+
+class DebugStage1Request(BaseModel):
+    q_text: str
+    q_vec: List[float]
+    mode: str = "auto"
+    use_hybrid: bool = True
+    # scoring params
+    top_m: int = 100
+    score_norm: str = DEFAULT_SCORE_NORM
+    dense_weight: float = 0.6
+    sparse_weight: float = 0.4
+    mmr_stage1: bool = True
+    mmr_lambda: float = DEFAULT_MMR_LAMBDA
+    rep_alpha: Optional[float] = None
+    # optional sparse built in embed step
+    summary_sparse_query: Optional[SparseQuery] = None
+    content_sparse_query: Optional[SparseQuery] = None
+
+
+class DebugDocInfo(BaseModel):
+    doc_id: str
+    path: Optional[str] = None
+    doc_summary: Optional[str] = None
+    doc_signature: Optional[list] = None
+    dense_score: float
+    sparse_score: float
+
+
+class DebugStage1Response(BaseModel):
+    step: str = "stage1"
+    cand_doc_ids: List[str]
+    doc_map: dict
+    _next: Optional[dict] = None
+
+
+class DebugStage2Request(BaseModel):
+    q_text: str
+    q_vec: List[float]
+    # inputs from stage1
+    cand_doc_ids: List[str]
+    doc_map: dict
+    # sparse from embed
+    content_sparse_query: Optional[SparseQuery] = None
+    # scoring params
+    top_m: int = 100
+    top_k: int = 10
+    per_doc_limit: int = DEFAULT_PER_DOC_LIMIT
+    score_norm: str = DEFAULT_SCORE_NORM
+    dense_weight: float = 0.6
+    sparse_weight: float = 0.4
+    mmr_lambda: float = DEFAULT_MMR_LAMBDA
+    rep_alpha: Optional[float] = None
+
+
+class DebugHit(BaseModel):
+    doc_id: str
+    path: Optional[str] = None
+    section: Optional[str] = None
+    chunk_id: int
+    score: float
+    snippet: Optional[str] = None
+
+
+class DebugStage2Response(BaseModel):
+    step: str = "stage2"
+    hits: List[DebugHit]
+    pool_size: int
+    _next: Optional[dict] = None
+
+
+class DebugShapeRequest(BaseModel):
+    final_hits: List[DebugHit]
+    # shaping options
+    result_format: str = "blocks"
+    merge_chunks: bool = True
+    merge_group_budget_tokens: int = 1200
+    max_merged_per_group: int = 1
+    block_join_delimiter: str = "\n\n"
+    summary_mode: str = "first"
+
+
+class DebugShapeResponse(BaseModel):
+    step: str = "shape"
+    results: List[SearchHit]
+    groups: Optional[List[SearchGroup]] = None
+    blocks: Optional[List[MergedBlock]] = None

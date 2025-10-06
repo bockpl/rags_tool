@@ -1,6 +1,27 @@
-# rags_tool (1.7.1)
+# rags_tool (1.8.2)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 1.8.2
+
+- Admin UI: widoczny teraz jest „handler” (np. `app.api:search_debug_stage2`) dla każdej operacji.
+- Bogatszy opis etapów debugowania w panelu (wskazuje, które funkcje wewnętrzne są wywoływane).
+
+## Nowości w 1.8.1
+
+- Poprawka: `/search/debug/stage2` — brakujący parametr `top_m` w obiekcie konfiguracji powodował błąd 500. Dodano pole z domyślną wartością (100).
+
+## Nowości w 1.8.0
+
+- Tryb debugowania wyszukiwania krok po kroku (UI + API):
+  - Nowe endpointy (ukryte w OpenAPI, dostępne z panelu `/admin`):
+    - `POST /search/debug/embed` – embeduje pojedyncze zapytanie i buduje zapytania TF‑IDF (hybryda).
+    - `POST /search/debug/stage1` – selekcja dokumentów na streszczeniach (MMR, hybryda).
+    - `POST /search/debug/stage2` – selekcja chunków w obrębie wybranych dokumentów (MMR, hybryda).
+    - `POST /search/debug/shape` – kształtowanie odpowiedzi (`flat|grouped|blocks`).
+  - Panel Admin UI: po wykonaniu etapu pojawia się przycisk „→ Następny etap”, który
+    automatycznie przełącza operację i wstawia przygotowane body na podstawie poprzedniej odpowiedzi.
+  - Proste, JSON‑owe formaty — wyniki etapów zawierają minimalne pola do inspekcji i kontynuacji.
 
 ## Nowości w 1.7.1
 

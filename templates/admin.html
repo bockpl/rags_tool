@@ -38,6 +38,7 @@
         <div class="meta">
             <span id="method"></span>
             <span id="path"></span>
+            <span id="handler"></span>
         </div>
         <div class="doc" id="doc"></div>
         <div id="body-wrapper">
@@ -52,6 +53,7 @@
             </label>
         </div>
         <button id="send">Wyślij żądanie</button>
+        <button id="next-step" style="display:none; background:#10b981;">→ Następny etap</button>
         <pre id="result">Odpowiedź pojawi się tutaj.</pre>
     </div>
     <script>
@@ -65,9 +67,11 @@
         const payloadEl = document.getElementById("payload");
         const resultEl = document.getElementById("result");
         const sendBtn = document.getElementById("send");
+        const nextBtn = document.getElementById("next-step");
         const fileWrapper = document.getElementById("file-wrapper");
         const fileInput = document.getElementById("file-input");
         const replaceCheckbox = document.getElementById("replace-existing");
+        const handlerEl = document.getElementById("handler");
 
         function detectDownloadFilename(disposition, fallback) {
             if (!disposition) return fallback;
@@ -86,6 +90,8 @@
             return fallback;
         }
 
+        let lastJson = null;
+
         function populateOptions() {
             operations.forEach((op, idx) => {
                 const option = document.createElement("option");
@@ -101,6 +107,7 @@
             if (!op) return;
             methodEl.textContent = op.method;
             pathEl.textContent = op.path;
+            handlerEl.textContent = (op.handler_loc || op.handler) ? `handler: ${op.handler_loc || op.handler}` : '';
             docEl.textContent = op.doc || "Brak dokumentacji dla tej operacji.";
             const hasBody = op.method !== "GET";
             if (hasBody) {
@@ -171,6 +178,7 @@
                 let downloaded = false;
                 if (ct.includes("application/json")) {
                     const data = await response.json();
+                    lastJson = data;
                     resultEl.textContent = JSON.stringify(data, null, 2);
                 } else if (ct.includes("application/gzip") || ct.includes("application/octet-stream") || disposition.toLowerCase().includes("attachment")) {
                     const buffer = await response.arrayBuffer();
@@ -200,6 +208,22 @@
                 resultEl.textContent = `Błąd wywołania: ${err}`;
             }
 
+            // Pokaż przycisk następnego etapu, jeśli odpowiedź zawiera _next
+            try {
+                const nx = (lastJson && lastJson._next) ? lastJson._next : null;
+                if (nx && nx.operation_id && nx.payload) {
+                    nextBtn.style.display = '';
+                    nextBtn.dataset.operationId = nx.operation_id;
+                    nextBtn.dataset.payload = JSON.stringify(nx.payload, null, 2);
+                } else {
+                    nextBtn.style.display = 'none';
+                    nextBtn.dataset.operationId = '';
+                    nextBtn.dataset.payload = '';
+                }
+            } catch (_) {
+                nextBtn.style.display = 'none';
+            }
+
             sendBtn.disabled = false;
         }
 
@@ -207,6 +231,20 @@
         renderOperation(selectEl.value);
         selectEl.addEventListener("change", event => renderOperation(event.target.value));
         sendBtn.addEventListener("click", runRequest);
+        nextBtn.addEventListener("click", () => {
+            const opId = nextBtn.dataset.operationId;
+            const payload = nextBtn.dataset.payload || '';
+            if (!opId || !payload) return;
+            selectEl.value = opId;
+            renderOperation(opId);
+            try {
+                payloadEl.value = JSON.stringify(JSON.parse(payload), null, 2);
+            } catch (_) {
+                payloadEl.value = payload;
+            }
+            // schowaj przycisk do czasu kolejnej odpowiedzi
+            nextBtn.style.display = 'none';
+        });
     </script>
 </body>
 </html>
