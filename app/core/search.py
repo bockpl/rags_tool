@@ -534,21 +534,117 @@ def mmr_diversify_hybrid(
     return selected
 
 
+def _fetch_section_chunks(doc_id: str, section: Optional[str]) -> List[Dict[str, Any]]:
+    """Pobierz wszystkie chunki danej sekcji dokumentu (posortowane po chunk_id).
+
+    Jeśli `section` jest puste/None, zwraca pustą listę (brak bezpiecznego filtra po NULL w Qdrant).
+    """
+    if not doc_id or not section:
+        return []
+    try:
+        flt = qm.Filter(
+            must=[
+                qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=doc_id)),
+                qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
+                qm.FieldCondition(key="section", match=qm.MatchValue(value=section)),
+            ]
+        )
+        out: List[Dict[str, Any]] = []
+        offset = None
+        while True:
+            res = qdrant.scroll(
+                collection_name=settings.qdrant_content_collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if isinstance(res, tuple):
+                records, offset = res
+            else:
+                records = getattr(res, "points", None)
+                offset = getattr(res, "next_page_offset", None)
+                if records is None:
+                    records = []
+            if not records:
+                break
+            for rec in records:
+                payload = rec.payload or {}
+                if payload.get("point_type") and payload.get("point_type") != "chunk":
+                    continue
+                out.append(payload)
+            if offset is None:
+                break
+        # Posortuj po chunk_id rosnąco
+        out.sort(key=lambda p: int(p.get("chunk_id", 0)))
+        return out
+    except Exception:
+        # Best-effort — na błąd zwróć pustą listę, aby nie blokować odpowiedzi
+        return []
+
+
 def _build_blocks_from_hits(
     final_hits: List[Dict[str, Any]],
     summary_mode: str = "first",
 ) -> List[Dict[str, Any]]:
-    blocks: List[Dict[str, Any]] = []
-    seen_docs: set = set()
+    """Zbuduj bloki po pełnych sekcjach.
+
+    - Grupuje trafienia po (doc_id, section).
+    - Dla sekcji z nazwą dociąga pełną zawartość sekcji z Qdrant i skleja tekst.
+    - Dla sekcji bez nazwy (None) pozostaje przy treści trafionych chunków.
+    - Score bloku = max(score) spośród trafień należących do tej sekcji.
+    - summary_mode: kontrola duplikacji streszczenia per dokument.
+    """
+    by_key: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
     for fh in final_hits:
         payload = fh.get("payload") or {}
-        did = payload.get("doc_id", "")
+        did = payload.get("doc_id")
         if not did:
             continue
-        section = payload.get("section")
-        cid = int(payload.get("chunk_id", 0))
-        text = (payload.get("text") or "").strip()
-        doc_summary_val = payload.get("summary")
+        key = (str(did), payload.get("section"))
+        by_key.setdefault(key, []).append(fh)
+
+    blocks: List[Dict[str, Any]] = []
+    seen_docs: set = set()
+
+    for (did, section), hits in by_key.items():
+        # Bazowy payload do metadanych
+        base_payload = (hits[0].get("payload") or {})
+        path = base_payload.get("path", "")
+        # Score sekcji = max score spośród jej trafień
+        sect_score = max(float(h.get("score", 0.0)) for h in hits)
+
+        # Dociągnij pełną sekcję (jeśli mamy etykietę) i zbuduj tekst + zakres id
+        merged_text_parts: List[str] = []
+        first_cid: Optional[int] = None
+        last_cid: Optional[int] = None
+
+        sec_chunks = _fetch_section_chunks(did, section)
+        if sec_chunks:
+            for ch in sec_chunks:
+                text = (ch.get("text") or "").strip()
+                if text:
+                    merged_text_parts.append(text)
+                cid = int(ch.get("chunk_id", 0))
+                first_cid = cid if first_cid is None else min(first_cid, cid)
+                last_cid = cid if last_cid is None else max(last_cid, cid)
+        else:
+            # Brak sekcji lub nie udało się pobrać — użyj tylko trafionych chunków
+            for h in sorted(hits, key=lambda x: int((x.get("payload") or {}).get("chunk_id", 0))):
+                hp = h.get("payload") or {}
+                text = (hp.get("text") or "").strip()
+                if text:
+                    merged_text_parts.append(text)
+                cid = int(hp.get("chunk_id", 0))
+                first_cid = cid if first_cid is None else min(first_cid, cid)
+                last_cid = cid if last_cid is None else max(last_cid, cid)
+
+        merged_text = "\n\n".join(merged_text_parts).strip()
+        token_estimate = max(1, len(merged_text) // 4) if merged_text else None
+
+        # Summary kontrolowane per dokument
+        doc_summary_val = base_payload.get("summary")
         if summary_mode == "none":
             sum_val = None
         elif summary_mode == "first":
@@ -559,20 +655,21 @@ def _build_blocks_from_hits(
                 seen_docs.add(did)
         else:
             sum_val = doc_summary_val
-        token_estimate = max(1, len(text) // 4) if text else None
+
         blocks.append(
             {
                 "doc_id": did,
-                "path": payload.get("path", ""),
+                "path": path,
                 "section": section,
-                "first_chunk_id": cid,
-                "last_chunk_id": cid,
-                "score": float(fh.get("score", 0.0)),
+                "first_chunk_id": int(first_cid if first_cid is not None else (base_payload.get("chunk_id", 0))),
+                "last_chunk_id": int(last_cid if last_cid is not None else (base_payload.get("chunk_id", 0))),
+                "score": float(sect_score),
                 "summary": sum_val,
-                "text": text,
+                "text": merged_text,
                 "token_estimate": token_estimate,
             }
         )
+
     blocks.sort(key=lambda b: float(b.get("score", 0.0)), reverse=True)
     return blocks
 

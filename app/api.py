@@ -746,37 +746,73 @@ def search_query(req: SearchQuery):
         for v in fused.values()
     ]
     fused_list.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-    # Global rerank after fusion + hard cut to K when ranker is enabled
-    if ranker_enabled:
-        try:
-            client = OpenAIReranker(settings.ranker_base_url or "", settings.ranker_api_key, settings.ranker_model or "")
-            passages = [
-                _truncate_head_tail(str((it.get("payload") or {}).get("text", "")), max(1, int(settings.ranker_max_length)))
-                for it in fused_list
-            ]
-            # Użyj połączonych zapytań jako jednego promptu rerankera
-            q_joined = " | ".join(queries)
-            top_n = min(max(1, int(settings.return_top_k)), len(passages))
-            rr = client.rerank(query=q_joined, documents=passages, top_n=top_n)
-            # Posortuj wg relevance_score malejąco i wybierz indeksy
-            rr_sorted = sorted(rr, key=lambda r: float(r.get("relevance_score", 0.0)), reverse=True)[:top_n]
-            sel_idx = [int(r.get("index")) for r in rr_sorted if 0 <= int(r.get("index", -1)) < len(fused_list)]
-            # Zamień score na ocenę rankera, aby kolejność bloków odpowiadała globalnemu rerankowi
-            final_hits = []
-            for i, r in zip(sel_idx, rr_sorted):
-                item = dict(fused_list[i])
-                item["score"] = float(r.get("relevance_score", item.get("score", 0.0)))
-                final_hits.append(item)
-        except Exception:
-            # W razie problemów z rankerem — zachowaj dotychczasowe zachowanie z przycięciem do top_k
-            final_hits = fused_list[: max(1, int(settings.return_top_k))]
-    else:
-        final_hits = fused_list[: max(1, int(req.top_k))]
-
-    # Shape results; merged blocks are built AFTER fusion, preserving the requirement
-    results, groups_payload, blocks_payload = _shape_results(final_hits, {}, global_mmr_pool, global_rel2, req)
+    # Shape results first; merged blocks are built AFTER fusion
+    # Dalsze kroki (reranking) wykonujemy na już zmergowanych blokach
+    results, groups_payload, blocks_payload = _shape_results(fused_list, {}, global_mmr_pool, global_rel2, req)
 
     if req.result_format == "blocks":
+        # Opcjonalny reranker na zmergowanych blokach sekcyjnych
+        if ranker_enabled and (blocks_payload or []):
+            try:
+                client = OpenAIReranker(settings.ranker_base_url or "", settings.ranker_api_key, settings.ranker_model or "")
+                passages = [
+                    _truncate_head_tail(str(b.get("text", "")), max(1, int(settings.ranker_max_length)))
+                    for b in (blocks_payload or [])
+                ]
+                q_joined = " | ".join(queries)
+                top_n = min(max(1, int(settings.return_top_k)), len(passages))
+                rr = client.rerank(query=q_joined, documents=passages, top_n=top_n)
+                # Zamapuj ranking rankera do bloków (po indeksie wejściowym)
+                idx_to_block = {i: b for i, b in enumerate(blocks_payload or [])}
+                rr_sorted = sorted(rr, key=lambda r: float(r.get("relevance_score", 0.0)), reverse=True)
+                # Uzupełnij ranker_score i zastosuj per_doc_limit w kolejności rankera
+                counts: Dict[str, int] = {}
+                selected_blocks = []
+                for r in rr_sorted:
+                    i = int(r.get("index", -1))
+                    if i < 0 or i >= len(idx_to_block):
+                        continue
+                    b = dict(idx_to_block[i])
+                    b["ranker_score"] = float(r.get("relevance_score", 0.0))
+                    did = str(b.get("doc_id", ""))
+                    if did:
+                        if counts.get(did, 0) >= max(1, int(req.per_doc_limit)):
+                            continue
+                        counts[did] = counts.get(did, 0) + 1
+                    selected_blocks.append(b)
+                    if len(selected_blocks) >= top_n:
+                        break
+                blocks_payload = selected_blocks
+            except Exception as exc:
+                logger.warning("Ranker failed on merged blocks: %s", exc)
+                # Fallback: bez reranka, utnij do top_k po score i per_doc_limit
+                counts: Dict[str, int] = {}
+                trimmed = []
+                for b in sorted(blocks_payload or [], key=lambda x: float(x.get("score", 0.0)), reverse=True):
+                    did = str(b.get("doc_id", ""))
+                    if did:
+                        if counts.get(did, 0) >= max(1, int(req.per_doc_limit)):
+                            continue
+                        counts[did] = counts.get(did, 0) + 1
+                    trimmed.append(b)
+                    if len(trimmed) >= max(1, int(req.top_k)):
+                        break
+                blocks_payload = trimmed
+        else:
+            # Bez rankera: egzekwuj per_doc_limit i utnij do top_k po score
+            counts: Dict[str, int] = {}
+            trimmed = []
+            for b in sorted(blocks_payload or [], key=lambda x: float(x.get("score", 0.0)), reverse=True):
+                did = str(b.get("doc_id", ""))
+                if did:
+                    if counts.get(did, 0) >= max(1, int(req.per_doc_limit)):
+                        continue
+                    counts[did] = counts.get(did, 0) + 1
+                trimmed.append(b)
+                if len(trimmed) >= max(1, int(req.top_k)):
+                    break
+            blocks_payload = trimmed
+
         took_ms = int((time.time() - t0) * 1000)
         logger.info(
             "Search finished | took_ms=%d query_hash=%s mode=%s fmt=blocks blocks=%d",

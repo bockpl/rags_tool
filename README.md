@@ -37,7 +37,16 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 ## Nowości w 2.0.0
 
 - Breaking: usunięto runtime scalanie chunków w odpowiedzi wyszukiwania. Usunięte parametry: `merge_chunks`, `merge_group_budget_tokens`, `max_merged_per_group`, `expand_neighbors`, `block_join_delimiter`.
-- Format `blocks` zwraca teraz bezpośrednio sekcyjne chunki z ingestu (pojedynczy chunk = pojedynczy blok). Długość kontrolujesz przez `CHUNK_TOKENS`/`CHUNK_OVERLAP` i strategię `merge_up_to` w `chunk_text_by_sections`.
+- Format `blocks` zwracał pojedyncze chunki sekcyjne z ingestu (pojedynczy chunk = pojedynczy blok). Długość kontrolujesz przez `CHUNK_TOKENS`/`CHUNK_OVERLAP` i strategię `merge_up_to` w `chunk_text_by_sections`.
+
+## Nowości w 2.4.0
+
+- Przywrócono scalanie po sekcji dla `result_format="blocks"`:
+  - Blok odpowiada pełnej sekcji dokumentu. Po fuzji RRF (na chunkach) dociągane są wszystkie chunki danej sekcji z Qdrant i łączone w jeden tekst.
+  - Pola `first_chunk_id` i `last_chunk_id` reprezentują zakres id najmniejszego i największego chunku włączonego do bloku sekcji.
+  - Reranker działa na zmergowanych sekcjach (po scaleniu), a nie na pojedynczych chunkach. Sortowanie końcowe odbywa się według `ranker_score` (gdy skonfigurowany) z respektowaniem `per_doc_limit`.
+  - Dla wyników bez etykiety `section` stosowany jest fallback: blok budowany jest z trafionych chunków (bez doczytywania całej sekcji).
+- Uporządkowano payload bloków: usunięto pola `ranker_applied` i `ranker_model`. Pole `ranker_score` pozostaje i jest ustawiane, gdy reranker jest aktywny.
 
 ## Nowości w 1.9.0
 

@@ -193,8 +193,6 @@ class MergedBlock(BaseModel):
     token_estimate: Optional[int] = Field(default=None, description="Heuristic token length (~4 chars/token).")
     # Pola opcjonalne dla rerankera (jeśli włączony):
     ranker_score: Optional[float] = Field(default=None, description="Ocena jakości nadana przez ranker (0..1).")
-    ranker_applied: Optional[bool] = Field(default=None, description="Czy zastosowano reranker do wyniku.")
-    ranker_model: Optional[str] = Field(default=None, description="Nazwa modelu rankera użytego do oceny.")
 
 
 # Rebuild forward refs
