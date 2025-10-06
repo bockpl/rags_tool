@@ -208,7 +208,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
     {"id": "search-debug-embed", "path": "/search/debug/embed", "method": "POST", "label": "Search Debug: 1) embed", "body": "{\"query\":\"Jak działa rags_tool?\",\"mode\":\"auto\",\"use_hybrid\":true}"},
     {"id": "search-debug-stage1", "path": "/search/debug/stage1", "method": "POST", "label": "Search Debug: 2) stage1", "body": "{\"q_text\":\"Jak działa rags_tool?\",\"q_vec\":[0.0],\"mode\":\"auto\",\"use_hybrid\":true,\"top_m\":100,\"score_norm\":\"minmax\",\"dense_weight\":0.6,\"sparse_weight\":0.4,\"mmr_stage1\":true,\"mmr_lambda\":0.3}"},
     {"id": "search-debug-stage2", "path": "/search/debug/stage2", "method": "POST", "label": "Search Debug: 3) stage2", "body": "{\"q_text\":\"Jak działa rags_tool?\",\"q_vec\":[0.0],\"cand_doc_ids\":[\"<doc_id>\"],\"doc_map\":{},\"top_k\":10,\"per_doc_limit\":2,\"score_norm\":\"minmax\",\"dense_weight\":0.6,\"sparse_weight\":0.4,\"mmr_lambda\":0.3}"},
-    {"id": "search-debug-shape", "path": "/search/debug/shape", "method": "POST", "label": "Search Debug: 4) shape", "body": "{\"final_hits\":[{\"doc_id\":\"<doc_id>\",\"path\":\"/abs/path\",\"section\":null,\"chunk_id\":0,\"score\":0.5,\"snippet\":\"...\"}],\"result_format\":\"blocks\",\"merge_chunks\":true,\"merge_group_budget_tokens\":1200,\"max_merged_per_group\":1,\"block_join_delimiter\":\"\\n\\n\",\"summary_mode\":\"first\"}"},
+    {"id": "search-debug-shape", "path": "/search/debug/shape", "method": "POST", "label": "Search Debug: 4) shape", "body": "{\"final_hits\":[{\"doc_id\":\"<doc_id>\",\"path\":\"/abs/path\",\"section\":null,\"chunk_id\":0,\"score\":0.5,\"snippet\":\"...\"}],\"result_format\":\"blocks\",\"summary_mode\":\"first\"}"},
     {"id": "about", "path": "/about", "method": "GET"},
     {"id": "health", "path": "/health", "method": "GET"},
     {
@@ -254,7 +254,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "search-query",
         "path": "/search/query",
         "method": "POST",
-        "body": "{\n  \"query\": [\n    \"Jak działa rags_tool?\",\n    \"architektura rags_tool\"\n  ],\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"merge_chunks\": true,\n  \"merge_group_budget_tokens\": 1200,\n  \"max_merged_per_group\": 1,\n  \"expand_neighbors\": 1,\n  \"result_format\": \"blocks\"\n}",
+        "body": "{\n  \"query\": [\n    \"Jak działa rags_tool?\",\n    \"architektura rags_tool\"\n  ],\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"result_format\": \"blocks\"\n}",
     },
 ]
 
@@ -500,13 +500,8 @@ def search_debug_stage2(req: DebugStage2Request):
             self.sparse_weight = src.sparse_weight
             self.mmr_lambda = src.mmr_lambda
             self.rep_alpha = src.rep_alpha
-            # fields not used downstream but required by type
-            self.merge_chunks = False
+            # fields no longer used downstream
             self.result_format = "flat"
-            self.expand_neighbors = 0
-            self.block_join_delimiter = "\n\n"
-            self.merge_group_budget_tokens = 1200
-            self.max_merged_per_group = 1
             self.summary_mode = "first"
 
     # Note: doc_map passed in here is already trimmed (no vectors) — it's enough to enrich payloads
@@ -528,10 +523,6 @@ def search_debug_stage2(req: DebugStage2Request):
     next_payload = {
         "final_hits": dbg_hits,
         "result_format": "blocks",
-        "merge_chunks": True,
-        "merge_group_budget_tokens": 1200,
-        "max_merged_per_group": 1,
-        "block_join_delimiter": "\n\n",
         "summary_mode": "first",
     }
 
@@ -557,9 +548,8 @@ def search_debug_stage2(req: DebugStage2Request):
     summary="Search Debug: Etap 4/4 — kształtowanie wyników",
     description=(
         "Wejście: final_hits z Etapu 3 oraz opcje formatu.\n"
-        "Działanie: budowa bloków/ grup/ listy płaskiej, łączenie chunków w bloki wg budżetu tokenów,\n"
-        "(w debug domyślnie bez sąsiadów).\n\n"
-        "Wywołuje funkcje: app.core.search._shape_results() oraz app.core.search.build_merged_blocks().\n\n"
+        "Działanie: budowa listy `flat`, grup `grouped` lub bloków `blocks` bez runtime scalania (blok=chunk sekcyjny).\n\n"
+        "Wywołuje funkcje: app.core.search._shape_results().\n\n"
         "Zwraca: results/groups/blocks zgodnie z result_format."
     ),
 )
@@ -578,12 +568,7 @@ def search_debug_shape(req: DebugShapeRequest):
 
     class _R3:
         def __init__(self, src: DebugShapeRequest):
-            self.merge_chunks = src.merge_chunks
             self.result_format = src.result_format
-            self.expand_neighbors = 0
-            self.block_join_delimiter = src.block_join_delimiter
-            self.merge_group_budget_tokens = src.merge_group_budget_tokens
-            self.max_merged_per_group = src.max_merged_per_group
             self.summary_mode = src.summary_mode
 
     results, groups, blocks = _shape_results(final_hits, {}, [], [], _R3(req))
@@ -596,7 +581,6 @@ def search_debug_shape(req: DebugShapeRequest):
             "skip_stage1_active": bool(settings.search_skip_stage1_default),
             "summary_mode": req.summary_mode,
             "result_format": req.result_format,
-            "merge_chunks": req.merge_chunks,
         }
     }
 
@@ -906,16 +890,12 @@ def search_query(req: SearchQuery):
     - **rep_alpha** (float): weighting between dense and sparse similarity in MMR.
     - **mmr_stage1** (bool): apply MMR already at document selection.
     - **summary_mode** (str): `"none" | "first" | "all"` (summary duplication strategy).
-    - **merge_chunks** (bool): consolidate consecutive chunks into blocks.
-    - **merge_group_budget_tokens** (int): token budget per merged block.
-    - **max_merged_per_group** (int): max blocks per document.
-    - **expand_neighbors** (int): include surrounding chunks around a block.
     - **result_format** (str): `"flat" | "grouped" | "blocks"` (`"blocks"` is default and recommended for tools).
 
     Recommendations for LLM callers
     --------------------------------
-    * Prefer `result_format="blocks"` to obtain concise evidence blocks; blocks are
-      constructed even if `merge_chunks=false`.
+    * Prefer `result_format="blocks"` to obtain concise evidence blocks; bloki są
+      bezpośrednio pojedynczymi chunkami sekcyjnymi (bez runtime scalania).
     * Keep `top_k` between 5‑10 unless you need finer granularity.
     * `summary_mode="first"` returns a single document summary per hit, useful for
       citation.
@@ -948,10 +928,6 @@ def search_query(req: SearchQuery):
         "rep_alpha": 0.6,
         "mmr_stage1": true,
         "summary_mode": "first",
-        "merge_chunks": true,
-        "merge_group_budget_tokens": 1200,
-        "max_merged_per_group": 1,
-        "expand_neighbors": 1,
         "result_format": "blocks"
     }
 

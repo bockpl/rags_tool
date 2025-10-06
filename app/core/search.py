@@ -534,142 +534,46 @@ def mmr_diversify_hybrid(
     return selected
 
 
-def _build_neighbor_index(
-    mmr_pool: List[Dict[str, Any]], rel2: List[float]
-) -> Dict[Tuple[str, Optional[str], int], Dict[str, Any]]:
-    neighbor_index: Dict[Tuple[str, Optional[str], int], Dict[str, Any]] = {}
-    for idx2, item in enumerate(mmr_pool):
-        payload = (item.get("hit").payload if item.get("hit") else {}) or {}
-        did = payload.get("doc_id") or ""
-        sec = payload.get("section")
-        cid = payload.get("chunk_id")
-        if not did or cid is None:
-            continue
-        score2 = float(rel2[idx2]) if idx2 < len(rel2) else float(item.get("dense_score", 0.0))
-        neighbor_index[(did, sec, int(cid))] = {"payload": payload, "score": score2}
-    return neighbor_index
-
-
-def _approx_tokens(s: str) -> int:
-    return max(1, len(s) // 4)
-
-
-def build_merged_blocks(
+def _build_blocks_from_hits(
     final_hits: List[Dict[str, Any]],
-    merge_group_budget_tokens: int,
-    max_merged_per_group: int,
-    join_delim: str,
     summary_mode: str = "first",
-    expand_neighbors: int = 0,
-    neighbor_index: Optional[Dict[Tuple[str, Optional[str], int], Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    by_group: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+    blocks: List[Dict[str, Any]] = []
+    seen_docs: set = set()
     for fh in final_hits:
         payload = fh.get("payload") or {}
-        did = payload.get("doc_id") or ""
-        sec = payload.get("section")
+        did = payload.get("doc_id", "")
         if not did:
             continue
-        by_group.setdefault((did, sec), []).append({"payload": payload, "score": float(fh.get("score", 0.0))})
-    blocks: List[Dict[str, Any]] = []
-    for (doc_id, section), items in by_group.items():
-        items.sort(key=lambda x: int((x.get("payload") or {}).get("chunk_id", 0)))
-        runs: List[List[Dict[str, Any]]] = []
-        cur: List[Dict[str, Any]] = []
-        last_id: Optional[int] = None
-        for it in items:
-            cid = int((it.get("payload") or {}).get("chunk_id", 0))
-            if last_id is None or cid == last_id + 1:
-                cur.append(it)
+        section = payload.get("section")
+        cid = int(payload.get("chunk_id", 0))
+        text = (payload.get("text") or "").strip()
+        doc_summary_val = payload.get("summary")
+        if summary_mode == "none":
+            sum_val = None
+        elif summary_mode == "first":
+            if did in seen_docs:
+                sum_val = None
             else:
-                runs.append(cur)
-                cur = [it]
-            last_id = cid
-        if cur:
-            runs.append(cur)
-        runs.sort(key=lambda run: max([float(x.get("score", 0.0)) for x in run] or [0.0]), reverse=True)
-        runs = runs[: max(1, int(max_merged_per_group or 1))]
-        for run in runs:
-            if expand_neighbors and neighbor_index:
-                p0 = (run[0].get("payload") or {})
-                did = p0.get("doc_id") or ""
-                sec = p0.get("section")
-                existing_ids = {int((r.get("payload") or {}).get("chunk_id", -10)) for r in run}
-                cur_first = min(existing_ids) if existing_ids else None
-                cur_last = max(existing_ids) if existing_ids else None
-                if cur_first is not None:
-                    for step in range(1, int(expand_neighbors) + 1):
-                        cid = cur_first - step
-                        key = (did, sec, cid)
-                        if key in neighbor_index and cid not in existing_ids:
-                            nb = neighbor_index[key]
-                            run.insert(0, {"payload": nb.get("payload", {}), "score": float(nb.get("score", 0.0))})
-                            existing_ids.add(cid)
-                            cur_first = cid
-                        else:
-                            break
-                if cur_last is not None:
-                    for step in range(1, int(expand_neighbors) + 1):
-                        cid = cur_last + step
-                        key = (did, sec, cid)
-                        if key in neighbor_index and cid not in existing_ids:
-                            nb = neighbor_index[key]
-                            run.append({"payload": nb.get("payload", {}), "score": float(nb.get("score", 0.0))})
-                            existing_ids.add(cid)
-                            cur_last = cid
-                        else:
-                            break
-            text_parts: List[str] = []
-            scores: List[float] = []
-            used_tokens = 0
-            first_chunk_id = int((run[0].get("payload") or {}).get("chunk_id", 0))
-            last_chunk_id = first_chunk_id
-            for r in run:
-                payload = r.get("payload") or {}
-                chunk_text = (payload.get("text") or "").strip()
-                if not chunk_text:
-                    continue
-                t = _approx_tokens(chunk_text)
-                if text_parts and used_tokens + t > int(merge_group_budget_tokens):
-                    break
-                text_parts.append(chunk_text)
-                scores.append(float(r.get("score", 0.0)))
-                last_chunk_id = int(payload.get("chunk_id", last_chunk_id))
-                used_tokens += t
-            if not text_parts:
-                continue
-            payload0 = (run[0].get("payload") or {})
-            doc_summary_val = payload0.get("summary")
-            blocks.append(
-                {
-                    "doc_id": doc_id,
-                    "path": payload0.get("path", ""),
-                    "section": section,
-                    "first_chunk_id": first_chunk_id,
-                    "last_chunk_id": last_chunk_id,
-                    "score": max(scores) if scores else 0.0,
-                    "summary": None,
-                    "doc_summary": doc_summary_val,
-                    "text": join_delim.join(text_parts).strip(),
-                    "token_estimate": used_tokens,
-                }
-            )
-    blocks.sort(key=lambda b: float(b.get("score", 0.0)), reverse=True)
-    if summary_mode == "none":
-        for b in blocks:
-            b["summary"] = None
-    elif summary_mode == "first":
-        seen_docs: set = set()
-        for b in blocks:
-            did = b.get("doc_id")
-            if did not in seen_docs:
-                b["summary"] = b.get("doc_summary")
+                sum_val = doc_summary_val
                 seen_docs.add(did)
-            else:
-                b["summary"] = None
-    else:
-        for b in blocks:
-            b["summary"] = b.get("doc_summary")
+        else:
+            sum_val = doc_summary_val
+        token_estimate = max(1, len(text) // 4) if text else None
+        blocks.append(
+            {
+                "doc_id": did,
+                "path": payload.get("path", ""),
+                "section": section,
+                "first_chunk_id": cid,
+                "last_chunk_id": cid,
+                "score": float(fh.get("score", 0.0)),
+                "summary": sum_val,
+                "text": text,
+                "token_estimate": token_estimate,
+            }
+        )
+    blocks.sort(key=lambda b: float(b.get("score", 0.0)), reverse=True)
     return blocks
 
 
@@ -680,23 +584,8 @@ def _shape_results(
     rel2: List[float],
     req: Any,
 ) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]]:
-    blocks_payload: Optional[List[Dict[str, Any]]] = None
-    if req.merge_chunks or req.result_format == "blocks":
-        neighbor_index = None
-        if req.expand_neighbors and req.expand_neighbors > 0:
-            neighbor_index = _build_neighbor_index(mmr_pool, rel2)
-        raw_blocks = build_merged_blocks(
-            final_hits,
-            merge_group_budget_tokens=req.merge_group_budget_tokens,
-            max_merged_per_group=req.max_merged_per_group,
-            join_delim=req.block_join_delimiter,
-            summary_mode=req.summary_mode,
-            expand_neighbors=max(0, int(req.expand_neighbors or 0)),
-            neighbor_index=neighbor_index,
-        )
-        blocks_payload = raw_blocks
-
     if req.result_format == "blocks":
+        blocks_payload = _build_blocks_from_hits(final_hits, summary_mode=req.summary_mode)
         return [], None, blocks_payload
 
     results: List[Dict[str, Any]] = []

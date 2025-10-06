@@ -114,16 +114,8 @@ class SearchQuery(BaseModel):
     rep_alpha: Optional[float] = Field(None, description="Redundancy alpha in hybrid MMR (dense contribution). Defaults to dense_weight.")
     mmr_stage1: bool = Field(True, description="Apply hybrid MMR already at Stage-1 (summaries).")
     summary_mode: str = Field("first", description="Document summary duplication: none|first|all. 'first' shows once per doc.")
-    merge_chunks: bool = Field(
-        False,
-        description=(
-            "If true, also build merged blocks per (doc_id, section). Note: when result_format='blocks', blocks are built regardless of this flag."
-        ),
-    )
-    merge_group_budget_tokens: int = Field(1200, description="Approx token budget per merged block (~4 chars/token).")
-    max_merged_per_group: int = Field(1, description="Max merged blocks to return for each (doc_id, section) group.")
-    block_join_delimiter: str = Field("\n\n", description="Delimiter used when concatenating contiguous chunks in a merged block.")
-    expand_neighbors: int = Field(0, description="When merging, also try to include up to N missing adjacent chunks from candidates (mmr_pool). 0 disables.")
+    # Runtime chunk-merging removed in 2.0.0. Blocks are built directly
+    # from section-aware chunks generated at ingest time.
     result_format: str = Field(
         "blocks",
         description=(
@@ -340,10 +332,6 @@ class DebugShapeRequest(BaseModel):
     final_hits: List[DebugHit]
     # shaping options
     result_format: str = "blocks"
-    merge_chunks: bool = True
-    merge_group_budget_tokens: int = 1200
-    max_merged_per_group: int = 1
-    block_join_delimiter: str = "\n\n"
     summary_mode: str = "first"
 
 

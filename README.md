@@ -1,12 +1,17 @@
-# rags_tool (1.9.1)
+# rags_tool (2.0.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.0.0
+
+- Breaking: usunięto runtime scalanie chunków w odpowiedzi wyszukiwania. Usunięte parametry: `merge_chunks`, `merge_group_budget_tokens`, `max_merged_per_group`, `expand_neighbors`, `block_join_delimiter`.
+- Format `blocks` zwraca teraz bezpośrednio sekcyjne chunki z ingestu (pojedynczy chunk = pojedynczy blok). Długość kontrolujesz przez `CHUNK_TOKENS`/`CHUNK_OVERLAP` i strategię `merge_up_to` w `chunk_text_by_sections`.
 
 ## Nowości w 1.9.0
 
 - Globalny przełącznik w `.env`: `SEARCH_SKIP_STAGE1_DEFAULT` (domyślnie `false`).
   - Gdy `true`, endpoint `/search/query` pomija selekcję dokumentów po streszczeniach (Etap 1) i od razu wyszukuje w całej kolekcji chunków.
-  - Zachowane są wszystkie pozostałe mechanizmy: hybryda dense/TF‑IDF, MMR, `per_doc_limit`, `summary_mode`, `result_format`, scalanie bloków oraz (jeśli skonfigurowany) reranker.
+  - Zachowane są wszystkie pozostałe mechanizmy: hybryda dense/TF‑IDF, MMR, `per_doc_limit`, `summary_mode`, `result_format` oraz (jeśli skonfigurowany) reranker.
   - Uwaga dla UI/testów: w tym trybie `top_m` ogranicza początkową pulę chunków (zamiast liczby dokumentów po Etapie 1). Testy, które oczekują wywołania Etapu 1, powinny uwzględnić nowy tryb.
 
 ## Nowości w 1.8.2
@@ -55,7 +60,7 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 
 - Wyszukiwanie: pole `query` przyjmuje teraz listę zapytań (`List[str]`). Każde zapytanie jest wykonywane kolejno, a wyniki są łączone metodą RRF (Reciprocal Rank Fusion) i ograniczane globalnym `top_k`.
 - Parametry łączenia są wewnętrzne (brak nowych pól w modelu) i mają sensowne domyślne wartości; domyślna strategia to `rrf`.
-- Scalanie chunków do pełnych bloków/sekcji odbywa się po zakończeniu wszystkich zapytań i po uporządkowaniu połączonych wyników (lepsza spójność bloków w odpowiedzi `blocks`).
+
 
 ## Nowości w 1.4.2
 
@@ -146,7 +151,7 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 ## Nowości w 0.8.0
 
 - Sekcyjny chunking dla dokumentów regulaminowych i prawnych: parser rozpoznaje nagłówki „Rozdział …”, paragrafy „§ …”, a także bloki „Załącznik …”. Tekst jest dzielony w granicach sekcji i paragrafów, bez ich przecinania.
-- Payloady Qdrant zawierają teraz pole `section` dla każdego chunku (np. „Rozdział 1 — Informacje ogólne § 1”), co poprawia scalanie bloków (`merge_chunks`) i prezentację wyników (`blocks`, `grouped`).
+- Payloady Qdrant zawierają teraz pole `section` dla każdego chunku (np. „Rozdział 1 — Informacje ogólne § 1”), co poprawia prezentację wyników (`blocks`, `grouped`).
 - Lepsze cytowanie: odpowiedzi zawierają `section`, co ułatwia odwołania do konkretnych fragmentów dokumentu.
 
 ## Nowości w 0.7.2
@@ -173,7 +178,7 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 
 ## Nowości w 0.6.0
 
-- Scalanie z rozszerzaniem sąsiadów: nowy parametr `expand_neighbors` pozwala dołączyć brakujące, sąsiadujące chunki z puli kandydatów (Stage‑2) podczas łączenia bloków. Działa w ramach tego samego `(doc_id, section)` i respektuje budżet tokenów.
+- (Zastąpione w 2.0.0).
 
 ## Nowości w 0.5.3
 
@@ -189,13 +194,7 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 
 ## Nowości w 0.5.0
 
-- Scalanie sąsiadujących chunków w większe bloki w odpowiedzi wyszukiwania.
-- Nowe parametry zapytania do kontroli scalania:
-  - `merge_chunks` (bool, domyślnie false) – włącza scalanie.
-  - `merge_group_budget_tokens` (int, domyślnie 1200) – budżet tokenów na blok w grupie `(doc_id, section)`.
-  - `max_merged_per_group` (int, domyślnie 1) – maksymalna liczba złożonych bloków zwracanych z każdej grupy.
-  - `block_join_delimiter` (string, domyślnie `"\n\n"`) – separator łączący treści chunków.
-- Rozszerzony `result_format` o `blocks` – pozwala zwrócić wyłącznie listę scalonych bloków.
+- Dodano format wyników `blocks` (zwraca bloki treści przygotowane do cytowania przez narzędzia). W 2.0.0 bloki odpowiadają pojedynczym chunkom sekcyjnym z ingestu (bez runtime scalania).
 
 ## Nowości w 0.4.0
 
@@ -449,12 +448,7 @@ Wartości `SECTION_LEVELS` to unia poziomów znalezionych we wszystkich dokument
 - `rep_alpha`: udział dense w repulsji MMR (domyślnie = `dense_weight`).
 - `mmr_stage1`: MMR po stronie streszczeń (domyślnie true).
 - `summary_mode`: `none` | `first` | `all` — kontrola tego, czy i kiedy dołączać streszczenie dokumentu do trafień (domyślnie `first`).
-- `result_format`: `flat` | `grouped` | `blocks` — kształt odpowiedzi; domyślnie `blocks` (zalecane dla narzędzi); w `grouped` otrzymasz listę grup dokumentów z fragmentami; w `blocks` zwracane są wyłącznie scalone bloki.
-- `merge_chunks`: włącza scalanie sąsiadujących chunków do bloków (działa dla `flat`, `grouped` – jako dodatkowe pole `blocks` oraz dla `blocks` – jako główna odpowiedź).
-- `merge_group_budget_tokens`: budżet na łączony tekst bloku w ramach grupy `(doc_id, section)` (heurystyka ~4 znaki/token).
-- `max_merged_per_group`: maksymalna liczba bloków na grupę.
-- `block_join_delimiter`: separator przy łączeniu chunków.
-- `expand_neighbors`: liczba sąsiadów po obu stronach, których spróbujemy dołączyć z puli kandydatów (mmr_pool) podczas scalania (0 = wył.).
+- `result_format`: `flat` | `grouped` | `blocks` — kształt odpowiedzi; domyślnie `blocks` (zalecane dla narzędzi). W `blocks` zwracane są pojedyncze sekcyjne fragmenty (chunki) z ingestu.
 
 Przykładowe zapytanie (flat, bez duplikacji streszczeń):
 
@@ -496,10 +490,8 @@ Przykładowe zapytanie (blocks):
   "query": ["Jak działa rags_tool?", "architektura rags_tool"],
   "top_m": 10,
   "top_k": 5,
-  "merge_chunks": true,
-  "merge_group_budget_tokens": 1200,
-  "max_merged_per_group": 1,
-  "result_format": "blocks"
+  "result_format": "blocks",
+  "summary_mode": "first"
 }
 ```
 

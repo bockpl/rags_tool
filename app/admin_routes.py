@@ -41,7 +41,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
     {"id": "search-debug-embed", "path": "/search/debug/embed", "method": "POST", "label": "Search Debug: 1) embed", "body": "{\"query\":\"Jak działa rags_tool?\",\"mode\":\"auto\",\"use_hybrid\":true}"},
     {"id": "search-debug-stage1", "path": "/search/debug/stage1", "method": "POST", "label": "Search Debug: 2) stage1", "body": "{\"q_text\":\"Jak działa rags_tool?\",\"q_vec\":[0.0],\"mode\":\"auto\",\"use_hybrid\":true,\"top_m\":100,\"score_norm\":\"minmax\",\"dense_weight\":0.6,\"sparse_weight\":0.4,\"mmr_stage1\":true,\"mmr_lambda\":0.3}"},
     {"id": "search-debug-stage2", "path": "/search/debug/stage2", "method": "POST", "label": "Search Debug: 3) stage2", "body": "{\"q_text\":\"Jak działa rags_tool?\",\"q_vec\":[0.0],\"cand_doc_ids\":[\"<doc_id>\"],\"doc_map\":{},\"top_k\":10,\"per_doc_limit\":2,\"score_norm\":\"minmax\",\"dense_weight\":0.6,\"sparse_weight\":0.4,\"mmr_lambda\":0.3}"},
-    {"id": "search-debug-shape", "path": "/search/debug/shape", "method": "POST", "label": "Search Debug: 4) shape", "body": "{\"final_hits\":[{\"doc_id\":\"<doc_id>\",\"path\":\"/abs/path\",\"section\":null,\"chunk_id\":0,\"score\":0.5,\"snippet\":\"...\"}],\"result_format\":\"blocks\",\"merge_chunks\":true,\"merge_group_budget_tokens\":1200,\"max_merged_per_group\":1,\"block_join_delimiter\":\"\\n\\n\",\"summary_mode\":\"first\"}"},
+    {"id": "search-debug-shape", "path": "/search/debug/shape", "method": "POST", "label": "Search Debug: 4) shape", "body": "{\"final_hits\":[{\"doc_id\":\"<doc_id>\",\"path\":\"/abs/path\",\"section\":null,\"chunk_id\":0,\"score\":0.5,\"snippet\":\"...\"}],\"result_format\":\"blocks\",\"summary_mode\":\"first\"}"},
 ]
 
 ADMIN_UI_REQUEST_HEADER = "x-admin-ui"
@@ -304,12 +304,7 @@ def attach_admin_routes(app) -> None:
                 self.sparse_weight = src.sparse_weight
                 self.mmr_lambda = src.mmr_lambda
                 self.rep_alpha = src.rep_alpha
-                self.merge_chunks = False
                 self.result_format = "flat"
-                self.expand_neighbors = 0
-                self.block_join_delimiter = "\n\n"
-                self.merge_group_budget_tokens = 1200
-                self.max_merged_per_group = 1
                 self.summary_mode = "first"
 
         # Note: doc_map passed in here is already trimmed (no vectors) — it's enough to enrich payloads
@@ -331,10 +326,6 @@ def attach_admin_routes(app) -> None:
         next_payload = {
             "final_hits": dbg_hits,
             "result_format": "blocks",
-            "merge_chunks": True,
-            "merge_group_budget_tokens": 1200,
-            "max_merged_per_group": 1,
-            "block_join_delimiter": "\n\n",
             "summary_mode": "first",
         }
 
@@ -371,12 +362,7 @@ def attach_admin_routes(app) -> None:
 
         class _R3:
             def __init__(self, src: DebugShapeRequest):
-                self.merge_chunks = src.merge_chunks
                 self.result_format = src.result_format
-                self.expand_neighbors = 0
-                self.block_join_delimiter = src.block_join_delimiter
-                self.merge_group_budget_tokens = src.merge_group_budget_tokens
-                self.max_merged_per_group = src.max_merged_per_group
                 self.summary_mode = src.summary_mode
 
         results, groups, blocks = _shape_results(final_hits, {}, [], [], _R3(req))
@@ -389,7 +375,6 @@ def attach_admin_routes(app) -> None:
                 "skip_stage1_active": bool(settings.search_skip_stage1_default),
                 "summary_mode": req.summary_mode,
                 "result_format": req.result_format,
-                "merge_chunks": req.merge_chunks,
             }
         }
 
