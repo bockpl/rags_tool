@@ -1,6 +1,12 @@
-# rags_tool (1.5.0)
+# rags_tool (1.6.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 1.6.0
+
+- Embedding: dodano konfigurowalne prefiksy dla modeli retrievalujących (instruction-style). Nowe zmienne: `EMBEDDING_QUERY_PREFIX` i `EMBEDDING_PASSAGE_PREFIX`. Domyślne wartości odpowiadają modelowi sdadas/mmlw-retrieval-roberta-large-v2 (`"query: "` i `"passage: "`).
+- API: zapytania (dense) embedowane są z prefiksem `query`, a streszczenia i treść dokumentów z prefiksem `passage`.
+- Chunking: rozmiar chunku i overlap są konfigurowalne w `.env` (zmienne `CHUNK_TOKENS`, `CHUNK_OVERLAP`) i domyślnie dostosowane do modeli z limitem ~512 tokenów. Endpoint `/ingest/build` domyślnie korzysta z tych wartości, ale można je nadpisać w żądaniu.
 
 ## Nowości w 1.5.0
 
@@ -255,6 +261,10 @@ Serwis korzysta z dwóch endpointów zgodnych z protokołem OpenAI:
   - `EMBEDDING_API_URL` (np. `http://127.0.0.1:8000/v1`)
   - `EMBEDDING_API_KEY` (token; może być pusty jeśli serwer nie wymaga)
   - `EMBEDDING_MODEL` (np. `BAAI/bge-m3` lub inny zgodny z `/v1/embeddings`)
+  - `EMBEDDING_QUERY_PREFIX` (prefiks dla zapytań; domyślnie `"query: "`)
+  - `EMBEDDING_PASSAGE_PREFIX` (prefiks dla dokumentów/fragmentów; domyślnie `"passage: "`)
+  - `CHUNK_TOKENS` (domyślny docelowy rozmiar chunku w tokenach)
+  - `CHUNK_OVERLAP` (domyślny overlap chunków w tokenach)
   - Wymagania: endpoint `/v1/embeddings` przyjmuje `{"model": str, "input": List[str]}` i zwraca `{"data": [{"embedding": List[float]}, ...]}`.
 
 - Summary (Chat) API — do generowania streszczeń dokumentów
@@ -267,6 +277,8 @@ Serwis korzysta z dwóch endpointów zgodnych z protokołem OpenAI:
 
 - Embedding:
   - Aplikacja odpytuje `/v1/embeddings` batchowo (`input: List[str]`).
+  - Dla modeli oczekujących instrukcji (np. sdadas/mmlw-retrieval-roberta-large-v2) dołącza prefiks `EMBEDDING_QUERY_PREFIX` dla zapytań oraz `EMBEDDING_PASSAGE_PREFIX` dla streszczeń i treści.
+  - Rozmiar chunków kontrolują `CHUNK_TOKENS` i `CHUNK_OVERLAP`. Dla modeli z limitem ~512 zalecane wartości startowe to `400` i `64`; dla modeli 1k–2k można rozważyć większe okna (np. `900`/`150`).
   - Wymiar wektora (dim) wykrywany jest sondą z tekstem `"test"` – musi być stały między wywołaniami; zmiana modelu = zmiana wymiaru.
   - W przypadku zmiany modelu embedującego warto użyć `POST /collections/init` z `force_dim_probe=true` i/lub przebudować indeks.
 

@@ -156,8 +156,24 @@ def _split_text_by_tokens(text: str, target_tokens: int, overlap_tokens: int) ->
     return chunks
 
 
-def chunk_text(text: str, target_tokens: int = 900, overlap_tokens: int = 150) -> List[str]:
+def chunk_text(
+    text: str,
+    target_tokens: Optional[int] = None,
+    overlap_tokens: Optional[int] = None,
+) -> List[str]:
     """Token-aware paragraph packing with overlap."""
+    if target_tokens is None or overlap_tokens is None:
+        try:
+            from app.settings import get_settings
+
+            s = get_settings()
+            if target_tokens is None:
+                target_tokens = int(s.chunk_tokens)
+            if overlap_tokens is None:
+                overlap_tokens = int(s.chunk_overlap)
+        except Exception:
+            target_tokens = 900 if target_tokens is None else target_tokens
+            overlap_tokens = 150 if overlap_tokens is None else overlap_tokens
     try:
         from .parsing import split_into_paragraphs
 
@@ -309,8 +325,8 @@ def _get_nlp_pipeline() -> Optional[Language]:
 
 def chunk_text_by_sections(
     text: str,
-    target_tokens: int = 900,
-    overlap_tokens: int = 150,
+    target_tokens: Optional[int] = None,
+    overlap_tokens: Optional[int] = None,
     merge_up_to: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Chunk text by detected sections while keeping payload compatible with Qdrant.
@@ -325,6 +341,19 @@ def chunk_text_by_sections(
         such as ust, pkt, lit, etc.  When ``None`` (default) the original
         behaviour – merging only when the full section label matches – is kept.
     """
+
+    if target_tokens is None or overlap_tokens is None:
+        try:
+            from app.settings import get_settings
+
+            s = get_settings()
+            if target_tokens is None:
+                target_tokens = int(s.chunk_tokens)
+            if overlap_tokens is None:
+                overlap_tokens = int(s.chunk_overlap)
+        except Exception:
+            target_tokens = 900 if target_tokens is None else target_tokens
+            overlap_tokens = 150 if overlap_tokens is None else overlap_tokens
 
     def _fallback() -> List[Dict[str, Any]]:
         return [

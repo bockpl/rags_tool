@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "1.5.0"
+    app_version: str = "1.6.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -20,6 +20,10 @@ class SummRAGSettings(BaseSettings):
     embedding_api_url: str = Field(default="http://127.0.0.1:8000/v1", alias="EMBEDDING_API_URL")
     embedding_api_key: str = Field(default="sk-no-key", alias="EMBEDDING_API_KEY")
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
+    # Prefixes used by some retrieval models that expect instruction-style inputs
+    # Defaults align with sdadas/mmlw-retrieval-roberta-large-v2
+    embedding_query_prefix: str = Field(default="query: ", alias="EMBEDDING_QUERY_PREFIX")
+    embedding_passage_prefix: str = Field(default="passage: ", alias="EMBEDDING_PASSAGE_PREFIX")
     summary_api_url: str = Field(default="http://127.0.0.1:8001/v1", alias="SUMMARY_API_URL")
     summary_api_key: str = Field(default="sk-no-key", alias="SUMMARY_API_KEY")
     summary_model: str = Field(default="gpt-4o-mini", alias="SUMMARY_MODEL")
@@ -67,6 +71,10 @@ class SummRAGSettings(BaseSettings):
     embedding_dim: int = Field(default=1024, alias="EMBEDDING_DIM")
     # Prefer JSON responses for summaries (OpenAI JSON mode). Fallback to text parser if unsupported.
     summary_json_mode: bool = Field(default=True, alias="SUMMARY_JSON_MODE")
+
+    # Chunking defaults (token-based). Tune per embedding model.
+    chunk_tokens: int = Field(default=400, alias="CHUNK_TOKENS")
+    chunk_overlap: int = Field(default=64, alias="CHUNK_OVERLAP")
 
     # OpenAPI / tool description used by the /search/query endpoint. Can be overridden
     # via .env to tailor the wording for a specific corpus (e.g., PŁ documents).

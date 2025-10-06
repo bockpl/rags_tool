@@ -38,13 +38,42 @@ class IterableCorpus:
         yield from self._factory()
 
 
-def embed_text(texts: List[str]) -> List[List[float]]:
+def _embed_raw(texts: List[str]) -> List[List[float]]:
     rsp = embedding_client.embeddings.create(model=settings.embedding_model, input=texts)
     return [d.embedding for d in rsp.data]
 
 
+def _maybe_prefix(texts: List[str], prefix: str) -> List[str]:
+    if not prefix:
+        return texts
+    pref = str(prefix)
+    out: List[str] = []
+    for t in texts:
+        ts = str(t or "")
+        if ts.startswith(pref):
+            out.append(ts)
+        else:
+            out.append(pref + ts)
+    return out
+
+
+def embed_text(texts: List[str]) -> List[List[float]]:
+    """Legacy embedding helper (no prefixing). Prefer embed_query/embed_passage."""
+    return _embed_raw(texts)
+
+
+def embed_query(texts: List[str]) -> List[List[float]]:
+    """Embed query strings with a model-specific query prefix."""
+    return _embed_raw(_maybe_prefix(texts, settings.embedding_query_prefix))
+
+
+def embed_passage(texts: List[str]) -> List[List[float]]:
+    """Embed documents/passages with a model-specific passage prefix."""
+    return _embed_raw(_maybe_prefix(texts, settings.embedding_passage_prefix))
+
+
 def get_embedding_dim() -> int:
-    vec = embed_text(["test"])[0]
+    vec = _embed_raw(["test"])[0]
     return len(vec)
 
 

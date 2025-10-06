@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from app.core.chunking import chunk_text_by_sections
 from qdrant_client.http import models as qm
 from app.core.embedding import IterableCorpus, prepare_tfidf
-from app.core.embedding import embed_text
+from app.core.embedding import embed_query
 from app.core.parsing import SUPPORTED_EXT, extract_text
 from app.core.search import (
     _build_sparse_queries_for_query,
@@ -216,7 +216,17 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "ingest-build",
         "path": "/ingest/build",
         "method": "POST",
-        "body": "{\n  \"base_dir\": \"/app/data\",\n  \"glob\": \"**/*\",\n  \"recursive\": true,\n  \"reindex\": false,\n  \"chunk_tokens\": 900,\n  \"chunk_overlap\": 150,\n  \"collection_name\": \"rags_tool\",\n  \"enable_sparse\": true,\n  \"rebuild_tfidf\": true\n}",
+        "body": ("{"\n"
+                 f"  \"base_dir\": \"/app/data\",\n"
+                 f"  \"glob\": \"**/*\",\n"
+                 f"  \"recursive\": true,\n"
+                 f"  \"reindex\": false,\n"
+                 f"  \"chunk_tokens\": {settings.chunk_tokens},\n"
+                 f"  \"chunk_overlap\": {settings.chunk_overlap},\n"
+                 f"  \"collection_name\": \"rags_tool\",\n"
+                 f"  \"enable_sparse\": true,\n"
+                 f"  \"rebuild_tfidf\": true\n"
+                 "}"),
     },
     {
         "id": "search-query",
@@ -701,8 +711,8 @@ def search_query(req: SearchQuery):
     if mode in ("current", "archival"):
         flt = qm.Filter(must=[qm.FieldCondition(key="is_active", match=qm.MatchValue(value=(mode == "current")))])
 
-    # Batch-embed queries
-    q_vecs = embed_text(queries)
+    # Batch-embed queries (with model-specific query prefix)
+    q_vecs = embed_query(queries)
 
     # Accumulators for fusion and neighbor expansion
     fused: Dict[tuple, Dict[str, Any]] = {}

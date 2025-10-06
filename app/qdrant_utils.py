@@ -25,7 +25,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.core.embedding import (
     SUMMARY_VECTORIZER_PATH,
-    embed_text,
+    embed_passage,
     tfidf_vector,
 )
 from app.core.constants import (
@@ -940,9 +940,9 @@ def build_and_upsert_points(
         if normalized_refs:
             replacement_relations[doc_id] = normalized_refs
 
-        summary_dense_vec = embed_text([doc_summary])[0]
+        summary_dense_vec = embed_passage([doc_summary])[0]
         content_texts = [c.get("text", c) if isinstance(c, dict) else str(c) for c in chunks]
-        content_vecs = embed_text(content_texts)
+        content_vecs = embed_passage(content_texts)
 
         if enable_sparse:
             sparse_chunks = tfidf_vector(content_texts, content_vec)

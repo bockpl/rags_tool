@@ -64,8 +64,8 @@ class IngestBuildRequest(BaseModel):
     glob: str = "**/*"
     recursive: bool = True
     reindex: bool = False
-    chunk_tokens: int = 900
-    chunk_overlap: int = 150
+    chunk_tokens: int = Field(default_factory=lambda: settings.chunk_tokens)
+    chunk_overlap: int = Field(default_factory=lambda: settings.chunk_overlap)
     language_hint: Optional[str] = None
     collection_name: str = Field(default_factory=lambda: settings.collection_name)
     enable_sparse: bool = True
