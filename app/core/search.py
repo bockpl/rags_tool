@@ -132,6 +132,58 @@ def _with_must_condition(
     return qm.Filter(must=must_items, should=should_items, must_not=must_not_items)
 
 
+def _fetch_doc_summaries(doc_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Fetch summaries for given doc_ids from the summaries collection.
+
+    Returns a map: doc_id -> { doc_id, doc_summary, doc_signature }
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not doc_ids:
+        return out
+    try:
+        flt = qm.Filter(
+            must=[
+                qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=doc_ids)),
+                qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary")),
+            ]
+        )
+        offset = None
+        while True:
+            res = qdrant.scroll(
+                collection_name=settings.qdrant_summary_collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if isinstance(res, tuple):
+                records, offset = res
+            else:
+                records = getattr(res, "points", None)
+                offset = getattr(res, "next_page_offset", None)
+                if records is None:
+                    records = []
+            if not records:
+                break
+            for rec in records:
+                payload = rec.payload or {}
+                did = payload.get("doc_id")
+                if not did:
+                    continue
+                out[str(did)] = {
+                    "doc_id": str(did),
+                    "doc_summary": payload.get("summary"),
+                    "doc_signature": payload.get("signature"),
+                }
+            if offset is None:
+                break
+    except Exception:
+        # Best-effort; if scroll fails, return what we have (possibly empty)
+        return out
+    return out
+
+
 def _build_sparse_queries_for_query(query: str, use_hybrid: bool) -> Tuple[
     Optional[Tuple[List[int], List[float]]], Optional[Tuple[List[int], List[float]]]
 ]:
@@ -252,18 +304,26 @@ def _stage1_select_documents(
 
 
 def _stage2_select_chunks(
-    cand_doc_ids: List[str],
+    cand_doc_ids: Optional[List[str]],
     q_text: str,
     q_vec: List[float],
     content_sparse_query: Optional[Tuple[List[int], List[float]]],
     doc_map: Dict[str, Any],
     req: Any,
+    flt: Optional[qm.Filter] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[float]]:
+    # Build filter for Stage-2 search
+    must = [
+        qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
+    ]
+    if cand_doc_ids:
+        must.insert(0, qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=cand_doc_ids)))
+    if flt and getattr(flt, "must", None):
+        must = list(flt.must) + must
     flt2 = qm.Filter(
-        must=[
-            qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=cand_doc_ids)),
-            qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
-        ]
+        must=must,
+        should=(flt.should if flt and getattr(flt, "should", None) else None),
+        must_not=(flt.must_not if flt and getattr(flt, "must_not", None) else None),
     )
     cont_search = qdrant.search(
         collection_name=settings.qdrant_content_collection,
@@ -342,6 +402,14 @@ def _stage2_select_chunks(
 
     selected = [mmr_pool[i] for i in sel_idx]
     final_hits: List[Dict[str, Any]] = []
+    # If Stage-1 was skipped, enrich with summaries so that summary_mode and shaping behave as before
+    if not doc_map:
+        try:
+            missing_ids = sorted({x.get("doc_id", "") for x in selected if x.get("doc_id")})
+            if missing_ids:
+                doc_map.update(_fetch_doc_summaries(missing_ids))
+        except Exception:
+            pass
     for idx, item in zip(sel_idx, selected):
         hit = item["hit"]
         payload = hit.payload or {}

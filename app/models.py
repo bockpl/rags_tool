@@ -212,9 +212,43 @@ SearchResponse.model_rebuild()
 # --- Debug (step-by-step) search models ---
 
 class DebugEmbedRequest(BaseModel):
-    query: str
+    # Accept single query or list of queries (like /search/query)
+    query: object
     mode: str = "auto"
     use_hybrid: bool = True
+    # Optional selection when multiple queries are provided
+    query_index: int = 0
+    # Scoring params to mirror /search/query (used to prefill next steps)
+    top_m: int = 100
+    top_k: int = 10
+    score_norm: str = DEFAULT_SCORE_NORM
+    dense_weight: float = 0.6
+    sparse_weight: float = 0.4
+    mmr_stage1: bool = True
+    mmr_lambda: float = DEFAULT_MMR_LAMBDA
+    rep_alpha: Optional[float] = None
+    per_doc_limit: int = DEFAULT_PER_DOC_LIMIT
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def _coerce_query(cls, v):
+        # Reuse the same semantics as SearchQuery: accept string | List[str] | nested lists
+        def to_list_of_str(x):
+            if x is None:
+                return []
+            if isinstance(x, str):
+                s = x.strip()
+                return [s] if s else []
+            if isinstance(x, (list, tuple, set)):
+                acc = []
+                for it in x:
+                    acc.extend(to_list_of_str(it))
+                return acc
+            s = str(x).strip()
+            return [s] if s else []
+
+        out = to_list_of_str(v)
+        return out if out else v
 
 
 class SparseQuery(BaseModel):

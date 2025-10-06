@@ -64,6 +64,7 @@ from app.qdrant_utils import (
     sha1,
 )
 from app.settings import get_settings
+from app.admin_routes import attach_admin_routes
 
 
 settings = get_settings()
@@ -257,80 +258,13 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
     },
 ]
 
-ADMIN_UI_REQUEST_HEADER = "x-admin-ui"
-_admin_debug_activated = False
-
 app = FastAPI(title=f"{settings.app_name} OpenAPI Tool", version=settings.app_version)
 
-
-def build_admin_operations() -> List[Dict[str, Any]]:
-    route_lookup: Dict[Tuple[str, str], APIRoute] = {}
-    for route in app.routes:
-        if isinstance(route, APIRoute):
-            for method in route.methods or []:
-                route_lookup[(route.path, method.upper())] = route
-    operations: List[Dict[str, Any]] = []
-    for spec in ADMIN_OPERATION_SPECS:
-        method = spec["method"].upper()
-        path = spec["path"]
-        route = route_lookup.get((path, method))
-        summary = route.summary if route else None
-        description = route.description if route else None
-        doc_parts = [part for part in [summary, description] if part]
-        handler_name = None
-        handler_loc = None
-        if route and getattr(route, "endpoint", None):
-            try:
-                handler_name = getattr(route.endpoint, "__name__", None)
-                handler_loc = f"{getattr(route.endpoint, '__module__', 'app')}:{handler_name}"
-            except Exception:
-                handler_name = None
-                handler_loc = None
-        operations.append(
-            {
-                "id": spec["id"],
-                "label": spec.get("label") or f"{method} {path}",
-                "method": method,
-                "path": path,
-                "doc": "\n\n".join(doc_parts),
-                "body": spec.get("body"),
-                "accepts_file": spec.get("accepts_file", False),
-                "handler": handler_name,
-                "handler_loc": handler_loc,
-            }
-        )
-    return operations
+# Attach Admin UI and debug endpoints from isolated module
+attach_admin_routes(app)
 
 
-@app.middleware("http")
-async def admin_ui_debug_middleware(request: Request, call_next):
-    global _admin_debug_activated
-    header_value = request.headers.get(ADMIN_UI_REQUEST_HEADER)
-    if header_value and header_value.lower() in {"1", "true", "yes"} and not _admin_debug_activated:
-        _admin_debug_activated = True
-        logger.setLevel(logging.DEBUG)
-        logger.info("Admin UI request detected — DEBUG logging enabled")
-    response = await call_next(request)
-    return response
-
-
-@app.get(
-    "/admin",
-    include_in_schema=False,
-    response_class=HTMLResponse,
-    summary="Panel administracyjny",
-    description="Statyczny panel HTML do testowania i debugowania endpointów rags_tool.",
-)
-def admin_console():
-    operations = build_admin_operations()
-    tpl_path = pathlib.Path(__file__).parent.parent / "templates" / "admin.html"
-    try:
-        html = tpl_path.read_text(encoding="utf-8")
-    except Exception as exc:
-        logger.error("Failed to load admin template: %s", exc)
-        return HTMLResponse(content="<html><body><p>Admin UI unavailable.</p></body></html>")
-    html = html.replace("__OPERATIONS__", json.dumps(operations, ensure_ascii=False))
-    return HTMLResponse(content=html)
+# Admin UI and step-by-step debug endpoints are defined in app/admin_routes.py
 
 
 @app.get(
@@ -374,11 +308,18 @@ def health():
     ),
 )
 def search_debug_embed(req: DebugEmbedRequest):
-    q = (req.query or "").strip()
-    if not q:
-        raise HTTPException(status_code=422, detail="Field 'query' must be a non-empty string")
+    # Coerce query to list[str]
+    if isinstance(req.query, list):
+        queries = [str(x).strip() for x in req.query if str(x or "").strip()]
+    else:
+        qraw = str(req.query or "").strip()
+        queries = [qraw] if qraw else []
+    if not queries:
+        raise HTTPException(status_code=422, detail="Field 'query' must contain at least one non-empty string")
+    qi = max(0, min(int(req.query_index or 0), len(queries) - 1))
+    q = queries[qi]
 
-    # Mode detection like in /search/query but for a single query
+    # Mode detection like in /search/query but for a single (selected) query
     if req.mode != "auto":
         mode = req.mode
     else:
@@ -397,30 +338,58 @@ def search_debug_embed(req: DebugEmbedRequest):
         idx, val = sq
         return {"indices": [int(i) for i in idx], "values": [float(v) for v in val]}
 
-    next_payload = {
+    next_payload_stage1 = {
         "q_text": q,
         "q_vec": q_vec,
         "mode": mode,
         "use_hybrid": bool(req.use_hybrid),
-        "top_m": 100,
-        "score_norm": "minmax",
-        "dense_weight": 0.6,
-        "sparse_weight": 0.4,
-        "mmr_stage1": True,
-        "mmr_lambda": 0.3,
+        "top_m": int(req.top_m),
+        "score_norm": str(req.score_norm),
+        "dense_weight": float(req.dense_weight),
+        "sparse_weight": float(req.sparse_weight),
+        "mmr_stage1": bool(req.mmr_stage1),
+        "mmr_lambda": float(req.mmr_lambda),
         "summary_sparse_query": sq_pack(summary_sparse_query),
         "content_sparse_query": sq_pack(content_sparse_query),
     }
 
+    # Jeśli globalnie pomijamy Etap 1, pokieruj "Next step" bezpośrednio do Stage 2 (pełny korpus)
+    if bool(settings.search_skip_stage1_default):
+        next_spec = {
+            "operation_id": "search-debug-stage2",
+            "payload": {
+                "q_text": q,
+                "q_vec": q_vec,
+                "cand_doc_ids": [],
+                "doc_map": {},
+                "top_k": int(req.top_k),
+                "per_doc_limit": int(req.per_doc_limit),
+                "score_norm": str(req.score_norm),
+                "dense_weight": float(req.dense_weight),
+                "sparse_weight": float(req.sparse_weight),
+                "mmr_lambda": float(req.mmr_lambda),
+                "content_sparse_query": sq_pack(content_sparse_query),
+            },
+            "info": {"note": "Stage 1 skipped (full corpus)"},
+        }
+    else:
+        next_spec = {"operation_id": "search-debug-stage1", "payload": next_payload_stage1, "info": {"filter": filter_info}}
+
     return {
         "step": "embed",
+        "queries": queries,
+        "selected_query_index": qi,
         "q_text": q,
         "mode": mode,
         "q_vec": q_vec,
         "q_vec_len": len(q_vec),
         "content_sparse_query": sq_pack(content_sparse_query),
         "summary_sparse_query": sq_pack(summary_sparse_query),
-        "_next": {"operation_id": "search-debug-stage1", "payload": next_payload, "info": {"filter": filter_info}},
+        "config": {
+            "skip_stage1_active": bool(settings.search_skip_stage1_default),
+            "use_hybrid": bool(req.use_hybrid),
+        },
+        "_next": next_spec,
     }
 
 
@@ -490,6 +459,14 @@ def search_debug_stage1(req: DebugStage1Request):
         "step": "stage1",
         "cand_doc_ids": cand_doc_ids,
         "doc_map": ui_doc_map,
+        "config": {
+            "skip_stage1_active": bool(settings.search_skip_stage1_default),
+            "score_norm": req.score_norm,
+            "dense_weight": req.dense_weight,
+            "sparse_weight": req.sparse_weight,
+            "mmr_stage1": req.mmr_stage1,
+            "mmr_lambda": req.mmr_lambda,
+        },
         "_next": {"operation_id": "search-debug-stage2", "payload": next_payload},
     }
 
@@ -558,7 +535,20 @@ def search_debug_stage2(req: DebugStage2Request):
         "summary_mode": "first",
     }
 
-    return {"step": "stage2", "hits": dbg_hits, "pool_size": len(mmr_pool), "_next": {"operation_id": "search-debug-shape", "payload": next_payload}}
+    return {
+        "step": "stage2",
+        "hits": dbg_hits,
+        "pool_size": len(mmr_pool),
+        "config": {
+            "skip_stage1_active": bool(settings.search_skip_stage1_default),
+            "score_norm": req.score_norm,
+            "dense_weight": req.dense_weight,
+            "sparse_weight": req.sparse_weight,
+            "mmr_lambda": req.mmr_lambda,
+            "per_doc_limit": req.per_doc_limit,
+        },
+        "_next": {"operation_id": "search-debug-shape", "payload": next_payload}
+    }
 
 
 @app.post(
@@ -597,7 +587,18 @@ def search_debug_shape(req: DebugShapeRequest):
             self.summary_mode = src.summary_mode
 
     results, groups, blocks = _shape_results(final_hits, {}, [], [], _R3(req))
-    return {"step": "shape", "results": results, "groups": groups, "blocks": blocks}
+    return {
+        "step": "shape",
+        "results": results,
+        "groups": groups,
+        "blocks": blocks,
+        "config": {
+            "skip_stage1_active": bool(settings.search_skip_stage1_default),
+            "summary_mode": req.summary_mode,
+            "result_format": req.result_format,
+            "merge_chunks": req.merge_chunks,
+        }
+    }
 
 
 @app.post(
@@ -1009,15 +1010,23 @@ def search_query(req: SearchQuery):
         per_query_limit = max(1, int(req.top_k) * OVERSAMPLE)
 
     any_docs = False
+    skip_stage1 = bool(settings.search_skip_stage1_default)
     for qi, (q, q_vec) in enumerate(zip(queries, q_vecs)):
         content_sparse_query, summary_sparse_query = _build_sparse_queries_for_query(q, req.use_hybrid)
-        cand_doc_ids, doc_map = _stage1_select_documents(q, q_vec, flt, summary_sparse_query, req)
-        if not cand_doc_ids:
-            continue
-        any_docs = True
         # Clone request with per-query top_k oversampled
         req_i = req.model_copy(update={"top_k": per_query_limit})
-        final_hits, mmr_pool, rel2 = _stage2_select_chunks(cand_doc_ids, q, q_vec, content_sparse_query, doc_map, req_i)
+        if skip_stage1:
+            # Pełny korpus: pomiń Etap 1 i wyszukuj bezpośrednio w chunkach (z zachowaniem filtra trybu)
+            final_hits, mmr_pool, rel2 = _stage2_select_chunks(None, q, q_vec, content_sparse_query, {}, req_i, flt)
+            if not final_hits:
+                continue
+            any_docs = True
+        else:
+            cand_doc_ids, doc_map = _stage1_select_documents(q, q_vec, flt, summary_sparse_query, req)
+            if not cand_doc_ids:
+                continue
+            any_docs = True
+            final_hits, mmr_pool, rel2 = _stage2_select_chunks(cand_doc_ids, q, q_vec, content_sparse_query, doc_map, req_i)
         # Append to global neighbor pools (used later for optional neighbor expansion)
         global_mmr_pool.extend(mmr_pool)
         global_rel2.extend(rel2)

@@ -1,6 +1,13 @@
-# rags_tool (1.8.2)
+# rags_tool (1.9.1)
 
-Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 1.9.0
+
+- Globalny przełącznik w `.env`: `SEARCH_SKIP_STAGE1_DEFAULT` (domyślnie `false`).
+  - Gdy `true`, endpoint `/search/query` pomija selekcję dokumentów po streszczeniach (Etap 1) i od razu wyszukuje w całej kolekcji chunków.
+  - Zachowane są wszystkie pozostałe mechanizmy: hybryda dense/TF‑IDF, MMR, `per_doc_limit`, `summary_mode`, `result_format`, scalanie bloków oraz (jeśli skonfigurowany) reranker.
+  - Uwaga dla UI/testów: w tym trybie `top_m` ogranicza początkową pulę chunków (zamiast liczby dokumentów po Etapie 1). Testy, które oczekują wywołania Etapu 1, powinny uwzględnić nowy tryb.
 
 ## Nowości w 1.8.2
 
@@ -319,6 +326,12 @@ Serwis korzysta z dwóch endpointów zgodnych z protokołem OpenAI:
   - `SUMMARY_MODEL` (np. `gpt-4o-mini` lub kompatybilny model czatowy)
   - Wymagania: endpoint `/v1/chat/completions` przyjmuje `{"model": str, "messages": [{role, content}, ...], "temperature": float, "max_tokens": int}` i zwraca `{"choices": [{"message": {"content": str}}]}`.
 
+## Konfiguracja wyszukiwania
+
+- `SEARCH_SKIP_STAGE1_DEFAULT` (bool; domyślnie `false`)
+  - Jeśli `true`, Etap 1 (wyszukiwanie po streszczeniach) jest globalnie wyłączony. `/search/query` wyszukuje bezpośrednio w całej kolekcji chunków, respektując filtr trybu (`current`/`archival`), hybrydę dense/TF‑IDF, MMR, limity per‑doc, `summary_mode`, formatowanie wyników oraz ewentualny reranker.
+  - W tym trybie `top_m` działa jako limit początkowej puli chunków do rozważenia w Etapie 2.
+
 ### Jak działają wywołania
 
 - Embedding:
@@ -493,3 +506,6 @@ Przykładowe zapytanie (blocks):
 ## Licencja
 
 MIT
+## Nowości w 1.9.1
+
+- Refaktor: wydzielono kod Admin UI i endpointy debug (`/admin`, `/search/debug/*`) do oddzielnego modułu `app/admin_routes.py` i podpinane są przez `attach_admin_routes(app)`. Kod funkcjonalny pozostaje w `app/api.py`.

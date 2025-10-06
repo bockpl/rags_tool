@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "1.8.2"
+    app_version: str = "1.9.1"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -87,6 +87,12 @@ class SummRAGSettings(BaseSettings):
             "Używaj do pytań o treści z indeksu; przy braku wyników zawężaj temat lub doprecyzuj daty."
         ),
         alias="SEARCH_TOOL_DESCRIPTION",
+    )
+
+    # Globalny przełącznik: pomiń Etap 1 (streszczenia) i szukaj od razu w całym korpusie (chunkach).
+    # Sterowany wyłącznie przez admina z .env (brak parametru w API).
+    search_skip_stage1_default: bool = Field(
+        default=False, alias="SEARCH_SKIP_STAGE1_DEFAULT"
     )
 
     # --- Reranker (OpenAI-compatible) minimal configuration ---
