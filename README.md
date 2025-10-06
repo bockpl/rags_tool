@@ -1,6 +1,21 @@
-# rags_tool (1.6.0)
+# rags_tool (1.7.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF).
+
+## Nowości w 1.7.1
+
+- Poprawka zgodności wejścia: pole `query` w `/search/query` akceptuje teraz również zagnieżdżone listy
+  (np. `[["a","b","c"]]`). Wejście jest spłaszczane do `["a","b","c"]`, co eliminuje 422 przy takim formacie.
+
+## Nowości w 1.7.0
+
+- Reranker (OpenAI‑compatible): dodano opcjonalny krok rerankingu po wyszukiwaniu wektorowym.
+  - Minimalne zmienne w `.env`: `RANKER_BASE_URL`, `RANKER_API_KEY`, `RANKER_MODEL`,
+    `RERANK_TOP_N`, `RETURN_TOP_K`, `RANKER_SCORE_THRESHOLD`, `RANKER_MAX_LENGTH`.
+  - Integracja w endpointzie `/search/query`: jeżeli ranker jest włączony, wyniki w formacie `blocks`
+    są sortowane i filtrowane wg `ranker_score` po wywołaniu `POST {RANKER_BASE_URL}/v1/rerank`.
+  - Wielozapytaniowość: lista zapytań jest łączona w jeden ciąg (separator ` || `) na potrzeby rankera.
+  - Fallback: na błąd/timeout lub brak konfiguracji rankera zwracane są wyniki wektorowe (bez `ranker_score`).
 
 ## Nowości w 1.6.0
 
@@ -196,6 +211,16 @@ export SEARCH_TOOL_DESCRIPTION="..." # opcjonalny opis endpointu /search/query w
 export COLLECTION_NAME="rags_tool"
 export VECTOR_STORE_DIR=".rags_tool_store"
 export DEBUG="false"  # ustaw na "true", aby włączyć logi debugujące
+
+# Reranker (OpenAI‑compatible). Pozostaw puste, aby wyłączyć.
+# Ustaw bazę BEZ '/v1' — klient sam dołączy '/v1/rerank' (lub '/rerank', jeśli baza kończy się na '/v1').
+export RANKER_BASE_URL="http://127.0.0.1:8002"
+export RANKER_API_KEY="sk-ranker-xxx"
+export RANKER_MODEL="sdadas/polish-reranker-roberta-v3"
+export RERANK_TOP_N="50"           # ilu kandydatów przekazać do rankera
+export RETURN_TOP_K="5"            # ilu wyników zwrócić po rankingu
+export RANKER_SCORE_THRESHOLD="0.2"# próg minimalnego score
+export RANKER_MAX_LENGTH="2048"    # przybliżony limit znaków na jeden passage
 ```
 
 Możesz także umieścić te wartości w pliku `.env`; aplikacja wczyta je automatycznie dzięki `pydantic-settings`. W repo znajdziesz przykładowy plik `.env`, który możesz skopiować i dostosować. Flaga `DEBUG=true` włącza szczegółowe logi z przebiegu ingestu (po jednym wpisie na dokument).

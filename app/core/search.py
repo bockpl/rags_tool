@@ -22,6 +22,8 @@ from app.core.constants import (
 )
 from app.qdrant_utils import qdrant
 from app.settings import get_settings
+from app.core.ranker_client import OpenAIReranker
+from app.core.constants import RANKER_USE_STAGE1, RANKER_USE_STAGE2
 
 settings = get_settings()
 
@@ -31,6 +33,32 @@ settings = get_settings()
 DEFAULT_MMR_LAMBDA = 0.3
 DEFAULT_PER_DOC_LIMIT = 2
 DEFAULT_SCORE_NORM = "minmax"  # minmax|zscore|none
+
+
+def _ranker_enabled() -> bool:
+    """Czy ranker jest skonfigurowany (BASE_URL + MODEL)."""
+    return bool(settings.ranker_base_url and settings.ranker_model)
+
+
+def _truncate_head_tail(text: str, limit: int) -> str:
+    """Przytnij tekst do limitu znaków (70% head, 30% tail)."""
+    t = (text or "").strip()
+    if len(t) <= max(1, int(limit)):
+        return t
+    head = int(limit * 0.7)
+    tail = max(0, int(limit) - head)
+    return (t[:head] + "\n...\n" + t[-tail:]).strip()
+
+
+def _rerank_indices(query: str, passages: List[str], top_n: int) -> Dict[int, float]:
+    """Wywołaj ranker i zwróć mapę index->score dla ocenionych elementów.
+
+    Uwaga: 'top_n' ogranicza liczbę wyników zwracanych przez endpoint (nie liczbę
+    dokumentów w wejściu). Niezwrócone elementy pozostają bez oceny.
+    """
+    client = OpenAIReranker(settings.ranker_base_url or "", settings.ranker_api_key, settings.ranker_model or "")
+    rr = client.rerank(query=query, documents=passages, top_n=min(max(1, top_n), len(passages)))
+    return {int(it.get("index")): float(it.get("relevance_score")) for it in rr}
 
 
 def _normalize(values: List[float], method: str = DEFAULT_SCORE_NORM) -> List[float]:
@@ -125,6 +153,7 @@ def _build_sparse_queries_for_query(query: str, use_hybrid: bool) -> Tuple[
 
 
 def _stage1_select_documents(
+    q_text: str,
     q_vec: List[float],
     flt: Optional[qm.Filter],
     summary_sparse_query: Optional[Tuple[List[int], List[float]]],
@@ -188,17 +217,43 @@ def _stage1_select_documents(
         dense_vecs = [x["dense_vec"] for x in doc_items]
         sparse_vecs = [(x["sparse_idx"], x["sparse_val"]) for x in doc_items]
         mmr_idx = mmr_diversify_hybrid(dense_vecs, sparse_vecs, hybrid_rel, min(req.top_m, len(doc_items)), req.mmr_lambda, rep_alpha)
-        cand_doc_ids = [doc_items[i]["doc_id"] for i in mmr_idx]
+        order_idx = mmr_idx
     else:
-        order = sorted(range(len(doc_items)), key=lambda i: hybrid_rel[i], reverse=True)
-        order = order[: min(req.top_m, len(order))]
-        cand_doc_ids = [doc_items[i]["doc_id"] for i in order]
+        order_idx = sorted(range(len(doc_items)), key=lambda i: hybrid_rel[i], reverse=True)
+
+    # Etap 1: opcjonalny rerank streszczeń (tylko jeśli ranker skonfigurowany i flaga włączona)
+    if _ranker_enabled() and RANKER_USE_STAGE1 and order_idx:
+        try:
+            # Zbuduj krótkie passage na podstawie streszczenia (ew. podpisu)
+            passages = []
+            for i in order_idx:
+                s = str(doc_items[i].get("doc_summary") or "")
+                sig = doc_items[i].get("doc_signature") or []
+                if isinstance(sig, list):
+                    s = (s + "\n\n" + ", ".join(map(str, sig))) if s else ", ".join(map(str, sig))
+                passages.append(_truncate_head_tail(s, settings.ranker_max_length))
+            score_map = _rerank_indices(q_text, passages, settings.rerank_top_n)
+            # Posortuj ocenione na początku; nieocenione zachowaj w oryginalnej kolejności za nimi
+            scored = [(i, score_map[i2]) for i, i2 in enumerate(range(len(order_idx))) if i2 in score_map]
+            # scored to (local_pos, score); przemapuj na globalne indeksy
+            scored_global = [(order_idx[pos], sc) for (pos, sc) in scored]
+            scored_global.sort(key=lambda x: float(x[1]), reverse=True)
+            scored_ids = [doc_items[i]["doc_id"] for (i, _) in scored_global]
+            not_scored_ids = [doc_items[i]["doc_id"] for i in order_idx if i not in {idx for (idx, _) in scored_global}]
+            cand_doc_ids = scored_ids + not_scored_ids
+            cand_doc_ids = cand_doc_ids[: min(req.top_m, len(cand_doc_ids))]
+        except Exception:
+            # W przypadku błędu rankera, fallback do bazowego porządku
+            cand_doc_ids = [doc_items[i]["doc_id"] for i in order_idx[: min(req.top_m, len(order_idx))]]
+    else:
+        cand_doc_ids = [doc_items[i]["doc_id"] for i in order_idx[: min(req.top_m, len(order_idx))]]
 
     return cand_doc_ids, doc_map
 
 
 def _stage2_select_chunks(
     cand_doc_ids: List[str],
+    q_text: str,
     q_vec: List[float],
     content_sparse_query: Optional[Tuple[List[int], List[float]]],
     doc_map: Dict[str, Any],
@@ -252,6 +307,22 @@ def _stage2_select_chunks(
     dense_norm2 = _normalize(dense_scores2, req.score_norm)
     sparse_norm2 = _normalize(sparse_scores2, req.score_norm)
     rel2 = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm2, sparse_norm2)]
+
+    # Etap 2: opcjonalny rerank chunków przed selekcją MMR (jeśli ranker skonfigurowany i flaga włączona)
+    if _ranker_enabled() and RANKER_USE_STAGE2 and mmr_pool:
+        try:
+            passages2 = []
+            for item in mmr_pool:
+                payload = (item.get("hit") or {}).payload or {}
+                txt = str(payload.get("text") or "")
+                passages2.append(_truncate_head_tail(txt, settings.ranker_max_length))
+            score_map2 = _rerank_indices(q_text, passages2, settings.rerank_top_n)
+            # Nadpisz rel2 dla ocenionych elementów skalą [0..1] z rankera
+            for idx, sc in score_map2.items():
+                if 0 <= int(idx) < len(rel2):
+                    rel2[int(idx)] = float(sc)
+        except Exception:
+            pass
 
     rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
     dense_vecs2 = [x["dense_vec"] for x in mmr_pool]

@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "1.6.0"
+    app_version: str = "1.7.1"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -80,14 +80,27 @@ class SummRAGSettings(BaseSettings):
     # via .env to tailor the wording for a specific corpus (e.g., PŁ documents).
     search_tool_description: str = Field(
         default=(
-            "Two-stage hybrid retrieval (dense + TF‑IDF) for RAG tools. Stage 1 ranks "
-            "document summaries; Stage 2 ranks full‑text chunks with hybrid MMR and a per‑document cap. "
-            "Use when the question should be grounded in the indexed corpus; not for general knowledge. "
-            "Prefer result_format='blocks' for concise evidence blocks (text + path + score); "
-            "if results are empty or scores are very low, ask the user to clarify or narrow the topic."
+            "Proste wyszukiwanie w korpusie (RAG + reranker). Wywołuj TYLKO w ten sposób: "
+            "POST /search/query z JSON: {\n  \"query\": [\n    \"krótkie pytanie\",\n    \"wariant pytania\"\n  ],\n  \"mode\": \"auto\"\n}. "
+            "Nie wysyłaj innych pól — limity, wagi i scalanie są ustawione po stronie serwera. "
+            "Zwracane jest pole 'blocks' (lista z polami: text, path, ranker_score gdy dostępny). "
+            "Używaj do pytań o treści z indeksu; przy braku wyników zawężaj temat lub doprecyzuj daty."
         ),
         alias="SEARCH_TOOL_DESCRIPTION",
     )
+
+    # --- Reranker (OpenAI-compatible) minimal configuration ---
+    # Pusty BASE_URL lub MODEL oznacza wyłączony ranker i brak rerankingu.
+    # K i N są kontrolowane z .env, nie przez publiczne API.
+    ranker_base_url: Optional[str] = Field(default=None, alias="RANKER_BASE_URL")
+    ranker_api_key: Optional[str] = Field(default=None, alias="RANKER_API_KEY")
+    ranker_model: Optional[str] = Field(default=None, alias="RANKER_MODEL")
+    rerank_top_n: int = Field(default=50, alias="RERANK_TOP_N")
+    return_top_k: int = Field(default=5, alias="RETURN_TOP_K")
+    ranker_score_threshold: float = Field(default=0.2, alias="RANKER_SCORE_THRESHOLD")
+    # Długość kontekstu dla pojedynczego passage wysyłanego do rankera (znaki, przybliżenie).
+    # Jeśli model ma twardy limit tokenów, rekomendujemy ustawić konserwatywnie (np. 2048 znaków).
+    ranker_max_length: int = Field(default=2048, alias="RANKER_MAX_LENGTH")
 
     @property
     def qdrant_summary_collection(self) -> str:

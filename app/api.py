@@ -32,6 +32,7 @@ from app.core.search import (
     _shape_results,
 )
 from app.core.summary import llm_summary
+from app.core.ranker_client import OpenAIReranker
 from app.models import (
     About,
     CollectionsExportRequest,
@@ -69,6 +70,23 @@ logger.propagate = False
 
 _collection_init_lock = Lock()
 _initialized_collections: Set[str] = set()
+
+# Przygotuj czytelny JSON body dla operacji ingest-build bez ryzykownego łączenia stringów
+INGEST_BUILD_BODY = json.dumps(
+    {
+        "base_dir": "/app/data",
+        "glob": "**/*",
+        "recursive": True,
+        "reindex": False,
+        "chunk_tokens": settings.chunk_tokens,
+        "chunk_overlap": settings.chunk_overlap,
+        "collection_name": "rags_tool",
+        "enable_sparse": True,
+        "rebuild_tfidf": True,
+    },
+    ensure_ascii=False,
+    indent=2,
+)
 
 
 def _collection_cache_key(base: Optional[str]) -> str:
@@ -216,17 +234,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "id": "ingest-build",
         "path": "/ingest/build",
         "method": "POST",
-        "body": ("{"\n"
-                 f"  \"base_dir\": \"/app/data\",\n"
-                 f"  \"glob\": \"**/*\",\n"
-                 f"  \"recursive\": true,\n"
-                 f"  \"reindex\": false,\n"
-                 f"  \"chunk_tokens\": {settings.chunk_tokens},\n"
-                 f"  \"chunk_overlap\": {settings.chunk_overlap},\n"
-                 f"  \"collection_name\": \"rags_tool\",\n"
-                 f"  \"enable_sparse\": true,\n"
-                 f"  \"rebuild_tfidf\": true\n"
-                 "}"),
+        "body": INGEST_BUILD_BODY,
     },
     {
         "id": "search-query",
@@ -683,6 +691,14 @@ def search_query(req: SearchQuery):
     The endpoint returns a JSON with `blocks` ready for citation by the LLM.
     """
     t0 = time.time()
+    # --- RERANKER: konfiguracja z .env ---
+    # Włączony wtedy, gdy podano zarówno BASE_URL, jak i MODEL.
+    ranker_enabled = bool(settings.ranker_base_url and settings.ranker_model)
+    # Minimalne parametry sterowane z .env (LLM nie może ich nadpisać):
+    RERANK_TOP_N = max(1, int(settings.rerank_top_n))
+    RETURN_TOP_K = max(1, int(settings.return_top_k))
+    RANKER_THRESHOLD = float(settings.ranker_score_threshold)
+    RANKER_MAX_LEN = max(1, int(settings.ranker_max_length))
     # Internal fusion defaults (hidden from tool schema/LLM)
     RRF_K = 60
     OVERSAMPLE = 2
@@ -720,18 +736,22 @@ def search_query(req: SearchQuery):
     global_rel2: List[float] = []
 
     # Oversampled per-query limit to keep enough candidates after dedup/fusion
-    per_query_limit = max(1, int(req.top_k) * OVERSAMPLE)
+    # Jeśli ranker jest włączony, budżetujemy kandydatów pod rerank zamiast polegać na top_k z API.
+    if ranker_enabled:
+        per_query_limit = max(1, int(RERANK_TOP_N))
+    else:
+        per_query_limit = max(1, int(req.top_k) * OVERSAMPLE)
 
     any_docs = False
     for qi, (q, q_vec) in enumerate(zip(queries, q_vecs)):
         content_sparse_query, summary_sparse_query = _build_sparse_queries_for_query(q, req.use_hybrid)
-        cand_doc_ids, doc_map = _stage1_select_documents(q_vec, flt, summary_sparse_query, req)
+        cand_doc_ids, doc_map = _stage1_select_documents(q, q_vec, flt, summary_sparse_query, req)
         if not cand_doc_ids:
             continue
         any_docs = True
         # Clone request with per-query top_k oversampled
         req_i = req.model_copy(update={"top_k": per_query_limit})
-        final_hits, mmr_pool, rel2 = _stage2_select_chunks(cand_doc_ids, q_vec, content_sparse_query, doc_map, req_i)
+        final_hits, mmr_pool, rel2 = _stage2_select_chunks(cand_doc_ids, q, q_vec, content_sparse_query, doc_map, req_i)
         # Append to global neighbor pools (used later for optional neighbor expansion)
         global_mmr_pool.extend(mmr_pool)
         global_rel2.extend(rel2)
@@ -763,13 +783,13 @@ def search_query(req: SearchQuery):
         )
         return SearchResponse(took_ms=took_ms, hits=[])
 
-    # Build final fused list and apply global limit
+    # Build final fused list; nie ograniczamy tutaj do top_k jeśli ranker jest włączony
     fused_list = [
         {"payload": v.get("payload"), "score": float(v.get("score", 0.0))}
         for v in fused.values()
     ]
     fused_list.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-    final_hits = fused_list[: max(1, int(req.top_k))]
+    final_hits = fused_list if ranker_enabled else fused_list[: max(1, int(req.top_k))]
 
     # Shape results; merged blocks are built AFTER fusion, preserving the requirement
     results, groups_payload, blocks_payload = _shape_results(final_hits, {}, global_mmr_pool, global_rel2, req)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.search import (
     DEFAULT_MMR_LAMBDA,
@@ -80,7 +80,8 @@ class SearchQuery(BaseModel):
     query: List[str] = Field(
         ...,
         description=(
-            "List of focused queries (each 3–12 words). Provide synonyms or variants to improve recall."
+            "List of focused queries (each 3–12 words). Provide synonyms or variants to improve recall. "
+            "Accepted shapes: string | List[str] | List[List[str]] (nested lists are flattened)."
         ),
     )
     top_m: int = Field(
@@ -130,6 +131,32 @@ class SearchQuery(BaseModel):
         ),
     )
 
+    # Walidator wejścia 'query': akceptuje string, listę stringów lub listę list (zagnieżdżenia),
+    # a następnie spłaszcza i czyści wartości do List[str]. Dzięki temu żądania typu
+    # "query": [["a", "b" ,"c"]] nie kończą się 422 i są interpretowane jako "query": ["a","b","c"].
+    @field_validator("query", mode="before")
+    @classmethod
+    def _normalize_query(cls, v):  # type: ignore[override]
+        # Funkcja pomocnicza: przekształca dowolną strukturę do listy niepustych stringów.
+        def to_list_of_str(x) -> List[str]:
+            if x is None:
+                return []
+            if isinstance(x, str):
+                s = x.strip()
+                return [s] if s else []
+            if isinstance(x, (list, tuple, set)):
+                acc: List[str] = []
+                for item in x:
+                    acc.extend(to_list_of_str(item))
+                return acc
+            # Dla innych typów (np. liczby) użyj reprezentacji tekstowej
+            s = str(x).strip()
+            return [s] if s else []
+
+        out = to_list_of_str(v)
+        # Zabezpieczenie: jeżeli po konwersji nic nie zostało, przekaż oryginał (pozwoli Pydanticowi zgłosić 422)
+        return out if out else v
+
 
 class SearchHit(BaseModel):
     doc_id: str = Field(..., description="Stable document identifier (sha1 over absolute path).")
@@ -172,6 +199,10 @@ class MergedBlock(BaseModel):
     summary: Optional[str] = Field(default=None, description="Document/section summary if requested by summary_mode.")
     text: str = Field(..., description="Merged textual content of the block (joined contiguous chunks).")
     token_estimate: Optional[int] = Field(default=None, description="Heuristic token length (~4 chars/token).")
+    # Pola opcjonalne dla rerankera (jeśli włączony):
+    ranker_score: Optional[float] = Field(default=None, description="Ocena jakości nadana przez ranker (0..1).")
+    ranker_applied: Optional[bool] = Field(default=None, description="Czy zastosowano reranker do wyniku.")
+    ranker_model: Optional[str] = Field(default=None, description="Nazwa modelu rankera użytego do oceny.")
 
 
 # Rebuild forward refs
