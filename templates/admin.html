@@ -54,6 +54,11 @@
                 <input type="checkbox" id="replace-existing" checked /> Nadpisz istniejące kolekcje
             </label>
         </div>
+        <div id="ingest-build-wrapper" style="display:none;">
+            <label for="force-regen-summary" style="font-weight:400; margin-top:8px; display:flex; gap:8px; align-items:center;">
+                <input type="checkbox" id="force-regen-summary" /> Wymuś regenerację streszczeń (nadpisz cache .summary)
+            </label>
+        </div>
         <button id="send">Wyślij żądanie</button>
         <button id="next-step" style="display:none; background:#10b981;">→ Następny etap</button>
         <pre id="result">Odpowiedź pojawi się tutaj.</pre>
@@ -76,6 +81,8 @@
         const handlerEl = document.getElementById("handler");
         const versionEl = document.getElementById("version");
         const retrievalEl = document.getElementById("retrieval");
+        const ingestBuildWrapper = document.getElementById("ingest-build-wrapper");
+        const forceRegenCheckbox = document.getElementById("force-regen-summary");
 
         function detectDownloadFilename(disposition, fallback) {
             if (!disposition) return fallback;
@@ -136,10 +143,32 @@
                 }
                 replaceCheckbox.checked = true;
             }
+            if (ingestBuildWrapper) {
+                const isIngestBuild = op.id === "ingest-build";
+                ingestBuildWrapper.style.display = isIngestBuild ? "block" : "none";
+                if (isIngestBuild) {
+                    try {
+                        const current = JSON.parse(payloadEl.value || "{}");
+                        forceRegenCheckbox.checked = !!current.force_regen_summary;
+                    } catch (e) {
+                        forceRegenCheckbox.checked = false;
+                    }
+                }
+            }
             resultEl.textContent = "Odpowiedź pojawi się tutaj.";
             sendBtn.disabled = false;
             sendBtn.dataset.op = op.id;
         }
+
+        forceRegenCheckbox?.addEventListener('change', () => {
+            try {
+                const obj = JSON.parse(payloadEl.value || "{}");
+                obj.force_regen_summary = !!forceRegenCheckbox.checked;
+                payloadEl.value = JSON.stringify(obj, null, 2);
+            } catch (err) {
+                // ignore JSON parse errors; user can edit manually
+            }
+        });
 
         async function runRequest() {
             const opId = sendBtn.dataset.op;

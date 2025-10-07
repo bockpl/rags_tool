@@ -1,4 +1,4 @@
-# rags_tool (2.3.0)
+# rags_tool (2.5.3)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
@@ -47,6 +47,27 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
   - Reranker działa na zmergowanych sekcjach (po scaleniu), a nie na pojedynczych chunkach. Sortowanie końcowe odbywa się według `ranker_score` (gdy skonfigurowany) z respektowaniem `per_doc_limit`.
   - Dla wyników bez etykiety `section` stosowany jest fallback: blok budowany jest z trafionych chunków (bez doczytywania całej sekcji).
 - Uporządkowano payload bloków: usunięto pola `ranker_applied` i `ranker_model`. Pole `ranker_score` pozostaje i jest ustawiane, gdy reranker jest aktywny.
+
+## Nowości w 2.5.0
+
+- Sidecar cache streszczeń i wektorów w katalogu `.summary/` obok plików źródłowych:
+  - Dla każdego dokumentu zapisywany jest plik `.summary/<basename>_summary.json.gz` zawierający: `title`, `summary`, `signature`, `replacement` oraz gotowy wektor gęsty `summary_dense`.
+  - Plik jest kompresowany gzip (duża oszczędność przy listach floatów).
+  - Spójność weryfikowana jest przez `document.content_sha256` oraz `schema_version` (1.0.0). Przy rozbieżności cache jest ignorowany.
+  - Podczas ingestu, gdy cache jest zgodny, pomijane są wywołania LLM oraz embedding streszczenia (znaczące skrócenie czasu i kosztu).
+  - Wymuszenie przebudowy:
+    - Użyj flagi `force_regen_summary: true` w `POST /ingest/build` (checkbox w Admin UI), aby pominąć cache i nadpisać pliki `.summary/*.json.gz`.
+    - Alternatywnie usuń plik/katalog `.summary/` dla wybranych dokumentów lub zmień plik źródłowy (hash zmieni się automatycznie).
+    - Uwaga: parametr `reindex` dotyczy Qdrant/TF‑IDF i nie czyści plików sidecar.
+
+## Nowości w 2.5.2
+
+- Debug logi dla cache sidecar:
+  - Podczas ingestu raportowane jest: obecność pliku sidecar, decyzja o użyciu (hit) lub odrzuceniu (miss/stale), pominięcie z powodu `force_regen_summary` oraz zapis nowego pliku sidecar.
+
+## Nowości w 2.5.3
+
+- Uporządkowanie logów: nazwa pliku sidecar bez pełnej ścieżki (mniej hałasu w logach, łatwiejsza lektura).
 
 ## Nowości w 1.9.0
 

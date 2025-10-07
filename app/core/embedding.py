@@ -23,6 +23,14 @@ SUMMARY_VECTORIZER_PATH = VECTOR_STORE_DIR / "tfidf_vectorizer_summary.json"
 # OpenAI-compatible embedding client
 embedding_client = OpenAI(base_url=settings.embedding_api_url, api_key=settings.embedding_api_key)
 
+try:  # optional tokenizer for precise truncation
+    import tiktoken  # type: ignore
+
+    _EMB_TOKENIZER = tiktoken.get_encoding("cl100k_base")
+except Exception:  # pragma: no cover
+    tiktoken = None  # type: ignore
+    _EMB_TOKENIZER = None  # type: ignore
+
 
 class IterableCorpus:
     """Re-iterable corpus proxy storing size metadata for TF-IDF fitting."""
@@ -64,17 +72,60 @@ def embed_text(texts: List[str]) -> List[List[float]]:
 
 def embed_query(texts: List[str]) -> List[List[float]]:
     """Embed query strings with a model-specific query prefix."""
-    return _embed_raw(_maybe_prefix(texts, settings.embedding_query_prefix))
+    limited = _limit_for_embedding(_maybe_prefix(texts, settings.embedding_query_prefix))
+    return _embed_raw(limited)
 
 
 def embed_passage(texts: List[str]) -> List[List[float]]:
     """Embed documents/passages with a model-specific passage prefix."""
-    return _embed_raw(_maybe_prefix(texts, settings.embedding_passage_prefix))
+    limited = _limit_for_embedding(_maybe_prefix(texts, settings.embedding_passage_prefix))
+    return _embed_raw(limited)
 
 
 def get_embedding_dim() -> int:
     vec = _embed_raw(["test"])[0]
     return len(vec)
+
+
+def _count_tokens(text: str) -> int:
+    if not text:
+        return 0
+    if _EMB_TOKENIZER is None:
+        return max(1, len(text) // 4)
+    try:
+        return len(_EMB_TOKENIZER.encode(text))
+    except Exception:
+        return max(1, len(text) // 4)
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    if max_tokens <= 0 or not text:
+        return ""
+    if _EMB_TOKENIZER is None:
+        # char-based heuristic (~4 chars/token)
+        max_chars = max_tokens * 4
+        return text[:max_chars]
+    try:
+        toks = _EMB_TOKENIZER.encode(text)
+        if len(toks) <= max_tokens:
+            return text
+        return _EMB_TOKENIZER.decode(toks[:max_tokens])
+    except Exception:
+        max_chars = max_tokens * 4
+        return text[:max_chars]
+
+
+def _limit_for_embedding(texts: List[str]) -> List[str]:
+    """Ensure each input respects EMBEDDING_MAX_TOKENS to avoid 400 errors."""
+    limit = int(getattr(settings, "embedding_max_tokens", 512) or 512)
+    safe_limit = max(1, limit)
+    out: List[str] = []
+    for t in texts:
+        ts = str(t or "")
+        if _count_tokens(ts) > safe_limit:
+            ts = _truncate_to_tokens(ts, safe_limit)
+        out.append(ts)
+    return out
 
 
 def load_vectorizer(path: Path = VECTORIZER_PATH) -> Optional[TfidfVectorizer]:

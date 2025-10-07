@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.4.0"
+    app_version: str = "2.5.3"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -20,6 +20,8 @@ class SummRAGSettings(BaseSettings):
     embedding_api_url: str = Field(default="http://127.0.0.1:8000/v1", alias="EMBEDDING_API_URL")
     embedding_api_key: str = Field(default="sk-no-key", alias="EMBEDDING_API_KEY")
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
+    # Max tokens per single input to the embedding endpoint (safety cap)
+    embedding_max_tokens: int = Field(default=512, alias="EMBEDDING_MAX_TOKENS")
     # Prefixes used by some retrieval models that expect instruction-style inputs
     # Defaults align with sdadas/mmlw-retrieval-roberta-large-v2
     embedding_query_prefix: str = Field(default="query: ", alias="EMBEDDING_QUERY_PREFIX")

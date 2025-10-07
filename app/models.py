@@ -70,6 +70,11 @@ class IngestBuildRequest(BaseModel):
     collection_name: str = Field(default_factory=lambda: settings.collection_name)
     enable_sparse: bool = True
     rebuild_tfidf: bool = True
+    # Force regeneration of summaries and overwrite sidecar cache
+    force_regen_summary: bool = Field(
+        False,
+        description="When true, bypass sidecar cache and regenerate LLM summary + dense vector, overwriting .summary/*.json.gz",
+    )
 
 
 class SummariesGenerateRequest(BaseModel):

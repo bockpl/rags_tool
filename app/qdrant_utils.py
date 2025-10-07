@@ -940,7 +940,12 @@ def build_and_upsert_points(
         if normalized_refs:
             replacement_relations[doc_id] = normalized_refs
 
-        summary_dense_vec = embed_passage([doc_summary])[0]
+        # Prefer precomputed dense summary vector from sidecar cache when available
+        cached_vec = rec.get("summary_dense_vec") if isinstance(rec, dict) else None
+        if isinstance(cached_vec, list) and cached_vec:
+            summary_dense_vec = cached_vec
+        else:
+            summary_dense_vec = embed_passage([doc_summary])[0]
         content_texts = [c.get("text", c) if isinstance(c, dict) else str(c) for c in chunks]
         content_vecs = embed_passage(content_texts)
 

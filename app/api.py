@@ -58,6 +58,13 @@ from app.qdrant_utils import (
 )
 from app.settings import get_settings
 from app.admin_routes import attach_admin_routes
+from app.core.summary_cache import (
+    compute_file_sha256,
+    load_sidecar,
+    save_sidecar,
+    sidecar_path_for,
+)
+from app.core.embedding import embed_passage
 
 
 settings = get_settings()
@@ -86,6 +93,7 @@ INGEST_BUILD_BODY = json.dumps(
         "collection_name": "rags_tool",
         "enable_sparse": True,
         "rebuild_tfidf": True,
+        "force_regen_summary": False,
     },
     ensure_ascii=False,
     indent=2,
@@ -124,18 +132,69 @@ def _scan_files(base: pathlib.Path, pattern: str, recursive: bool) -> List[pathl
 
 
 def _iter_document_records(
-    file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int
+    file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int, *, force_regen_summary: bool
 ) -> Iterable[Dict[str, Any]]:
     for path in file_paths:
         doc_start = time.time()
         logger.debug("Processing document %s", path)
+        # Always extract text and chunks (not cached here)
         raw = extract_text(path)
-        chunk_items = chunk_text_by_sections(raw, target_tokens=chunk_tokens, overlap_tokens=chunk_overlap, merge_up_to="ust")
+        chunk_items = chunk_text_by_sections(
+            raw,
+            target_tokens=chunk_tokens,
+            overlap_tokens=chunk_overlap,
+            merge_up_to="ust",
+        )
         chunks = chunk_items
         if not chunks:
             logger.debug("Document %s produced no chunks; skipping", path)
             continue
-        doc_sum = llm_summary(raw)
+        # Try sidecar cache for summary + vectors (unless forced to regenerate)
+        content_sha256 = compute_file_sha256(path)
+        sidecar = None
+        sc_path = sidecar_path_for(path)
+        sc_name = sc_path.name
+        if force_regen_summary:
+            if sc_path.exists():
+                logger.debug("Force regen: ignoring sidecar | path=%s sidecar=%s", path, sc_name)
+        else:
+            if sc_path.exists():
+                logger.debug("Sidecar present, validating | path=%s sidecar=%s", path, sc_name)
+            else:
+                logger.debug("Sidecar not found | path=%s expected=%s", path, sc_name)
+            sidecar = load_sidecar(path, expected_sha256=content_sha256)
+        if sidecar:
+            logger.debug("Using sidecar cache | path=%s sidecar=%s", path, sc_name)
+            summ_block = sidecar.get("summary", {})
+            vectors_block = sidecar.get("vectors", {})
+            doc_sum = {
+                "title": str(summ_block.get("title") or ""),
+                "summary": str(summ_block.get("summary") or ""),
+                "signature": list(summ_block.get("signature") or []),
+                "replacement": str(summ_block.get("replacement") or "brak") or "brak",
+            }
+            summary_dense_vec = list(vectors_block.get("summary_dense") or [])
+        else:
+            # Generate with LLM and compute dense embedding for summary; then cache
+            doc_sum = llm_summary(raw)
+            summary_text = doc_sum.get("summary", "") or ""
+            summary_dense_vec = embed_passage([summary_text])[0]
+            # Persist sidecar (atomic write); best-effort, ignore failures
+            try:
+                save_sidecar(
+                    path,
+                    content_sha256=content_sha256,
+                    title=str(doc_sum.get("title", "") or ""),
+                    summary=summary_text,
+                    signature=list(doc_sum.get("signature", []) or []),
+                    replacement=str(doc_sum.get("replacement", "brak") or "brak"),
+                    summary_dense=list(summary_dense_vec),
+                )
+                logger.debug("Sidecar saved | path=%s sidecar=%s", path, sidecar_path_for(path).name)
+            except Exception as exc:
+                logger.debug("Sidecar save skipped | path=%s error=%s", path, exc)
+            if not force_regen_summary and sc_path.exists():
+                logger.debug("Sidecar rejected or stale; regenerated | path=%s sidecar=%s", path, sc_name)
         doc_id = sha1(str(path.resolve()))
         doc_title = str(doc_sum.get("title", "") or "").strip() or path.stem
         summary_signature = doc_sum.get("signature", [])
@@ -159,6 +218,8 @@ def _iter_document_records(
             "doc_signature": summary_signature,
             "replacement": replacement_info,
             "summary_sparse_text": summary_sparse_text,
+            # Precomputed dense summary vector (used to skip embedding in upsert stage)
+            "summary_dense_vec": list(summary_dense_vec) if (sidecar or summary_dense_vec is not None) else None,
         }
         logger.debug(
             "Document %s parsed | chunks=%d summary_len=%d took_ms=%d",
@@ -513,7 +574,9 @@ def ingest_build(req: IngestBuildRequest):
         summary_count = 0
 
         with store_path.open("w", encoding="utf-8") as fh:
-            for record in _iter_document_records(file_paths, req.chunk_tokens, req.chunk_overlap):
+            for record in _iter_document_records(
+                file_paths, req.chunk_tokens, req.chunk_overlap, force_regen_summary=req.force_regen_summary
+            ):
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
                 doc_count += 1
                 chunk_count += len(record.get("chunks", []))
