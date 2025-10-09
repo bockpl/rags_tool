@@ -143,7 +143,6 @@ def _iter_document_records(
             raw,
             target_tokens=chunk_tokens,
             overlap_tokens=chunk_overlap,
-            merge_up_to="ust",
         )
         chunks = chunk_items
         if not chunks:
@@ -664,7 +663,7 @@ def search_query(req: SearchQuery):
     Recommendations for LLM callers
     --------------------------------
     * Prefer `result_format="blocks"` to obtain concise evidence blocks; bloki są
-      bezpośrednio pojedynczymi chunkami sekcyjnymi (bez runtime scalania).
+      budowane przez scalenie wszystkich chunków danej sekcji w pełny blok tekstu.
     * Keep `top_k` between 5‑10 unless you need finer granularity.
     * `summary_mode="first"` returns a single document summary per hit, useful for
       citation.

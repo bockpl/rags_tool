@@ -23,7 +23,7 @@ from app.core.constants import (
 from app.qdrant_utils import qdrant
 from app.settings import get_settings
 from app.core.ranker_client import OpenAIReranker
-from app.core.constants import RANKER_USE_STAGE1, RANKER_USE_STAGE2
+from app.core.constants import RANKER_USE_STAGE1
 
 settings = get_settings()
 
@@ -368,21 +368,8 @@ def _stage2_select_chunks(
     sparse_norm2 = _normalize(sparse_scores2, req.score_norm)
     rel2 = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm2, sparse_norm2)]
 
-    # Etap 2: opcjonalny rerank chunków przed selekcją MMR (jeśli ranker skonfigurowany i flaga włączona)
-    if _ranker_enabled() and RANKER_USE_STAGE2 and mmr_pool:
-        try:
-            passages2 = []
-            for item in mmr_pool:
-                payload = (item.get("hit") or {}).payload or {}
-                txt = str(payload.get("text") or "")
-                passages2.append(_truncate_head_tail(txt, settings.ranker_max_length))
-            score_map2 = _rerank_indices(q_text, passages2, settings.rerank_top_n)
-            # Nadpisz rel2 dla ocenionych elementów skalą [0..1] z rankera
-            for idx, sc in score_map2.items():
-                if 0 <= int(idx) < len(rel2):
-                    rel2[int(idx)] = float(sc)
-        except Exception:
-            pass
+    # Etap 2: brak reranku na poziomie chunków — reranking odbywa się
+    # na poziomie scalonych sekcji w warstwie API po zbudowaniu bloków.
 
     rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
     dense_vecs2 = [x["dense_vec"] for x in mmr_pool]

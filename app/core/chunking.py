@@ -13,17 +13,16 @@ try:
 except ImportError:
     spacy = None  # type: ignore
 
-try:
-    import tiktoken  # type: ignore
-except Exception:  # pragma: no cover - optional import
-    tiktoken = None  # type: ignore
+from app.core.tokenizer import (
+    TokenizerAdapter,
+    count_tokens as _adapter_count_tokens,
+    load_tokenizer,
+    sliding_windows,
+)
+from app.settings import get_settings
 
-_TOKENIZER = None
-if tiktoken is not None:  # pragma: no cover - runtime path
-    try:
-        _TOKENIZER = tiktoken.get_encoding("cl100k_base")
-    except Exception:
-        _TOKENIZER = None
+_SETTINGS = get_settings()
+_TOKENIZER_ADAPTER: TokenizerAdapter = load_tokenizer(getattr(_SETTINGS, "embedding_tokenizer", None))
 
 SECTION_HIERARCHY: Tuple[str, ...] = (
     "chapter",
@@ -108,52 +107,11 @@ def _expand_span_to_line(doc: "Doc", span: "Span") -> Optional["Span"]:
 
 
 def count_tokens(text: str) -> int:
-    if not text:
-        return 0
-    if _TOKENIZER is None:
-        return max(1, len(text) // 4)  # heuristic ~4 chars/token
-    try:
-        return len(_TOKENIZER.encode(text))
-    except Exception:
-        return max(1, len(text) // 4)
+    return _adapter_count_tokens(_TOKENIZER_ADAPTER, text)
 
 
 def _split_text_by_tokens(text: str, target_tokens: int, overlap_tokens: int) -> List[str]:
-    """Split a long text into token windows with overlap using tiktoken when possible."""
-    chunks: List[str] = []
-    if _TOKENIZER is not None:
-        try:
-            toks = _TOKENIZER.encode(text)
-            if not toks:
-                return []
-            start = 0
-            n = len(toks)
-            while start < n:
-                end = min(n, start + target_tokens)
-                piece = _TOKENIZER.decode(toks[start:end])
-                if piece.strip():
-                    chunks.append(piece)
-                if end >= n:
-                    break
-                start = end - max(0, overlap_tokens)
-            return chunks
-        except Exception:
-            pass
-    # Char-based fallback (heuristic ~4 chars/token)
-    token_to_char = 4
-    target_chars = target_tokens * token_to_char
-    overlap_chars = max(0, overlap_tokens) * token_to_char
-    start = 0
-    n = len(text)
-    while start < n:
-        end = min(n, start + target_chars)
-        piece = text[start:end]
-        if piece.strip():
-            chunks.append(piece)
-        if end >= n:
-            break
-        start = end - overlap_chars
-    return chunks
+    return [chunk for chunk in sliding_windows(_TOKENIZER_ADAPTER, text, target_tokens, overlap_tokens) if chunk.strip()]
 
 
 def chunk_text(
@@ -192,16 +150,24 @@ def chunk_text(
             chunks.append(buf)
             buf_tail = ""
             if overlap_tokens > 0:
-                if _TOKENIZER is not None:
-                    try:
-                        toks = _TOKENIZER.encode(buf)
-                        tail = toks[-overlap_tokens:] if len(toks) > overlap_tokens else toks
-                        buf_tail = _TOKENIZER.decode(tail)
-                    except Exception:
-                        buf_tail = buf[-max(1, overlap_tokens * 4) :]
+                toks = _TOKENIZER_ADAPTER.encode(buf)
+                body_overlap = max(0, overlap_tokens - _TOKENIZER_ADAPTER.extra_token_count)
+                if body_overlap > 0:
+                    tail_tokens = toks[-body_overlap:] if len(toks) > body_overlap else toks
+                    buf_tail = _TOKENIZER_ADAPTER.decode(tail_tokens)
+            new_buf = (buf_tail + "\n\n" + p) if buf_tail else p
+            # Ensure the new buffer does not exceed the target; if it does,
+            # proactively slice it into windows, finalize all but the last,
+            # and keep the last window in the buffer for further packing.
+            if count_tokens(new_buf) <= target_tokens:
+                buf = new_buf
+            else:
+                parts = _split_text_by_tokens(new_buf, target_tokens, overlap_tokens)
+                if parts:
+                    chunks.extend(part for part in parts[:-1] if part.strip())
+                    buf = parts[-1]
                 else:
-                    buf_tail = buf[-max(1, overlap_tokens * 4) :]
-            buf = (buf_tail + "\n\n" + p) if buf_tail else p
+                    buf = ""
         else:
             long_parts = _split_text_by_tokens(p, target_tokens, overlap_tokens)
             chunks.extend(long_parts)
@@ -327,19 +293,13 @@ def chunk_text_by_sections(
     text: str,
     target_tokens: Optional[int] = None,
     overlap_tokens: Optional[int] = None,
-    merge_up_to: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Chunk text by detected sections while keeping payload compatible with Qdrant.
+    """Split text into sections and produce raw, non-merged chunks.
 
-    Parameters
-    ----------
-    merge_up_to : Optional[str], default=None
-        If provided, specifies the lowest hierarchy level (one of the values from
-        ``SECTION_HIERARCHY``) at which consecutive chunks should be merged.
-        For example, ``merge_up_to="par"`` will merge chunks that belong to the
-        same attachment, regulamin, chapter, and paragraph, ignoring deeper levels
-        such as ust, pkt, lit, etc.  When ``None`` (default) the original
-        behaviour – merging only when the full section label matches – is kept.
+    This function detects section boundaries and then applies token-aware
+    packing within each section. It returns the smallest chunk units with a
+    `section` label, without any merging. Merging of full sections is performed
+    at search-time when shaping results for presentation.
     """
 
     if target_tokens is None or overlap_tokens is None:
@@ -378,14 +338,13 @@ def chunk_text_by_sections(
     if not section_spans:
         return _fallback()
 
-    # Build a list of chunk dicts, preserving the full hierarchy for each chunk
+    # Build a list of chunk dicts (raw, non-merged)
     out: List[Dict[str, Any]] = []
     for section_span in section_spans:
         body = section_span.text
         if not body or not body.strip():
             continue
         label = getattr(section_span._, "section_label", None) or "Dokument"
-        hierarchy = getattr(section_span._, "section_hierarchy", {}) or {}
         parts = chunk_text(body, target_tokens=target_tokens, overlap_tokens=overlap_tokens)
         for part in parts:
             if not part.strip():
@@ -394,72 +353,6 @@ def chunk_text_by_sections(
                 {
                     "text": part,
                     "section": label,
-                    "hierarchy": hierarchy,
                 }
             )
-
-    # Merge consecutive chunks according to the requested hierarchy level
-    merged: List[Dict[str, Any]] = []
-    level_idx: Optional[int] = None
-    if merge_up_to:
-        try:
-            level_idx = SECTION_HIERARCHY.index(merge_up_to)
-        except ValueError:
-            level_idx = None
-
-    if level_idx is not None:
-        grouped: Dict[tuple, Dict[str, Any]] = {}
-        order: List[tuple] = []
-
-        for item in out:
-            hierarchy = item.get("hierarchy", {})
-            cur_key = tuple(
-                hierarchy.get(level) for level in SECTION_HIERARCHY[: level_idx + 1]
-            )
-            if cur_key not in grouped:
-                order.append(cur_key)
-                trimmed_hierarchy = {
-                    level: hierarchy.get(level) if idx <= level_idx else None
-                    for idx, level in enumerate(SECTION_HIERARCHY)
-                }
-                grouped[cur_key] = {
-                    "section": _format_section_label(trimmed_hierarchy),
-                    "texts": [item["text"]],
-                }
-            else:
-                grouped[cur_key]["texts"].append(item["text"])
-
-        for key in order:
-            bucket = grouped[key]
-            label = bucket["section"]
-            partial: Optional[str] = None
-            for piece in bucket["texts"]:
-                normalized = piece if partial is None else partial.rstrip() + "\n\n" + piece.lstrip()
-                if partial is None:
-                    partial = piece
-                    continue
-                if count_tokens(normalized) <= target_tokens:
-                    partial = normalized
-                else:
-                    merged.append({"text": partial, "section": label})
-                    partial = piece
-            if partial:
-                merged.append({"text": partial, "section": label})
-    else:
-        prev_key: Optional[tuple] = None
-        for item in out:
-            cur_key = (item["section"],)
-            if merged and prev_key == cur_key:
-                merged[-1]["text"] = (
-                    merged[-1]["text"].rstrip() + "\n\n" + item["text"].lstrip()
-                )
-            else:
-                merged.append(
-                    {
-                        "text": item["text"],
-                        "section": item["section"],
-                    }
-                )
-            prev_key = cur_key
-
-    return merged or _fallback()
+    return out or _fallback()

@@ -20,6 +20,7 @@ from urllib import request as _urlreq
 from urllib import parse as _urlparse
 
 from qdrant_client import QdrantClient
+from openai import BadRequestError  # type: ignore
 from qdrant_client.http import models as qm
 from qdrant_client.http.exceptions import UnexpectedResponse
 
@@ -947,7 +948,36 @@ def build_and_upsert_points(
         else:
             summary_dense_vec = embed_passage([doc_summary])[0]
         content_texts = [c.get("text", c) if isinstance(c, dict) else str(c) for c in chunks]
-        content_vecs = embed_passage(content_texts)
+        try:
+            content_vecs = embed_passage(content_texts)
+        except BadRequestError as exc:
+            # Diagnostic: log which chunk candidates look suspicious
+            try:
+                stats = []
+                for i, t in enumerate(content_texts):
+                    s = str(t or "")
+                    stats.append((len(s), i, s[:120].replace("\n", " ")))
+                stats.sort(reverse=True)  # longest first
+                sample = [
+                    {"i": i, "char_len": ln, "head": head}
+                    for (ln, i, head) in stats[:10]
+                ]
+                logger.error(
+                    "Embedding content batch failed | doc_id=%s path=%s chunks=%d top_by_len=%s error=%s",
+                    doc_id,
+                    path,
+                    len(content_texts),
+                    json.dumps(sample, ensure_ascii=False),
+                    exc,
+                )
+            except Exception:
+                logger.error(
+                    "Embedding content batch failed | doc_id=%s path=%s error=%s",
+                    doc_id,
+                    path,
+                    exc,
+                )
+            raise
 
         if enable_sparse:
             sparse_chunks = tfidf_vector(content_texts, content_vec)

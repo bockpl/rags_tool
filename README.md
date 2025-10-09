@@ -2,6 +2,9 @@
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
+
+
+
 ## Nowości w 2.1.0
 - Debug krok‑po‑kroku (`/search/debug/*`) ma teraz pełną zgodność parametrów z `/search/query`:
   - przekazywane są `top_k`, `per_doc_limit`, `result_format`, `summary_mode`, `rep_alpha`, a także wszystkie wagi i tryby,
@@ -289,7 +292,9 @@ export QDRANT_TIMEOUT="60"
 export EMBEDDING_API_URL="http://127.0.0.1:8000/v1"
 export EMBEDDING_API_KEY="sk-embed-xxx"
 export EMBEDDING_MODEL="BAAI/bge-m3"
+export EMBEDDING_TOKENIZER="tiktoken:cl100k_base"   # lub hf:<model> dla tokenizerów Hugging Face
 export EMBEDDING_DIM="1024"          # stały wymiar wektora dla używanego modelu
+ 
 export SUMMARY_API_URL="http://127.0.0.1:8001/v1"
 export SUMMARY_API_KEY="sk-summary-xxx"
 export SUMMARY_MODEL="gpt-4o-mini"
@@ -319,7 +324,7 @@ Możesz także umieścić te wartości w pliku `.env`; aplikacja wczyta je autom
 1. Utwórz i aktywuj wirtualne środowisko.
 2. Zainstaluj zależności:
    ```bash
-   pip install fastapi uvicorn qdrant-client openai pydantic pydantic-settings python-multipart tiktoken scikit-learn markdown2 beautifulsoup4 html2text PyPDF2
+   pip install fastapi uvicorn qdrant-client openai pydantic pydantic-settings python-multipart tiktoken transformers scikit-learn markdown2 beautifulsoup4 html2text PyPDF2
    ```
 3. Start serwera:
    ```bash

@@ -20,8 +20,14 @@ class SummRAGSettings(BaseSettings):
     embedding_api_url: str = Field(default="http://127.0.0.1:8000/v1", alias="EMBEDDING_API_URL")
     embedding_api_key: str = Field(default="sk-no-key", alias="EMBEDDING_API_KEY")
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
+    # Tokenizer spec controlling chunking + local token limits
+    embedding_tokenizer: str = Field(
+        default="tiktoken:cl100k_base", alias="EMBEDDING_TOKENIZER"
+    )
     # Max tokens per single input to the embedding endpoint (safety cap)
     embedding_max_tokens: int = Field(default=512, alias="EMBEDDING_MAX_TOKENS")
+    # (Debugging note) embedding_max_tokens is a local safety cap only; the backend
+    # may use different tokenization.
     # Prefixes used by some retrieval models that expect instruction-style inputs
     # Defaults align with sdadas/mmlw-retrieval-roberta-large-v2
     embedding_query_prefix: str = Field(default="query: ", alias="EMBEDDING_QUERY_PREFIX")

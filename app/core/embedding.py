@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import logging
+import hashlib
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from openai import OpenAI
+from openai import BadRequestError  # type: ignore
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from app.core.tokenizer import (
+    TokenizerAdapter,
+    count_tokens as _adapter_count_tokens,
+    load_tokenizer,
+    truncate_to_tokens as _adapter_truncate,
+)
 from app.settings import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 VECTOR_STORE_DIR: Path = settings.vector_store_dir
 VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
@@ -23,13 +33,7 @@ SUMMARY_VECTORIZER_PATH = VECTOR_STORE_DIR / "tfidf_vectorizer_summary.json"
 # OpenAI-compatible embedding client
 embedding_client = OpenAI(base_url=settings.embedding_api_url, api_key=settings.embedding_api_key)
 
-try:  # optional tokenizer for precise truncation
-    import tiktoken  # type: ignore
-
-    _EMB_TOKENIZER = tiktoken.get_encoding("cl100k_base")
-except Exception:  # pragma: no cover
-    tiktoken = None  # type: ignore
-    _EMB_TOKENIZER = None  # type: ignore
+_TOKENIZER_ADAPTER: TokenizerAdapter = load_tokenizer(getattr(settings, "embedding_tokenizer", None))
 
 
 class IterableCorpus:
@@ -65,21 +69,34 @@ def _maybe_prefix(texts: List[str], prefix: str) -> List[str]:
     return out
 
 
-def embed_text(texts: List[str]) -> List[List[float]]:
-    """Legacy embedding helper (no prefixing). Prefer embed_query/embed_passage."""
-    return _embed_raw(texts)
-
-
 def embed_query(texts: List[str]) -> List[List[float]]:
-    """Embed query strings with a model-specific query prefix."""
-    limited = _limit_for_embedding(_maybe_prefix(texts, settings.embedding_query_prefix))
-    return _embed_raw(limited)
+    """Embed query strings with a model-specific query prefix.
+
+    Minimal path + diagnostics on error. No retries/truncation beyond a single
+    safety cap in _limit_for_embedding to surface the exact failing inputs.
+    """
+    prefixed = _maybe_prefix(texts, settings.embedding_query_prefix)
+    limited = _limit_for_embedding(prefixed)
+    try:
+        return _embed_raw(limited)
+    except BadRequestError as exc:
+        _log_embedding_error(prefixed, limited, purpose="query", exc=exc)
+        raise
 
 
 def embed_passage(texts: List[str]) -> List[List[float]]:
-    """Embed documents/passages with a model-specific passage prefix."""
-    limited = _limit_for_embedding(_maybe_prefix(texts, settings.embedding_passage_prefix))
-    return _embed_raw(limited)
+    """Embed documents/passages with a model-specific passage prefix.
+
+    Minimal path + diagnostics on error. No retries/truncation beyond a single
+    safety cap in _limit_for_embedding to surface the exact failing inputs.
+    """
+    prefixed = _maybe_prefix(texts, settings.embedding_passage_prefix)
+    limited = _limit_for_embedding(prefixed)
+    try:
+        return _embed_raw(limited)
+    except BadRequestError as exc:
+        _log_embedding_error(prefixed, limited, purpose="passage", exc=exc)
+        raise
 
 
 def get_embedding_dim() -> int:
@@ -88,36 +105,16 @@ def get_embedding_dim() -> int:
 
 
 def _count_tokens(text: str) -> int:
-    if not text:
-        return 0
-    if _EMB_TOKENIZER is None:
-        return max(1, len(text) // 4)
-    try:
-        return len(_EMB_TOKENIZER.encode(text))
-    except Exception:
-        return max(1, len(text) // 4)
+    return _adapter_count_tokens(_TOKENIZER_ADAPTER, text)
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
-    if max_tokens <= 0 or not text:
-        return ""
-    if _EMB_TOKENIZER is None:
-        # char-based heuristic (~4 chars/token)
-        max_chars = max_tokens * 4
-        return text[:max_chars]
-    try:
-        toks = _EMB_TOKENIZER.encode(text)
-        if len(toks) <= max_tokens:
-            return text
-        return _EMB_TOKENIZER.decode(toks[:max_tokens])
-    except Exception:
-        max_chars = max_tokens * 4
-        return text[:max_chars]
+    return _adapter_truncate(_TOKENIZER_ADAPTER, text, max_tokens)
 
 
 def _limit_for_embedding(texts: List[str]) -> List[str]:
     """Ensure each input respects EMBEDDING_MAX_TOKENS to avoid 400 errors."""
-    limit = int(getattr(settings, "embedding_max_tokens", 512) or 512)
+    limit = int(getattr(settings, "embedding_max_tokens"))
     safe_limit = max(1, limit)
     out: List[str] = []
     for t in texts:
@@ -125,6 +122,78 @@ def _limit_for_embedding(texts: List[str]) -> List[str]:
         if _count_tokens(ts) > safe_limit:
             ts = _truncate_to_tokens(ts, safe_limit)
         out.append(ts)
+    return out
+
+def _log_embedding_error(original: List[str], limited: List[str], *, purpose: str, exc: Exception) -> None:
+    """Log detailed diagnostics for a failed embeddings batch.
+
+    Includes per-item char lengths, token estimates, prefix presence, and a
+    short head/tail sample along with a stable sha1 digest to identify texts.
+    """
+    try:
+        max_tok = int(getattr(settings, "embedding_max_tokens"))
+    except Exception:
+        max_tok = 512
+    try:
+        chunk_tokens_setting = int(getattr(settings, "chunk_tokens"))
+    except Exception:
+        chunk_tokens_setting = None  # type: ignore[assignment]
+    try:
+        chunk_overlap_setting = int(getattr(settings, "chunk_overlap"))
+    except Exception:
+        chunk_overlap_setting = None  # type: ignore[assignment]
+    model = getattr(settings, "embedding_model", "unknown")
+    items: List[Dict[str, Any]] = []
+    # Select only suspicious (over-limit by local estimate); if none, show top 10 by tokens
+    estimates = [(_count_tokens(s or ""), i) for i, s in enumerate(original)]
+    over = [i for (tok, i) in estimates if tok > max_tok]
+    order = over if over else [i for (_, i) in sorted(estimates, key=lambda p: p[0], reverse=True)[:10]]
+    for i in order:
+        src = str(original[i] or "")
+        lim = str(limited[i] or "") if i < len(limited) else ""
+        items.append(
+            {
+                "i": i,
+                "sha1": hashlib.sha1(src.encode("utf-8", "ignore")).hexdigest(),
+                "char_len": len(src),
+                "token_est": _count_tokens(src),
+                "char_len_limited": len(lim),
+                "token_est_limited": _count_tokens(lim),
+                "head": src[:120].replace("\n", " "),
+                "tail": src[-120:].replace("\n", " ") if len(src) > 120 else "",
+            }
+        )
+    payload = {
+        "purpose": purpose,
+        "model": model,
+        "items": items,
+        "batch_size": len(original),
+        "max_tokens_setting": max_tok,
+        "chunk_tokens_setting": chunk_tokens_setting,
+        "chunk_overlap_setting": chunk_overlap_setting,
+    }
+    logger.error("Embedding request failed | details=%s | error=%s", json.dumps(payload, ensure_ascii=False), exc)
+
+
+def _embed_many(texts: List[str]) -> List[List[float]]:
+    """Embed list of texts with micro-batching and robust retries.
+
+    Uses settings.embedding_batch_size to avoid overwhelming the backend and
+    to bypass per-request engine limits. Each micro-batch benefits from the
+    same retry logic and fallbacks.
+    """
+    if not texts:
+        return []
+    try:
+        batch_size = int(getattr(settings, "embedding_batch_size", 32) or 32)
+    except Exception:
+        batch_size = 32
+    batch_size = max(1, min(256, batch_size))
+    out: List[List[float]] = []
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i : i + batch_size]
+        vecs = _embed_with_retry_batch(chunk)
+        out.extend(vecs)
     return out
 
 

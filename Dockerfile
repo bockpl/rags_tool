@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir \
     pydantic-settings \
     python-multipart \
     tiktoken \
+    transformers \
     scikit-learn \
     numpy \
     markdown2 \
