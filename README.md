@@ -1,8 +1,12 @@
-# rags_tool (2.5.3)
+# rags_tool (2.6.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
 
+
+## Nowości w 2.6.0
+- Scalanie bloków `result_format="blocks"` można teraz sprowadzić do wskazanego poziomu hierarchii (`SECTION_MERGE_LEVEL`, domyślnie `ust`). Wszystkie chunki z poziomu docelowego oraz jego potomków są łączone w jeden blok, co pozwala uzyskać pełne `ust.` wraz z `pkt`/`lit.` bez utraty kontekstu.
+- Ingest zapisuje przy każdym chunku metadane `section_levels` oraz `section_level`, dzięki czemu wyszukiwanie rekonstruuje sekcje szybciej i bez zgadywania struktury etykiet.
 
 
 ## Nowości w 2.1.0
@@ -384,6 +388,7 @@ Serwis korzysta z dwóch endpointów zgodnych z protokołem OpenAI:
   - `EMBEDDING_PASSAGE_PREFIX` (prefiks dla dokumentów/fragmentów; domyślnie `"passage: "`)
   - `CHUNK_TOKENS` (domyślny docelowy rozmiar chunku w tokenach)
   - `CHUNK_OVERLAP` (domyślny overlap chunków w tokenach)
+  - `SECTION_MERGE_LEVEL` (poziom sekcji używany przy scalaniu bloków; np. `ust`, `pkt`, `lit`)
   - Wymagania: endpoint `/v1/embeddings` przyjmuje `{"model": str, "input": List[str]}` i zwraca `{"data": [{"embedding": List[float]}, ...]}`.
 
 - Summary (Chat) API — do generowania streszczeń dokumentów

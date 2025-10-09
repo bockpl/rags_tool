@@ -1024,9 +1024,13 @@ def build_and_upsert_points(
             if isinstance(chunk_item, dict):
                 chunk_text_val = chunk_item.get("text", "")
                 section_label = chunk_item.get("section")
+                section_levels = chunk_item.get("section_levels")
+                section_level_name = chunk_item.get("section_level")
             else:
                 chunk_text_val = str(chunk_item)
                 section_label = None
+                section_levels = None
+                section_level_name = None
             pid = int(str(int(sha1(f"{doc_id}:{i}")[0:12], 16))[:12])
             payload: Dict[str, Any] = {
                 "doc_id": doc_id,
@@ -1038,6 +1042,12 @@ def build_and_upsert_points(
             }
             if section_label:
                 payload["section"] = section_label
+            if isinstance(section_levels, dict) and section_levels:
+                payload["section_levels"] = {
+                    str(k): str(v) for k, v in section_levels.items() if k and v
+                }
+            if isinstance(section_level_name, str) and section_level_name:
+                payload["section_level"] = section_level_name
 
             vectors: Dict[str, Any] = {
                 CONTENT_VECTOR_NAME: content_vecs[i],

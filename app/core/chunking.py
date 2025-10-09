@@ -349,10 +349,23 @@ def chunk_text_by_sections(
         for part in parts:
             if not part.strip():
                 continue
+            hierarchy = dict(getattr(section_span._, "section_hierarchy", None) or {})
+            formatted_levels: Dict[str, str] = {}
+            for lvl in SECTION_HIERARCHY:
+                formatted = _format_level(lvl, hierarchy.get(lvl))
+                if formatted:
+                    formatted_levels[lvl] = formatted
+            lowest_level = None
+            for lvl in reversed(SECTION_HIERARCHY):
+                if formatted_levels.get(lvl):
+                    lowest_level = lvl
+                    break
             out.append(
                 {
                     "text": part,
                     "section": label,
+                    "section_levels": formatted_levels,
+                    "section_level": lowest_level,
                 }
             )
     return out or _fallback()

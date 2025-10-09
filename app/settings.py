@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.5.3"
+    app_version: str = "2.6.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -83,6 +83,7 @@ class SummRAGSettings(BaseSettings):
     # Chunking defaults (token-based). Tune per embedding model.
     chunk_tokens: int = Field(default=400, alias="CHUNK_TOKENS")
     chunk_overlap: int = Field(default=64, alias="CHUNK_OVERLAP")
+    section_merge_level: str = Field(default="ust", alias="SECTION_MERGE_LEVEL")
 
     # OpenAPI / tool description used by the /search/query endpoint. Can be overridden
     # via .env to tailor the wording for a specific corpus (e.g., PŁ documents).

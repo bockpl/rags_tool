@@ -20,6 +20,7 @@ from app.core.constants import (
     SUMMARY_SPARSE_NAME,
     SUMMARY_VECTOR_NAME,
 )
+from app.core.chunking import SECTION_HIERARCHY
 from app.qdrant_utils import qdrant
 from app.settings import get_settings
 from app.core.ranker_client import OpenAIReranker
@@ -33,6 +34,43 @@ settings = get_settings()
 DEFAULT_MMR_LAMBDA = 0.3
 DEFAULT_PER_DOC_LIMIT = 2
 DEFAULT_SCORE_NORM = "minmax"  # minmax|zscore|none
+
+SECTION_LEVEL_INDEX: Dict[str, int] = {level: idx for idx, level in enumerate(SECTION_HIERARCHY)}
+
+
+def _normalize_whitespace(text: Optional[str]) -> str:
+    if not isinstance(text, str):
+        return ""
+    return " ".join(text.strip().split())
+
+
+def _canonical_section_label(
+    section_label: Optional[str],
+    section_levels: Optional[Dict[str, Any]],
+    merge_level: str,
+) -> Optional[str]:
+    if merge_level not in SECTION_LEVEL_INDEX:
+        merge_level = "ust"
+    normalized_merge = merge_level
+
+    if isinstance(section_levels, dict) and section_levels:
+        collected: List[str] = []
+        reached_level = False
+        for level in SECTION_HIERARCHY:
+            val = section_levels.get(level)
+            if val:
+                collected.append(str(val).strip())
+                if level == normalized_merge:
+                    reached_level = True
+                    break
+        if collected:
+            joined = _normalize_whitespace(" ".join(collected))
+            return joined or None
+
+    if isinstance(section_label, str) and section_label.strip():
+        normalized = _normalize_whitespace(section_label)
+        return normalized or None
+    return None
 
 
 def _ranker_enabled() -> bool:
@@ -521,19 +559,15 @@ def mmr_diversify_hybrid(
     return selected
 
 
-def _fetch_section_chunks(doc_id: str, section: Optional[str]) -> List[Dict[str, Any]]:
-    """Pobierz wszystkie chunki danej sekcji dokumentu (posortowane po chunk_id).
-
-    Jeśli `section` jest puste/None, zwraca pustą listę (brak bezpiecznego filtra po NULL w Qdrant).
-    """
-    if not doc_id or not section:
+def _fetch_doc_chunks(doc_id: str) -> List[Dict[str, Any]]:
+    """Pobierz wszystkie chunki dokumentu."""
+    if not doc_id:
         return []
     try:
         flt = qm.Filter(
             must=[
                 qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=doc_id)),
                 qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
-                qm.FieldCondition(key="section", match=qm.MatchValue(value=section)),
             ]
         )
         out: List[Dict[str, Any]] = []
@@ -563,12 +597,55 @@ def _fetch_section_chunks(doc_id: str, section: Optional[str]) -> List[Dict[str,
                 out.append(payload)
             if offset is None:
                 break
-        # Posortuj po chunk_id rosnąco
         out.sort(key=lambda p: int(p.get("chunk_id", 0)))
         return out
     except Exception:
-        # Best-effort — na błąd zwróć pustą listę, aby nie blokować odpowiedzi
         return []
+
+
+def _fetch_section_chunks(
+    doc_id: str,
+    section: Optional[str],
+    *,
+    include_descendants: bool = False,
+    chunk_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    merge_level: str = "ust",
+) -> List[Dict[str, Any]]:
+    """Pobierz chunki sekcji; opcjonalnie z sekcjami potomnymi."""
+    if not doc_id or not section:
+        return []
+
+    if chunk_cache is not None:
+        doc_chunks = chunk_cache.get(doc_id)
+        if doc_chunks is None:
+            doc_chunks = _fetch_doc_chunks(doc_id)
+            chunk_cache[doc_id] = doc_chunks
+    else:
+        doc_chunks = _fetch_doc_chunks(doc_id)
+
+    if not doc_chunks:
+        return []
+
+    section_norm = _normalize_whitespace(section)
+    if not section_norm:
+        return []
+
+    matched: List[Dict[str, Any]] = []
+    for chunk in doc_chunks:
+        raw_label = chunk.get("section")
+        raw_norm = _normalize_whitespace(raw_label)
+        raw_levels = chunk.get("section_levels")
+        chunk_levels = raw_levels if isinstance(raw_levels, dict) else None
+        canonical = _canonical_section_label(raw_label, chunk_levels, merge_level)
+        canonical_norm = canonical or raw_norm
+        if not canonical_norm:
+            continue
+        if canonical_norm == section_norm:
+            matched.append(chunk)
+            continue
+        if include_descendants and raw_norm and raw_norm.startswith(section_norm):
+            matched.append(chunk)
+    return matched
 
 
 def _build_blocks_from_hits(
@@ -578,22 +655,34 @@ def _build_blocks_from_hits(
     """Zbuduj bloki po pełnych sekcjach.
 
     - Grupuje trafienia po (doc_id, section).
-    - Dla sekcji z nazwą dociąga pełną zawartość sekcji z Qdrant i skleja tekst.
+    - Dla sekcji z nazwą dociąga pełną zawartość sekcji oraz podsekcji z Qdrant i skleja tekst.
     - Dla sekcji bez nazwy (None) pozostaje przy treści trafionych chunków.
     - Score bloku = max(score) spośród trafień należących do tej sekcji.
     - summary_mode: kontrola duplikacji streszczenia per dokument.
     """
+    merge_level_raw = getattr(settings, "section_merge_level", "ust")
+    merge_level = str(merge_level_raw).strip().lower() if merge_level_raw else "ust"
+    if merge_level not in SECTION_LEVEL_INDEX:
+        merge_level = "ust"
+
     by_key: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
     for fh in final_hits:
         payload = fh.get("payload") or {}
         did = payload.get("doc_id")
         if not did:
             continue
-        key = (str(did), payload.get("section"))
+        section_label = payload.get("section")
+        raw_levels = payload.get("section_levels")
+        section_levels = raw_levels if isinstance(raw_levels, dict) else None
+        canonical = _canonical_section_label(section_label, section_levels, merge_level)
+        fallback = _normalize_whitespace(section_label)
+        group_label = canonical or (fallback if fallback else None)
+        key = (str(did), group_label)
         by_key.setdefault(key, []).append(fh)
 
     blocks: List[Dict[str, Any]] = []
     seen_docs: set = set()
+    doc_chunk_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     for (did, section), hits in by_key.items():
         # Bazowy payload do metadanych
@@ -607,7 +696,26 @@ def _build_blocks_from_hits(
         first_cid: Optional[int] = None
         last_cid: Optional[int] = None
 
-        sec_chunks = _fetch_section_chunks(did, section)
+        base_levels_raw = base_payload.get("section_levels")
+        section_levels_map = base_levels_raw if isinstance(base_levels_raw, dict) else None
+        base_section_label = base_payload.get("section")
+        canonical_label = _canonical_section_label(base_section_label, section_levels_map, merge_level)
+        fallback_label = section if isinstance(section, str) else None
+        if fallback_label:
+            fallback_label = _normalize_whitespace(fallback_label) or None
+        normalized_label = canonical_label or fallback_label
+        include_descendants = bool(normalized_label and str(normalized_label).strip())
+        sec_chunks = (
+            _fetch_section_chunks(
+                did,
+                normalized_label,
+                include_descendants=include_descendants,
+                chunk_cache=doc_chunk_cache,
+                merge_level=merge_level,
+            )
+            if normalized_label
+            else []
+        )
         if sec_chunks:
             for ch in sec_chunks:
                 text = (ch.get("text") or "").strip()
@@ -647,7 +755,7 @@ def _build_blocks_from_hits(
             {
                 "doc_id": did,
                 "path": path,
-                "section": section,
+                "section": normalized_label,
                 "first_chunk_id": int(first_cid if first_cid is not None else (base_payload.get("chunk_id", 0))),
                 "last_chunk_id": int(last_cid if last_cid is not None else (base_payload.get("chunk_id", 0))),
                 "score": float(sect_score),
