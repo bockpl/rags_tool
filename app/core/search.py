@@ -45,31 +45,52 @@ def _normalize_whitespace(text: Optional[str]) -> str:
 
 
 def _canonical_section_label(
-    section_label: Optional[str],
-    section_levels: Optional[Dict[str, Any]],
+    section_path: Optional[str],
     merge_level: str,
 ) -> Optional[str]:
     if merge_level not in SECTION_LEVEL_INDEX:
         merge_level = "ust"
     normalized_merge = merge_level
 
-    if isinstance(section_levels, dict) and section_levels:
+    if isinstance(section_path, str) and section_path.strip():
+        # Heurystyczne cięcie po poziomie merge_level bez metadanych poziomów
+        path_segments = [seg.strip() for seg in section_path.split(">") if seg.strip()]
+        if not path_segments:
+            return None
+        def is_level(seg: str, lvl: str) -> bool:
+            s = seg.strip().lower()
+            if lvl == "par":
+                return s.startswith("§ ")
+            if lvl == "ust":
+                return s.startswith("ust.")
+            if lvl == "pkt":
+                return s.startswith("pkt ")
+            if lvl == "lit":
+                return s.startswith("lit.")
+            if lvl == "chapter":
+                return s.startswith("rozdział ")
+            if lvl == "attachment":
+                return s.startswith("załącznik")
+            if lvl == "regulamin":
+                return s == "regulamin"
+            return False
         collected: List[str] = []
-        reached_level = False
-        for level in SECTION_HIERARCHY:
-            val = section_levels.get(level)
-            if val:
-                collected.append(str(val).strip())
-                if level == normalized_merge:
-                    reached_level = True
-                    break
-        if collected:
-            joined = _normalize_whitespace(" ".join(collected))
-            return joined or None
+        cut_done = False
+        for seg in path_segments:
+            collected.append(_normalize_whitespace(seg))
+            if is_level(seg, normalized_merge):
+                cut_done = True
+                break
+        if not cut_done:
+            # Nie znaleziono segmentu odpowiadającego merge_level – użyj całej ścieżki
+            collected = [_normalize_whitespace(seg) for seg in path_segments]
+        joined = _normalize_whitespace(" > ".join(collected))
+        return joined or None
 
-    if isinstance(section_label, str) and section_label.strip():
-        normalized = _normalize_whitespace(section_label)
-        return normalized or None
+    if isinstance(section_path, str) and section_path.strip():
+        normalized = _normalize_whitespace(section_path)
+        if normalized:
+            return normalized
     return None
 
 
@@ -249,67 +270,149 @@ def _stage1_select_documents(
     summary_sparse_query: Optional[Tuple[List[int], List[float]]],
     req: Any,
 ) -> Tuple[List[str], Dict[str, Any]]:
+    dual = bool(settings.search_dual_query_sparse and req.use_hybrid and SPARSE_ENABLED)
     point_type_filter = _with_must_condition(
         flt, qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary"))
     )
-    sum_search = qdrant.search(
-        collection_name=settings.qdrant_summary_collection,
-        query_vector=(SUMMARY_VECTOR_NAME, q_vec),
-        query_filter=point_type_filter,
-        limit=max(50, req.top_m),
-        with_payload=True,
-        with_vectors=[SUMMARY_VECTOR_NAME] if req.mmr_stage1 else False,
-        score_threshold=None,
-        search_params=qm.SearchParams(exact=False, hnsw_ef=128),
-    )
-    summary_sparse_lookup: Dict[int, float] = {}
-    if summary_sparse_query is not None:
-        summary_sparse_lookup = dict(zip(summary_sparse_query[0], summary_sparse_query[1]))
+    if not dual:
+        include_fields = [
+            "doc_id",
+            "path",
+            "summary",
+            "signature",
+        ]
+        if summary_sparse_query is not None and SPARSE_ENABLED:
+            include_fields.extend(["summary_sparse_indices", "summary_sparse_values"])
+        sum_search = qdrant.search(
+            collection_name=settings.qdrant_summary_collection,
+            query_vector=(SUMMARY_VECTOR_NAME, q_vec),
+            query_filter=point_type_filter,
+            limit=max(50, req.top_m),
+            with_payload=include_fields if settings.search_minimal_payload else True,
+            with_vectors=[SUMMARY_VECTOR_NAME] if req.mmr_stage1 else False,
+            score_threshold=None,
+            search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+        )
+        summary_sparse_lookup: Dict[int, float] = {}
+        if summary_sparse_query is not None:
+            summary_sparse_lookup = dict(zip(summary_sparse_query[0], summary_sparse_query[1]))
 
-    doc_map: Dict[str, Dict[str, Any]] = {}
-    for r in sum_search:
-        payload = r.payload or {}
-        if payload.get("point_type") and payload.get("point_type") != "summary":
-            continue
-        did = payload.get("doc_id")
-        if not did or did in doc_map:
-            continue
-        dense_score = float(r.score or 0.0)
-        sparse_dot = 0.0
-        if summary_sparse_lookup and payload.get("summary_sparse_indices") and payload.get("summary_sparse_values"):
-            sparse_dot = _sparse_dot(summary_sparse_lookup, payload.get("summary_sparse_indices", []), payload.get("summary_sparse_values", []))
-        vec_map = r.vector or {}
-        dense_vec = vec_map.get(SUMMARY_VECTOR_NAME) or []
-        doc_map[did] = {
-            "doc_id": did,
-            "dense_vec": dense_vec,
-            "sparse_idx": payload.get("summary_sparse_indices", []) or [],
-            "sparse_val": payload.get("summary_sparse_values", []) or [],
-            "dense_score": dense_score,
-            "sparse_score": sparse_dot,
-            "path": payload.get("path"),
-            "doc_summary": payload.get("summary"),
-            "doc_signature": payload.get("signature"),
-        }
+        doc_map: Dict[str, Dict[str, Any]] = {}
+        for r in sum_search:
+            payload = r.payload or {}
+            if payload.get("point_type") and payload.get("point_type") != "summary":
+                continue
+            did = payload.get("doc_id")
+            if not did or did in doc_map:
+                continue
+            dense_score = float(r.score or 0.0)
+            sparse_dot = 0.0
+            if summary_sparse_lookup and payload.get("summary_sparse_indices") and payload.get("summary_sparse_values"):
+                sparse_dot = _sparse_dot(summary_sparse_lookup, payload.get("summary_sparse_indices", []), payload.get("summary_sparse_values", []))
+            vec_map = r.vector or {}
+            dense_vec = vec_map.get(SUMMARY_VECTOR_NAME) or []
+            doc_map[did] = {
+                "doc_id": did,
+                "dense_vec": dense_vec,
+                "sparse_idx": payload.get("summary_sparse_indices", []) or [],
+                "sparse_val": payload.get("summary_sparse_values", []) or [],
+                "dense_score": dense_score,
+                "sparse_score": sparse_dot,
+                "path": payload.get("path"),
+                "doc_summary": payload.get("summary"),
+                "doc_signature": payload.get("signature"),
+            }
 
-    if not doc_map:
-        return [], {}
+        if not doc_map:
+            return [], {}
 
-    doc_items = list(doc_map.values())
-    dense_scores = [float(x["dense_score"]) for x in doc_items]
-    sparse_scores = [float(x["sparse_score"]) for x in doc_items]
-    dense_norm = _normalize(dense_scores, req.score_norm)
-    sparse_norm = _normalize(sparse_scores, req.score_norm)
-    hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
+        doc_items = list(doc_map.values())
+        dense_scores = [float(x["dense_score"]) for x in doc_items]
+        sparse_scores = [float(x["sparse_score"]) for x in doc_items]
+        dense_norm = _normalize(dense_scores, req.score_norm)
+        sparse_norm = _normalize(sparse_scores, req.score_norm)
+        hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
+    else:
+        # Dual-query: dense + sparse, then fuse (no TF-IDF payload needed)
+        include_fields = ["doc_id", "path", "summary", "signature"]
+        with_payload_dense = include_fields if settings.search_minimal_payload else True
+        dense_hits = qdrant.search(
+            collection_name=settings.qdrant_summary_collection,
+            query_vector=(SUMMARY_VECTOR_NAME, q_vec),
+            query_filter=point_type_filter,
+            limit=max(50, req.top_m),
+            with_payload=with_payload_dense,
+            with_vectors=[SUMMARY_VECTOR_NAME] if req.mmr_stage1 else False,
+            score_threshold=None,
+            search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+        )
+        sparse_hits = []
+        if summary_sparse_query is not None and summary_sparse_query[0]:
+            try:
+                s_idx, s_val = summary_sparse_query
+                with_payload_sparse = (["doc_id", "path"] if settings.search_minimal_payload else True)
+                sparse_hits = qdrant.search(
+                    collection_name=settings.qdrant_summary_collection,
+                    query_vector=(SUMMARY_SPARSE_NAME, qm.SparseVector(indices=s_idx, values=s_val)),
+                    query_filter=point_type_filter,
+                    limit=max(50, req.top_m),
+                    with_payload=with_payload_sparse,
+                    with_vectors=False,
+                    score_threshold=None,
+                    search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+                )
+            except Exception:
+                sparse_hits = []
+        doc_map = {}
+        dense_scores_map: Dict[str, float] = {}
+        sparse_scores_map: Dict[str, float] = {}
+        for r in dense_hits:
+            p = r.payload or {}
+            did = p.get("doc_id")
+            if not did:
+                continue
+            dense_scores_map[did] = float(r.score or 0.0)
+            vec = (r.vector or {}).get(SUMMARY_VECTOR_NAME) or []
+            doc_map[did] = {
+                "doc_id": did,
+                "dense_vec": vec,
+                "path": p.get("path"),
+                "doc_summary": p.get("summary"),
+                "doc_signature": p.get("signature"),
+            }
+        for r in sparse_hits:
+            p = r.payload or {}
+            did = p.get("doc_id")
+            if not did:
+                continue
+            sparse_scores_map[did] = float(r.score or 0.0)
+            if did not in doc_map:
+                doc_map[did] = {
+                    "doc_id": did,
+                    "dense_vec": [],
+                    "path": p.get("path"),
+                    "doc_summary": None,
+                    "doc_signature": None,
+                }
+        if not doc_map:
+            return [], {}
+        doc_ids = list(doc_map.keys())
+        dense_vals = [dense_scores_map.get(d, 0.0) for d in doc_ids]
+        sparse_vals = [sparse_scores_map.get(d, 0.0) for d in doc_ids]
+        dense_norm = _normalize(dense_vals, req.score_norm)
+        sparse_norm = _normalize(sparse_vals, req.score_norm)
+        hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
 
-    if req.mmr_stage1 and len(doc_items) > 1:
+    if req.mmr_stage1 and (len(doc_map) > 1):
         rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
-        dense_vecs = [x["dense_vec"] for x in doc_items]
-        sparse_vecs = [(x["sparse_idx"], x["sparse_val"]) for x in doc_items]
-        mmr_idx = mmr_diversify_hybrid(dense_vecs, sparse_vecs, hybrid_rel, min(req.top_m, len(doc_items)), req.mmr_lambda, rep_alpha)
+        ids = list(doc_map.keys())
+        dense_vecs = [doc_map[d]["dense_vec"] for d in ids]
+        sparse_vecs = [([], []) for _ in ids]
+        mmr_idx = mmr_diversify_hybrid(dense_vecs, sparse_vecs, hybrid_rel, min(req.top_m, len(ids)), req.mmr_lambda, rep_alpha)
         order_idx = mmr_idx
     else:
-        order_idx = sorted(range(len(doc_items)), key=lambda i: hybrid_rel[i], reverse=True)
+        ids = list(doc_map.keys())
+        order_idx = sorted(range(len(ids)), key=lambda i: hybrid_rel[i], reverse=True)
 
     # Etap 1: opcjonalny rerank streszczeń (tylko jeśli ranker skonfigurowany i flaga włączona)
     if _ranker_enabled() and RANKER_USE_STAGE1 and order_idx:
@@ -317,8 +420,10 @@ def _stage1_select_documents(
             # Zbuduj krótkie passage na podstawie streszczenia (ew. podpisu)
             passages = []
             for i in order_idx:
-                s = str(doc_items[i].get("doc_summary") or "")
-                sig = doc_items[i].get("doc_signature") or []
+                did = list(doc_map.keys())[i]
+                item = doc_map.get(did, {})
+                s = str(item.get("doc_summary") or "")
+                sig = item.get("doc_signature") or []
                 if isinstance(sig, list):
                     s = (s + "\n\n" + ", ".join(map(str, sig))) if s else ", ".join(map(str, sig))
                 passages.append(_truncate_head_tail(s, settings.ranker_max_length))
@@ -328,15 +433,15 @@ def _stage1_select_documents(
             # scored to (local_pos, score); przemapuj na globalne indeksy
             scored_global = [(order_idx[pos], sc) for (pos, sc) in scored]
             scored_global.sort(key=lambda x: float(x[1]), reverse=True)
-            scored_ids = [doc_items[i]["doc_id"] for (i, _) in scored_global]
-            not_scored_ids = [doc_items[i]["doc_id"] for i in order_idx if i not in {idx for (idx, _) in scored_global}]
+            scored_ids = [list(doc_map.keys())[i] for (i, _) in scored_global]
+            not_scored_ids = [list(doc_map.keys())[i] for i in order_idx if i not in {idx for (idx, _) in scored_global}]
             cand_doc_ids = scored_ids + not_scored_ids
             cand_doc_ids = cand_doc_ids[: min(req.top_m, len(cand_doc_ids))]
         except Exception:
             # W przypadku błędu rankera, fallback do bazowego porządku
-            cand_doc_ids = [doc_items[i]["doc_id"] for i in order_idx[: min(req.top_m, len(order_idx))]]
+            cand_doc_ids = [list(doc_map.keys())[i] for i in order_idx[: min(req.top_m, len(order_idx))]]
     else:
-        cand_doc_ids = [doc_items[i]["doc_id"] for i in order_idx[: min(req.top_m, len(order_idx))]]
+        cand_doc_ids = [list(doc_map.keys())[i] for i in order_idx[: min(req.top_m, len(order_idx))]]
 
     return cand_doc_ids, doc_map
 
@@ -363,39 +468,73 @@ def _stage2_select_chunks(
         should=(flt.should if flt and getattr(flt, "should", None) else None),
         must_not=(flt.must_not if flt and getattr(flt, "must_not", None) else None),
     )
-    cont_search = qdrant.search(
+    include_fields2 = ["doc_id", "chunk_id", "path", "section_path"]
+    dense_hits = qdrant.search(
         collection_name=settings.qdrant_content_collection,
         query_vector=(CONTENT_VECTOR_NAME, q_vec),
         query_filter=flt2,
         limit=req.top_m,
-        with_payload=True,
+        with_payload=(include_fields2 if settings.search_minimal_payload else True),
         with_vectors=[CONTENT_VECTOR_NAME],
         search_params=qm.SearchParams(exact=False, hnsw_ef=128),
     )
+
+    dual = bool(settings.search_dual_query_sparse and req.use_hybrid and SPARSE_ENABLED)
+    sparse_hits = []
+    if dual and content_sparse_query is not None and content_sparse_query[0]:
+        try:
+            c_idx, c_val = content_sparse_query
+            sparse_hits = qdrant.search(
+                collection_name=settings.qdrant_content_collection,
+                query_vector=(CONTENT_SPARSE_NAME, qm.SparseVector(indices=c_idx, values=c_val)),
+                query_filter=flt2,
+                limit=req.top_m,
+                with_payload=(include_fields2 if settings.search_minimal_payload else True),
+                with_vectors=False,
+                search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+            )
+        except Exception:
+            sparse_hits = []
+
+    # Build union pool with fused scores
+    pool_map: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    for hit in dense_hits:
+        p = hit.payload or {}
+        did = p.get("doc_id") or ""
+        cid = p.get("chunk_id")
+        if did and cid is not None:
+            key = (did, int(cid))
+            pool_map.setdefault(key, {"dense": 0.0, "sparse": 0.0, "hit": hit, "payload": p})
+            pool_map[key]["dense"] = float(hit.score or 0.0)
+    for hit in (sparse_hits or []):
+        p = hit.payload or {}
+        did = p.get("doc_id") or ""
+        cid = p.get("chunk_id")
+        if did and cid is not None:
+            key = (did, int(cid))
+            ent = pool_map.setdefault(key, {"dense": 0.0, "sparse": 0.0, "hit": hit, "payload": p})
+            ent["sparse"] = float(hit.score or 0.0)
+
     mmr_pool: List[Dict[str, Any]] = []
-    for hit in cont_search:
-        payload = hit.payload or {}
-        if payload.get("point_type") and payload.get("point_type") != "chunk":
-            continue
-        dense_score = float(hit.score or 0.0)
-        sparse_dot = 0.0
-        if content_sparse_query is not None and payload.get("content_sparse_indices") and payload.get("content_sparse_values"):
-            q_lookup = dict(zip(content_sparse_query[0], content_sparse_query[1]))
-            sparse_dot = _sparse_dot(q_lookup, payload.get("content_sparse_indices", []), payload.get("content_sparse_values", []))
-        doc_info = doc_map.get(payload.get("doc_id", ""), {})
-        if doc_info:
-            payload.setdefault("summary", doc_info.get("doc_summary"))
-            if doc_info.get("doc_signature") is not None:
-                payload.setdefault("signature", doc_info.get("doc_signature"))
-        mmr_pool.append({
-            "hit": hit,
-            "doc_id": payload.get("doc_id", ""),
-            "dense_vec": (hit.vector or {}).get(CONTENT_VECTOR_NAME) or [],
-            "sparse_idx": payload.get("content_sparse_indices", []) or [],
-            "sparse_val": payload.get("content_sparse_values", []) or [],
-            "dense_score": dense_score,
-            "sparse_score": sparse_dot,
-        })
+    for key, ent in pool_map.items():
+        hit = ent.get("hit")
+        p = ent.get("payload") or {}
+        # Enrich with doc summaries
+        info = doc_map.get(p.get("doc_id", ""), {})
+        if info:
+            p.setdefault("summary", info.get("doc_summary"))
+            if info.get("doc_signature") is not None:
+                p.setdefault("signature", info.get("doc_signature"))
+        mmr_pool.append(
+            {
+                "hit": hit,
+                "doc_id": p.get("doc_id", ""),
+                "dense_vec": (hit.vector or {}).get(CONTENT_VECTOR_NAME) if hit else [] or [],
+                "dense_score": float(ent.get("dense", 0.0)),
+                "sparse_score": float(ent.get("sparse", 0.0)),
+                "payload": p,
+            }
+        )
 
     if not mmr_pool:
         return [], [], []
@@ -411,7 +550,8 @@ def _stage2_select_chunks(
 
     rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
     dense_vecs2 = [x["dense_vec"] for x in mmr_pool]
-    sparse_vecs2 = [(x["sparse_idx"], x["sparse_val"]) for x in mmr_pool]
+    # In dual-query path nie używamy sparse wektorów w MMR
+    sparse_vecs2 = [([], []) for _ in mmr_pool]
     doc_ids2 = [x["doc_id"] for x in mmr_pool]
 
     sel_idx = mmr_diversify_hybrid(
@@ -608,44 +748,140 @@ def _fetch_section_chunks(
     section: Optional[str],
     *,
     include_descendants: bool = False,
-    chunk_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    chunk_cache: Optional[Dict[Tuple[str, str], List[Dict[str, Any]]]] = None,
     merge_level: str = "ust",
 ) -> List[Dict[str, Any]]:
     """Pobierz chunki sekcji; opcjonalnie z sekcjami potomnymi."""
     if not doc_id or not section:
         return []
 
-    if chunk_cache is not None:
-        doc_chunks = chunk_cache.get(doc_id)
-        if doc_chunks is None:
-            doc_chunks = _fetch_doc_chunks(doc_id)
-            chunk_cache[doc_id] = doc_chunks
-    else:
-        doc_chunks = _fetch_doc_chunks(doc_id)
-
-    if not doc_chunks:
-        return []
-
     section_norm = _normalize_whitespace(section)
     if not section_norm:
         return []
 
-    matched: List[Dict[str, Any]] = []
-    for chunk in doc_chunks:
-        raw_label = chunk.get("section")
-        raw_norm = _normalize_whitespace(raw_label)
-        raw_levels = chunk.get("section_levels")
-        chunk_levels = raw_levels if isinstance(raw_levels, dict) else None
-        canonical = _canonical_section_label(raw_label, chunk_levels, merge_level)
-        canonical_norm = canonical or raw_norm
-        if not canonical_norm:
-            continue
-        if canonical_norm == section_norm:
-            matched.append(chunk)
-            continue
-        if include_descendants and raw_norm and raw_norm.startswith(section_norm):
-            matched.append(chunk)
-    return matched
+    cache_key: Optional[Tuple[str, str]] = None
+    if chunk_cache is not None:
+        cache_key = (doc_id, section_norm)
+        cached = chunk_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    must: List[qm.Condition] = [
+        qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=doc_id)),
+        qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
+    ]
+    if include_descendants:
+        # Każdy chunk przechowuje ścieżkę wraz z prefiksami, więc wystarczy dopasować sekcję.
+        must.append(
+            qm.FieldCondition(
+                key="section_path_prefixes",
+                match=qm.MatchValue(value=section_norm),
+            )
+        )
+    else:
+        must.append(
+            qm.FieldCondition(
+                key="section_path",
+                match=qm.MatchValue(value=section_norm),
+            )
+        )
+
+    flt = qm.Filter(must=must)
+    out: List[Dict[str, Any]] = []
+    offset = None
+    try:
+        while True:
+            res = qdrant.scroll(
+                collection_name=settings.qdrant_content_collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=["text", "chunk_id"],
+                with_vectors=False,
+            )
+            if isinstance(res, tuple):
+                records, offset = res
+            else:
+                records = getattr(res, "points", None)
+                offset = getattr(res, "next_page_offset", None)
+                if records is None:
+                    records = []
+            if not records:
+                break
+            for rec in records:
+                payload = rec.payload or {}
+                if payload.get("point_type") and payload.get("point_type") != "chunk":
+                    continue
+                out.append(payload)
+            if offset is None:
+                break
+    except Exception:
+        return []
+
+    out.sort(key=lambda p: int(p.get("chunk_id", 0)))
+    if chunk_cache is not None and cache_key is not None:
+        chunk_cache[cache_key] = out
+    return out
+
+
+def _fetch_sections_chunks_batch(
+    doc_id: str,
+    sections: List[str],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Pobierz chunki dla wielu sekcji jednego dokumentu jednym scrollem.
+
+    Zwraca mapę: normalized_section -> lista payloadów chunków (posortowana po chunk_id).
+    Sekcje obejmują również podsekcje (prefiksy).
+    """
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    if not doc_id or not sections:
+        return result
+    labels = [s for s in {(_normalize_whitespace(s) or "") for s in sections} if s]
+    if not labels:
+        return result
+    must = [
+        qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=doc_id)),
+        qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
+        qm.FieldCondition(key="section_path_prefixes", match=qm.MatchAny(any=labels)),
+    ]
+    flt = qm.Filter(must=must)
+    offset = None
+    try:
+        while True:
+            res = qdrant.scroll(
+                collection_name=settings.qdrant_content_collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=["text", "chunk_id", "section_path_prefixes"],
+                with_vectors=False,
+            )
+            if isinstance(res, tuple):
+                records, offset = res
+            else:
+                records = getattr(res, "points", None)
+                offset = getattr(res, "next_page_offset", None)
+                if records is None:
+                    records = []
+            if not records:
+                break
+            for rec in records:
+                payload = rec.payload or {}
+                prefixes = payload.get("section_path_prefixes") or []
+                if not isinstance(prefixes, list):
+                    continue
+                # Przydziel chunk do wszystkich sekcji, których jest prefiksem
+                for lab in labels:
+                    if lab in prefixes:
+                        result.setdefault(lab, []).append(payload)
+            if offset is None:
+                break
+    except Exception:
+        return result
+    # Posortuj listy
+    for lab, lst in result.items():
+        lst.sort(key=lambda p: int(p.get("chunk_id", 0)))
+    return result
 
 
 def _build_blocks_from_hits(
@@ -671,18 +907,27 @@ def _build_blocks_from_hits(
         did = payload.get("doc_id")
         if not did:
             continue
-        section_label = payload.get("section")
-        raw_levels = payload.get("section_levels")
-        section_levels = raw_levels if isinstance(raw_levels, dict) else None
-        canonical = _canonical_section_label(section_label, section_levels, merge_level)
-        fallback = _normalize_whitespace(section_label)
+        section_path = payload.get("section_path")
+        canonical = _canonical_section_label(section_path, merge_level)
+        fallback = _normalize_whitespace(section_path) if isinstance(section_path, str) else None
         group_label = canonical or (fallback if fallback else None)
         key = (str(did), group_label)
         by_key.setdefault(key, []).append(fh)
 
     blocks: List[Dict[str, Any]] = []
     seen_docs: set = set()
-    doc_chunk_cache: Dict[str, List[Dict[str, Any]]] = {}
+    doc_chunk_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+
+    # Batchuj pobranie sekcji per dokument (gdy włączone)
+    if settings.batch_section_fetch:
+        labels_by_doc: Dict[str, List[str]] = {}
+        for (did, section) in by_key.keys():
+            if isinstance(section, str) and section:
+                labels_by_doc.setdefault(did, []).append(section)
+        for did, labels in labels_by_doc.items():
+            mapping = _fetch_sections_chunks_batch(did, labels)
+            for lab, chunks in mapping.items():
+                doc_chunk_cache[(did, lab)] = chunks
 
     for (did, section), hits in by_key.items():
         # Bazowy payload do metadanych
@@ -696,26 +941,25 @@ def _build_blocks_from_hits(
         first_cid: Optional[int] = None
         last_cid: Optional[int] = None
 
-        base_levels_raw = base_payload.get("section_levels")
-        section_levels_map = base_levels_raw if isinstance(base_levels_raw, dict) else None
-        base_section_label = base_payload.get("section")
-        canonical_label = _canonical_section_label(base_section_label, section_levels_map, merge_level)
+        base_section_path = base_payload.get("section_path")
+        canonical_label = _canonical_section_label(base_section_path, merge_level)
         fallback_label = section if isinstance(section, str) else None
         if fallback_label:
             fallback_label = _normalize_whitespace(fallback_label) or None
         normalized_label = canonical_label or fallback_label
         include_descendants = bool(normalized_label and str(normalized_label).strip())
-        sec_chunks = (
-            _fetch_section_chunks(
-                did,
-                normalized_label,
-                include_descendants=include_descendants,
-                chunk_cache=doc_chunk_cache,
-                merge_level=merge_level,
-            )
-            if normalized_label
-            else []
-        )
+        if normalized_label:
+            # Użyj cache batchowego (gdy aktywny); fallback na pojedynczy fetch jeśli brak
+            sec_chunks = doc_chunk_cache.get((did, normalized_label)) if settings.batch_section_fetch else None
+            if sec_chunks is None:
+                sec_chunks = _fetch_section_chunks(
+                    did,
+                    normalized_label,
+                    include_descendants=include_descendants,
+                    merge_level=merge_level,
+                )
+        else:
+            sec_chunks = []
         if sec_chunks:
             for ch in sec_chunks:
                 text = (ch.get("text") or "").strip()
@@ -832,7 +1076,7 @@ def _shape_results(
                 {
                     "doc_id": did,
                     "path": payload.get("path", ""),
-                    "section": payload.get("section"),
+                    "section": payload.get("section_path"),
                     "chunk_id": payload.get("chunk_id", 0),
                     "score": float(fh.get("score", 0.0)),
                     "snippet": (payload.get("text") or "").strip()[:500] if payload.get("text") else (payload.get("summary", "")[:500]),

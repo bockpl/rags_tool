@@ -1,12 +1,54 @@
-# rags_tool (2.6.0)
+# rags_tool (2.7.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
+## Nowości w 2.7.0
+- Chunki zapisują teraz kanoniczną ścieżkę sekcji `section_path` (z separatorem ` > `) oraz listę prefiksów `section_path_prefixes`. Pozwala to pobierać całe sekcje i ich podsekcje jednym filtrem w Qdrant bez scrollowania całego dokumentu.
+- Podczas inicjalizacji kolekcji tworzone są indeksy payload (`doc_id`, `point_type`, `is_active`, `section_path`, `section_path_prefixes`) dla streszczeń i chunków, co znacząco skraca scalanie wyników.
 
+### Dodanie indeksów do istniejących kolekcji
+Jeżeli kolekcje zostały utworzone przed wersją 2.7.0, uruchom jednorazowo poniższy skrypt (w katalogu projektu, z poprawnie ustawionym `.env`), aby dołożyć brakujące indeksy:
+
+```bash
+python - <<'PY'
+from app.qdrant_utils import qdrant
+from app.settings import get_settings
+from qdrant_client.http import models as qm
+
+settings = get_settings()
+collections = [
+    settings.qdrant_summary_collection,
+    settings.qdrant_content_collection,
+]
+index_specs = (
+    ("doc_id", {"type": "keyword"}),
+    ("point_type", {"type": "keyword"}),
+    ("is_active", {"type": "bool"}),
+    ("section_path", {"type": "keyword"}),
+    ("section_path_prefixes", {"type": "keyword"}),
+)
+
+for coll in collections:
+    for field, params in index_specs:
+        try:
+            qdrant.create_payload_index(
+                collection_name=coll,
+                field_name=field,
+                field_schema=qm.PayloadIndexParams(**params),
+            )
+            print(f"[OK] {coll}: {field}")
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "already exists" in msg or "index with params conflicts" in msg or getattr(exc, "status_code", None) == 409:
+                print(f"[SKIP] {coll}: {field} (już istnieje)")
+            else:
+                raise
+PY
+```
 
 ## Nowości w 2.6.0
 - Scalanie bloków `result_format="blocks"` można teraz sprowadzić do wskazanego poziomu hierarchii (`SECTION_MERGE_LEVEL`, domyślnie `ust`). Wszystkie chunki z poziomu docelowego oraz jego potomków są łączone w jeden blok, co pozwala uzyskać pełne `ust.` wraz z `pkt`/`lit.` bez utraty kontekstu.
-- Ingest zapisuje przy każdym chunku metadane `section_levels` oraz `section_level`, dzięki czemu wyszukiwanie rekonstruuje sekcje szybciej i bez zgadywania struktury etykiet.
+- Ingest zapisuje przy każdym chunku metadane `section_path` (kanoniczna ścieżka), dzięki czemu wyszukiwanie rekonstruuje sekcje szybciej i bez zgadywania struktury etykiet.
 
 
 ## Nowości w 2.1.0
@@ -196,7 +238,7 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 ## Nowości w 0.9.3
 
 - Ujednolicono etykiety sekcji generowane przez spaCy (np. § 5 ust. 3 pkt 2), dzięki czemu payload Qdrant zachowuje pełną hierarchię.
-- Uproszczony fallback chunk_text_by_sections gwarantuje pary {text, section} także bez spaCy, co zabezpiecza ingest.
+- Uproszczony fallback chunk_text_by_sections gwarantuje pary {text, section_path} także bez spaCy, co zabezpiecza ingest.
 
 ## Nowości w 0.9.2
 
@@ -213,15 +255,15 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 
 ## Nowości w 0.9.0
 
-- Sekcjony podział punktów i podpunktów w obrębie paragrafów (§): wykrywamy listy numerowane (`1)`, `2.`), literowe (`a)`, `lit. b)`), rzymskie (`i)`, `IV)`), a także tirety (`-`, `–`, `•`). Każdy wykryty element staje się osobną podsekcją z etykietą np. „§ 7 pkt 3 lit. b)”, która trafia do payloadu jako `section`.
+- Sekcjony podział punktów i podpunktów w obrębie paragrafów (§): wykrywamy listy numerowane (`1)`, `2.`), literowe (`a)`, `lit. b)`), rzymskie (`i)`, `IV)`), a także tirety (`-`, `–`, `•`). Każdy wykryty element staje się osobną podsekcją z etykietą np. „§ 7 pkt 3 lit. b)”, która trafia do payloadu jako `section_path`.
 - Heurystyki unikające szumu: segmentujemy tylko gdy poziom ma co najmniej 2 elementy i elementy mają sensowną długość; krótkie i pojedyncze pozycje pozostają w rodzicu.
 - Integracja z dotychczasowym chunkingiem: podsekcje są dalej dzielone tokenowo, a grupowanie `blocks` i `grouped` zyskuje bardziej precyzyjne granice.
 
 ## Nowości w 0.8.0
 
 - Sekcyjny chunking dla dokumentów regulaminowych i prawnych: parser rozpoznaje nagłówki „Rozdział …”, paragrafy „§ …”, a także bloki „Załącznik …”. Tekst jest dzielony w granicach sekcji i paragrafów, bez ich przecinania.
-- Payloady Qdrant zawierają teraz pole `section` dla każdego chunku (np. „Rozdział 1 — Informacje ogólne § 1”), co poprawia prezentację wyników (`blocks`, `grouped`).
-- Lepsze cytowanie: odpowiedzi zawierają `section`, co ułatwia odwołania do konkretnych fragmentów dokumentu.
+- Payloady Qdrant zawierają teraz pole `section_path` dla każdego chunku (np. „Rozdział 1 > § 1”), co poprawia prezentację wyników (`blocks`, `grouped`).
+- Lepsze cytowanie: odpowiedzi zawierają `section` (oparte o `section_path`), co ułatwia odwołania do konkretnych fragmentów dokumentu.
 
 ## Nowości w 0.7.2
 

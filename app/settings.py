@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.6.0"
+    app_version: str = "2.7.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -103,6 +103,50 @@ class SummRAGSettings(BaseSettings):
     search_skip_stage1_default: bool = Field(
         default=False, alias="SEARCH_SKIP_STAGE1_DEFAULT"
     )
+
+    # --- Hybryda 2‑query (dense + sparse w dwóch zapytaniach) ---
+    # Gdy true, Stage 1 i Stage 2 wykonują dwa zapytania: osobno po dense i sparse,
+    # a następnie łączą wyniki po stronie aplikacji. Pozwala docelowo usunąć TF‑IDF
+    # z payloadów Qdranta (mniejsze rekordy i niższe CPU po stronie serwera).
+    search_dual_query_sparse: bool = Field(default=False, alias="SEARCH_DUAL_QUERY_SPARSE")
+    dual_query_rrf_k: int = Field(default=60, alias="DUAL_QUERY_RRF_K")
+    dual_query_oversample: int = Field(default=2, alias="DUAL_QUERY_OVERSAMPLE")
+    dual_query_dense_for_mmr: bool = Field(default=True, alias="DUAL_QUERY_DENSE_FOR_MMR")
+
+    # Redukcja payloadów (wybór pól with_payload). Zalecane pozostawić włączone.
+    search_minimal_payload: bool = Field(default=True, alias="SEARCH_MINIMAL_PAYLOAD")
+
+    # Batchowanie sekcji per dokument (jedna kwerenda scroll łącząca sekcje po prefiksach)
+    batch_section_fetch: bool = Field(default=True, alias="BATCH_SECTION_FETCH")
+
+    # --- Validators for forgiving .env parsing (blank strings) ---
+    @field_validator(
+        "search_skip_stage1_default",
+        "search_dual_query_sparse",
+        "dual_query_dense_for_mmr",
+        "search_minimal_payload",
+        "batch_section_fetch",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_bool_env(cls, v):  # type: ignore[override]
+        if isinstance(v, str) and v.strip() == "":
+            return False
+        return v
+
+    @field_validator("dual_query_rrf_k", mode="before")
+    @classmethod
+    def _coerce_rrf_k(cls, v):  # type: ignore[override]
+        if isinstance(v, str) and v.strip() == "":
+            return 60
+        return v
+
+    @field_validator("dual_query_oversample", mode="before")
+    @classmethod
+    def _coerce_oversample(cls, v):  # type: ignore[override]
+        if isinstance(v, str) and v.strip() == "":
+            return 2
+        return v
 
     # --- Reranker (OpenAI-compatible) minimal configuration ---
     # Pusty BASE_URL lub MODEL oznacza wyłączony ranker i brak rerankingu.

@@ -97,10 +97,91 @@ def derive_collection_names(base: Optional[str] = None) -> Tuple[str, str]:
     return _derive_summary_collection(base), _derive_content_collection(base)
 
 
+DEFAULT_PAYLOAD_INDEXES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
+    ("doc_id", {"type": "keyword"}),
+    ("point_type", {"type": "keyword"}),
+    ("is_active", {"type": "bool"}),
+    ("section_path", {"type": "keyword"}),
+    ("section_path_prefixes", {"type": "keyword"}),
+)
+
+
+def _ensure_payload_indexes(
+    collection: str,
+    specs: Optional[Iterable[Tuple[str, Dict[str, Any]]]],
+) -> None:
+    """Create payload indexes in a client-version tolerant way.
+
+    Falls back through several schema representations depending on qdrant-client version:
+    1) qm.PayloadIndexParams(type=...)
+    2) qm.PayloadSchemaType.KEYWORD/BOOL enums
+    3) plain dict: {"type": "keyword"}
+    """
+    if not specs:
+        return
+
+    def build_schema(params: Dict[str, Any]):  # type: ignore[override]
+        # Try modern pydantic model
+        schema_type = (params or {}).get("type", "keyword")
+        try:
+            PIP = getattr(qm, "PayloadIndexParams", None)
+            if PIP is not None:
+                # Map plain strings to enums if available
+                tval = schema_type
+                try:
+                    PST = getattr(qm, "PayloadSchemaType", None)
+                    if PST is not None:
+                        mapping = {
+                            "keyword": getattr(PST, "KEYWORD", None),
+                            "bool": getattr(PST, "BOOL", None),
+                            "integer": getattr(PST, "INTEGER", None),
+                            "float": getattr(PST, "FLOAT", None),
+                            "text": getattr(PST, "TEXT", None),
+                        }
+                        if schema_type in mapping and mapping[schema_type] is not None:
+                            tval = mapping[schema_type]
+                except Exception:
+                    pass
+                return PIP(type=tval)  # type: ignore[misc]
+        except Exception:
+            pass
+        # Fallback to plain dict
+        return {"type": str(schema_type)}
+
+    for field_name, params in specs:
+        try:
+            schema = build_schema(params or {})
+            qdrant.create_payload_index(
+                collection_name=collection,
+                field_name=field_name,
+                field_schema=schema,  # type: ignore[arg-type]
+            )
+            logger.debug("Created payload index '%s' on '%s'", field_name, collection)
+        except UnexpectedResponse as exc:
+            msg = str(exc).lower()
+            if getattr(exc, "status_code", None) == 409 or "exists" in msg or "already" in msg:
+                logger.debug("Payload index '%s' already exists on '%s'", field_name, collection)
+                continue
+            logger.warning(
+                "Failed to create payload index '%s' on '%s': %s",
+                field_name,
+                collection,
+                exc,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to create payload index '%s' on '%s': %s",
+                field_name,
+                collection,
+                exc,
+            )
+
+
 def _ensure_single_collection(
     collection: str,
     vectors_config: Dict[str, qm.VectorParams],
     sparse_config: Optional[Dict[str, qm.SparseVectorParams]] = None,
+    payload_indexes: Optional[Iterable[Tuple[str, Dict[str, Any]]]] = None,
 ):
     try:
         info = qdrant.get_collection(collection)
@@ -148,6 +229,7 @@ def _ensure_single_collection(
                     logger.error("Failed to ensure sparse vectors for '%s': %s", collection, exc)
                     raise
         logger.debug("Collection '%s' exists and is compatible", collection)
+        _ensure_payload_indexes(collection, payload_indexes)
         return
     except HTTPException:
         raise
@@ -165,8 +247,10 @@ def _ensure_single_collection(
     except UnexpectedResponse as exc:
         if getattr(exc, "status_code", None) == 409 or "already exists" in str(exc).lower():
             logger.debug("Collection '%s' creation returned conflict; treating as existing", collection)
+            _ensure_payload_indexes(collection, payload_indexes)
             return
         raise
+    _ensure_payload_indexes(collection, payload_indexes)
 
 
 def ensure_collections(collection_base: Optional[str] = None, dim: Optional[int] = None):
@@ -189,8 +273,18 @@ def ensure_collections(collection_base: Optional[str] = None, dim: Optional[int]
         if SPARSE_ENABLED
         else None
     )
-    _ensure_single_collection(summary_collection, summary_vectors, summary_sparse)
-    _ensure_single_collection(content_collection, content_vectors, content_sparse)
+    _ensure_single_collection(
+        summary_collection,
+        summary_vectors,
+        summary_sparse,
+        payload_indexes=DEFAULT_PAYLOAD_INDEXES,
+    )
+    _ensure_single_collection(
+        content_collection,
+        content_vectors,
+        content_sparse,
+        payload_indexes=DEFAULT_PAYLOAD_INDEXES,
+    )
 
 
 def export_collections_bundle(collection_names: Optional[Iterable[str]] = None) -> Tuple[bytes, Dict[str, Any]]:
@@ -1023,14 +1117,12 @@ def build_and_upsert_points(
         for i, chunk_item in enumerate(chunks):
             if isinstance(chunk_item, dict):
                 chunk_text_val = chunk_item.get("text", "")
-                section_label = chunk_item.get("section")
-                section_levels = chunk_item.get("section_levels")
-                section_level_name = chunk_item.get("section_level")
+                section_path = chunk_item.get("section_path")
+                section_path_prefixes = chunk_item.get("section_path_prefixes")
             else:
                 chunk_text_val = str(chunk_item)
-                section_label = None
-                section_levels = None
-                section_level_name = None
+                section_path = None
+                section_path_prefixes = None
             pid = int(str(int(sha1(f"{doc_id}:{i}")[0:12], 16))[:12])
             payload: Dict[str, Any] = {
                 "doc_id": doc_id,
@@ -1040,14 +1132,13 @@ def build_and_upsert_points(
                 "point_type": "chunk",
                 "text": chunk_text_val,
             }
-            if section_label:
-                payload["section"] = section_label
-            if isinstance(section_levels, dict) and section_levels:
-                payload["section_levels"] = {
-                    str(k): str(v) for k, v in section_levels.items() if k and v
-                }
-            if isinstance(section_level_name, str) and section_level_name:
-                payload["section_level"] = section_level_name
+            if isinstance(section_path, str) and section_path.strip():
+                payload["section_path"] = section_path.strip()
+            if isinstance(section_path_prefixes, (list, tuple)) and section_path_prefixes:
+                payload["section_path_prefixes"] = [
+                    str(prefix).strip() for prefix in section_path_prefixes if str(prefix).strip()
+                ]
+            # No per-chunk section level stored (kept minimal)
 
             vectors: Dict[str, Any] = {
                 CONTENT_VECTOR_NAME: content_vecs[i],

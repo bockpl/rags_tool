@@ -317,6 +317,34 @@ app = FastAPI(title=f"{settings.app_name} OpenAPI Tool", version=settings.app_ve
 attach_admin_routes(app)
 
 
+# Ensure Qdrant collections and indexes at process startup
+@app.on_event("startup")
+def _startup_ensure_collections() -> None:
+    try:
+        _ensure_collections_cached()
+        # Pre-warm TF-IDF vectorizers (content + summaries) to avoid cold-start latency
+        try:
+            prepare_tfidf(force_rebuild=False)
+            logger.info("TF-IDF vectorizers pre-warmed at startup")
+        except Exception as exc:
+            logger.warning("TF-IDF pre-warm skipped: %s", exc)
+        # Log key runtime switches for clarity
+        logger.info(
+            "Startup config | skip_stage1=%s dual_query_sparse=%s minimal_payload=%s batch_section_fetch=%s rrf_k=%d oversample=%d dense_for_mmr=%s",
+            bool(settings.search_skip_stage1_default),
+            bool(settings.search_dual_query_sparse),
+            bool(settings.search_minimal_payload),
+            bool(settings.batch_section_fetch),
+            int(settings.dual_query_rrf_k),
+            int(settings.dual_query_oversample),
+            bool(settings.dual_query_dense_for_mmr),
+        )
+        logger.info("Collections ensured at startup")
+    except Exception as exc:
+        # Do not block startup on failures; health endpoint will reflect real status
+        logger.warning("Startup ensure_collections failed: %s", exc)
+
+
 # Admin UI and step-by-step debug endpoints are defined in app/admin_routes.py
 
 
@@ -778,7 +806,7 @@ def search_query(req: SearchQuery):
         for rank, fh in enumerate(final_hits, start=1):
             payload = fh.get("payload") or {}
             did = payload.get("doc_id") or ""
-            sec = payload.get("section")
+            sec = payload.get("section_path")
             cid = payload.get("chunk_id")
             if not did or cid is None:
                 continue

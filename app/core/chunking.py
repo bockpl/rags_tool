@@ -316,13 +316,19 @@ def chunk_text_by_sections(
             overlap_tokens = 150 if overlap_tokens is None else overlap_tokens
 
     def _fallback() -> List[Dict[str, Any]]:
-        return [
-            {"text": part, "section": "Dokument"}
-            for part in chunk_text(
-                text, target_tokens=target_tokens, overlap_tokens=overlap_tokens
+        chunks: List[Dict[str, Any]] = []
+        for part in chunk_text(text, target_tokens=target_tokens, overlap_tokens=overlap_tokens):
+            if not part.strip():
+                continue
+            path_label = "Dokument"
+            chunks.append(
+                {
+                    "text": part,
+                    "section_path": path_label,
+                    "section_path_prefixes": [path_label],
+                }
             )
-            if part.strip()
-        ]
+        return chunks
 
     try:
         nlp = _get_nlp_pipeline()
@@ -350,22 +356,30 @@ def chunk_text_by_sections(
             if not part.strip():
                 continue
             hierarchy = dict(getattr(section_span._, "section_hierarchy", None) or {})
-            formatted_levels: Dict[str, str] = {}
+            path_segments: List[str] = []
+            path_levels: List[str] = []
             for lvl in SECTION_HIERARCHY:
                 formatted = _format_level(lvl, hierarchy.get(lvl))
                 if formatted:
-                    formatted_levels[lvl] = formatted
-            lowest_level = None
-            for lvl in reversed(SECTION_HIERARCHY):
-                if formatted_levels.get(lvl):
-                    lowest_level = lvl
-                    break
+                    norm = formatted.strip()
+                    if not norm:
+                        continue
+                    path_segments.append(norm)
+                    path_levels.append(lvl)
+            prefixes: List[str] = []
+            accum: List[str] = []
+            for seg in path_segments:
+                accum.append(seg)
+                prefixes.append(" > ".join(accum))
+            lowest_level = path_levels[-1] if path_levels else None
+            path_label = " > ".join(path_segments).strip() if path_segments else label
+            if not path_label:
+                path_label = label
             out.append(
                 {
                     "text": part,
-                    "section": label,
-                    "section_levels": formatted_levels,
-                    "section_level": lowest_level,
+                    "section_path": path_label,
+                    "section_path_prefixes": prefixes if prefixes else ([path_label] if path_label else []),
                 }
             )
     return out or _fallback()

@@ -353,7 +353,7 @@ def attach_admin_routes(app) -> None:
             for rank, fh in enumerate(final_hits, start=1):
                 payload = fh.get("payload") or {}
                 did = payload.get("doc_id", "")
-                sec = payload.get("section")
+                sec = payload.get("section_path")
                 cid = int(payload.get("chunk_id", 0))
                 snippet = (payload.get("text") or "").strip()[:400] if payload.get("text") else (payload.get("summary", "")[:400])
                 dbg_hits.append({
@@ -386,7 +386,7 @@ def attach_admin_routes(app) -> None:
             fused_hits_dbg.append({
                 "doc_id": payload.get("doc_id", ""),
                 "path": payload.get("path"),
-                "section": payload.get("section"),
+                "section": payload.get("section_path"),
                 "chunk_id": int(payload.get("chunk_id", 0)),
                 "score": float(fh.get("score", 0.0)),
                 "snippet": (payload.get("text") or "").strip()[:400] if payload.get("text") else (payload.get("summary", "")[:400]),
@@ -415,7 +415,7 @@ def attach_admin_routes(app) -> None:
             payload = {
                 "doc_id": h.doc_id,
                 "path": h.path,
-                "section": h.section,
+                "section_path": h.section,
                 "chunk_id": h.chunk_id,
                 "text": h.snippet or "",
             }
