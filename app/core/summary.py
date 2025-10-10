@@ -27,6 +27,33 @@ def _default_title_from_text(text: str) -> str:
     return ""
 
 
+def _naive_local_summary(text: str, max_sentences: int = 5) -> Dict[str, Any]:
+    """Produce a minimal, deterministic summary locally when LLM is unavailable.
+
+    - Title: first non-empty line (trimmed to 200 chars)
+    - Summary: first few sentences (up to max_sentences) or first 600 chars
+    - Signature/entities: left minimal/empty
+    - Replacement: "brak"
+    """
+    title = _default_title_from_text(text)
+    # Simple sentence split; fallback to head if not enough delimiters
+    parts = re.split(r"(?<=[\.!?])\s+", text)
+    parts = [p.strip() for p in parts if p.strip()]
+    if parts:
+        summary = " ".join(parts[:max_sentences])
+    else:
+        summary = text[:600]
+    if len(summary) > 600:
+        summary = summary[:600]
+    return {
+        "title": title,
+        "summary": summary,
+        "signature": [],
+        "entities": "",
+        "replacement": "brak",
+    }
+
+
 def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int = 300) -> Dict[str, Any]:
     text = text.strip()
     if len(text) > MAX_DOC_TO_SUMMARY:
@@ -87,16 +114,25 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
         except Exception as exc:
             logger.warning("JSON-mode summary failed; falling back to text parser: %s", exc)
 
-    rsp = summary_client.chat.completions.create(
-        model=model,
-        temperature=0.0,
-        messages=[
-            {"role": "system", "content": settings.summary_system_prompt},
-            {"role": "user", "content": settings.summary_prompt + text},
-        ],
-        max_tokens=max_tokens,
-    )
-    out = rsp.choices[0].message.content or ""
+    try:
+        rsp = summary_client.chat.completions.create(
+            model=model,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": settings.summary_system_prompt},
+                {"role": "user", "content": settings.summary_prompt + text},
+            ],
+            max_tokens=max_tokens,
+        )
+        out = rsp.choices[0].message.content or ""
+    except Exception as exc:
+        # Final safety net: avoid 500 during ingest/build if remote endpoint is misconfigured
+        logger.warning(
+            "Text-mode summary failed; using local fallback | base_url=%s error=%s",
+            getattr(settings, "summary_api_url", ""),
+            exc,
+        )
+        return _naive_local_summary(text)
     summary = ""
     title = ""
     signature_list: List[str] = []
