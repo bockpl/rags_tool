@@ -50,6 +50,7 @@ qdrant = QdrantClient(
 )
 
 
+# Remove all entries within a directory without removing the directory itself.
 def _clear_dir_contents(target: pathlib.Path) -> None:
     """Remove all contents of a directory without removing the directory itself.
 
@@ -74,10 +75,12 @@ def _clear_dir_contents(target: pathlib.Path) -> None:
 
 
 def sha1(s: str) -> str:
+    """Return hex SHA1 of the given UTF-8 string."""
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
 def _derive_summary_collection(base: Optional[str]) -> str:
+    """Derive the summary collection name from a base name or settings."""
     if base:
         return f"{base}_summaries"
     if settings.summary_collection_name:
@@ -86,6 +89,7 @@ def _derive_summary_collection(base: Optional[str]) -> str:
 
 
 def _derive_content_collection(base: Optional[str]) -> str:
+    """Derive the content collection name from a base name or settings."""
     if base:
         return f"{base}_content"
     if settings.content_collection_name:
@@ -94,6 +98,7 @@ def _derive_content_collection(base: Optional[str]) -> str:
 
 
 def derive_collection_names(base: Optional[str] = None) -> Tuple[str, str]:
+    """Return (summary_collection, content_collection) for the provided base."""
     return _derive_summary_collection(base), _derive_content_collection(base)
 
 
@@ -177,12 +182,18 @@ def _ensure_payload_indexes(
             )
 
 
+# Create or validate a single collection; ensure vectors/sparse and indexes.
 def _ensure_single_collection(
     collection: str,
     vectors_config: Dict[str, qm.VectorParams],
     sparse_config: Optional[Dict[str, qm.SparseVectorParams]] = None,
     payload_indexes: Optional[Iterable[Tuple[str, Dict[str, Any]]]] = None,
 ):
+    """Create or validate a single Qdrant collection and payload indexes.
+
+    Ensures named dense vectors (and optional sparse vectors) match the
+    expected schema. Creates payload indexes in a client-version tolerant way.
+    """
     try:
         info = qdrant.get_collection(collection)
         try:
@@ -253,7 +264,9 @@ def _ensure_single_collection(
     _ensure_payload_indexes(collection, payload_indexes)
 
 
+# Ensure summary/content collections exist with expected named vectors.
 def ensure_collections(collection_base: Optional[str] = None, dim: Optional[int] = None):
+    """Ensure the summary/content collections exist with expected schema."""
     if dim is None:
         dim = settings.embedding_dim
     summary_collection, content_collection = derive_collection_names(collection_base)
@@ -287,8 +300,9 @@ def ensure_collections(collection_base: Optional[str] = None, dim: Optional[int]
     )
 
 
+# Export all collections and local TF‑IDF artifacts as a tar.gz archive.
 def export_collections_bundle(collection_names: Optional[Iterable[str]] = None) -> Tuple[bytes, Dict[str, Any]]:
-    """Serialise all Qdrant collections and lokalne indeksy TF-IDF do archiwum tar.gz."""
+    """Serialize all Qdrant collections and local TF-IDF indices into a tar.gz bundle."""
 
     try:
         listed = qdrant.get_collections()
@@ -390,6 +404,7 @@ def export_collections_bundle(collection_names: Optional[Iterable[str]] = None) 
     }
 
 
+# Create a snapshot of a collection using client or REST fallback.
 def _create_collection_snapshot(collection_name: str):
     # Prefer client method if available; otherwise use REST
     method = getattr(qdrant, "create_snapshot", None)
@@ -417,6 +432,7 @@ def _create_collection_snapshot(collection_name: str):
         raise HTTPException(status_code=502, detail=f"Nie udało się utworzyć snapshotu kolekcji '{collection_name}': {exc}") from exc
 
 
+# Extract snapshot filename/id from mixed client/REST responses.
 def _extract_snapshot_name(snapshot: Any) -> Optional[str]:
     if snapshot is None:
         return None
@@ -436,6 +452,7 @@ def _extract_snapshot_name(snapshot: Any) -> Optional[str]:
     )
 
 
+# Extract snapshot size in bytes from mixed client/REST responses.
 def _extract_snapshot_size(snapshot: Any) -> Optional[int]:
     if snapshot is None:
         return None
@@ -444,6 +461,7 @@ def _extract_snapshot_size(snapshot: Any) -> Optional[int]:
     return getattr(snapshot, "size", None) or getattr(snapshot, "size_bytes", None)
 
 
+# Download a snapshot file for a collection to a temporary/scratch dir.
 def _download_collection_snapshot(
     *,
     collection_name: str,
@@ -479,6 +497,7 @@ def _download_collection_snapshot(
     return target_path
 
 
+# Backwards-compatible helper to fetch a snapshot to destination.
 def _attempt_download_snapshot(
     collection_name: str,
     snapshot_name: str,
@@ -508,6 +527,7 @@ def _attempt_download_snapshot(
         return False
 
 
+# Delete a remote snapshot using client or REST fallback.
 def _delete_remote_snapshot(collection_name: str, snapshot_name: str) -> None:
     # Try client methods
     for name in ("delete_snapshot", "delete_collection_snapshot"):
@@ -536,7 +556,7 @@ def _delete_remote_snapshot(collection_name: str, snapshot_name: str) -> None:
 
 
 def import_collections_bundle(bundle: bytes, *, replace_existing: bool = True) -> Dict[str, Any]:
-    """Restore collections and indeksy TF-IDF z archiwum tar.gz."""
+    # Restore collections and TF‑IDF indices from a tar.gz bundle.
 
     try:
         tar_context = tarfile.open(fileobj=io.BytesIO(bundle), mode="r:gz")
@@ -720,6 +740,7 @@ def _extract_tar_member_to_tempfile(tar: tarfile.TarFile, member_name: str) -> p
     return temp_path
 
 
+# Upload a snapshot via client (if available) or REST multipart fallback.
 def _upload_snapshot_file(collection_name: str, snapshot_name: str, path: pathlib.Path) -> None:
     # Try client method if present
     method = getattr(qdrant, "upload_snapshot", None)
@@ -756,7 +777,7 @@ def _upload_snapshot_file(collection_name: str, snapshot_name: str, path: pathli
 
 
 def _recover_uploaded_snapshot(collection_name: str, snapshot_name: str) -> None:
-    # For REST upload endpoint, recovery happens automatically; this is a no-op.
+    # For REST upload endpoint, recovery happens automatically; this is a no‑op.
     method = getattr(qdrant, "recover_snapshot", None)
     if method is None:
         return
@@ -771,6 +792,7 @@ def _recover_uploaded_snapshot(collection_name: str, snapshot_name: str) -> None
 
 
 def _qdrant_headers_json() -> Dict[str, str]:
+    # Build JSON headers; include API key when configured.
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if settings.qdrant_api_key:
         headers["api-key"] = settings.qdrant_api_key
@@ -778,6 +800,7 @@ def _qdrant_headers_json() -> Dict[str, str]:
 
 
 def _qdrant_headers_binary() -> Dict[str, str]:
+    # Build headers for binary transfer; include API key when configured.
     headers = {}
     if settings.qdrant_api_key:
         headers["api-key"] = settings.qdrant_api_key
@@ -785,6 +808,7 @@ def _qdrant_headers_binary() -> Dict[str, str]:
 
 
 def _qdrant_headers_multipart(boundary: str) -> Dict[str, str]:
+    # Build multipart/form-data headers; include API key when configured.
     headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
     if settings.qdrant_api_key:
         headers["api-key"] = settings.qdrant_api_key
@@ -792,6 +816,7 @@ def _qdrant_headers_multipart(boundary: str) -> Dict[str, str]:
 
 
 def _build_multipart(boundary: str, files: Dict[str, tuple]) -> bytes:
+    # Construct a minimal multipart body for file uploads.
     # files: name -> (filename, content_bytes, content_type)
     lines: List[bytes] = []
     b = boundary

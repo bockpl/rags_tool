@@ -37,17 +37,24 @@ DEFAULT_SCORE_NORM = "minmax"  # minmax|zscore|none
 
 SECTION_LEVEL_INDEX: Dict[str, int] = {level: idx for idx, level in enumerate(SECTION_HIERARCHY)}
 
-
+# Normalize whitespace: trim and collapse internal spaces.
 def _normalize_whitespace(text: Optional[str]) -> str:
+    """Trim, collapse internal whitespace and return a safe string."""
     if not isinstance(text, str):
         return ""
     return " ".join(text.strip().split())
 
 
+# Build canonical section label up to the merge level.
 def _canonical_section_label(
     section_path: Optional[str],
     merge_level: str,
 ) -> Optional[str]:
+    """Build a canonical section label up to the requested hierarchy level.
+
+    Falls back to the full normalized path when the desired level cannot be
+    detected in the provided `section_path` string.
+    """
     if merge_level not in SECTION_LEVEL_INDEX:
         merge_level = "ust"
     normalized_merge = merge_level
@@ -94,13 +101,15 @@ def _canonical_section_label(
     return None
 
 
+# Check whether reranker is configured (base URL + model).
 def _ranker_enabled() -> bool:
-    """Czy ranker jest skonfigurowany (BASE_URL + MODEL)."""
+    """Return True when an external reranker is configured (BASE_URL + MODEL)."""
     return bool(settings.ranker_base_url and settings.ranker_model)
 
 
+# Truncate text to limit, preserving head and tail.
 def _truncate_head_tail(text: str, limit: int) -> str:
-    """Przytnij tekst do limitu znaków (70% head, 30% tail)."""
+    """Truncate to `limit` chars keeping 70% head and 30% tail."""
     t = (text or "").strip()
     if len(t) <= max(1, int(limit)):
         return t
@@ -109,18 +118,21 @@ def _truncate_head_tail(text: str, limit: int) -> str:
     return (t[:head] + "\n...\n" + t[-tail:]).strip()
 
 
+# Call external reranker and map input index to score.
 def _rerank_indices(query: str, passages: List[str], top_n: int) -> Dict[int, float]:
-    """Wywołaj ranker i zwróć mapę index->score dla ocenionych elementów.
+    """Call the reranker and return a map index->score for scored items.
 
-    Uwaga: 'top_n' ogranicza liczbę wyników zwracanych przez endpoint (nie liczbę
-    dokumentów w wejściu). Niezwrócone elementy pozostają bez oceny.
+    Note: `top_n` limits the number of scored results returned by the endpoint
+    (not the number of inputs). Unreturned items have no score.
     """
     client = OpenAIReranker(settings.ranker_base_url or "", settings.ranker_api_key, settings.ranker_model or "")
     rr = client.rerank(query=query, documents=passages, top_n=min(max(1, top_n), len(passages)))
     return {int(it.get("index")): float(it.get("relevance_score")) for it in rr}
 
 
+# Normalize a list of scores according to `method`.
 def _normalize(values: List[float], method: str = DEFAULT_SCORE_NORM) -> List[float]:
+    """Normalize scores via minmax/zscore/none according to `method`."""
     if not values:
         return []
     if method == "none":
@@ -139,7 +151,9 @@ def _normalize(values: List[float], method: str = DEFAULT_SCORE_NORM) -> List[fl
     return [float((v - vmin) / (vmax - vmin)) for v in arr]
 
 
+# Sparse dot product between query map and (indices, values) payload.
 def _sparse_dot(query_lookup: Dict[int, float], indices: List[int], values: List[float]) -> float:
+    """Compute dot product between a sparse query map and (indices, values)."""
     if not query_lookup or not indices or not values:
         return 0.0
     acc = 0.0
@@ -150,9 +164,11 @@ def _sparse_dot(query_lookup: Dict[int, float], indices: List[int], values: List
     return float(acc)
 
 
+# Sparse cosine-like similarity for two vectors (CSC form).
 def _sparse_pair_cos(
     a_idx: List[int], a_val: List[float], b_idx: List[int], b_val: List[float]
 ) -> float:
+    """Compute cosine-like similarity for two sparse vectors in CSC form."""
     if not a_idx or not b_idx:
         return 0.0
     i = j = 0
@@ -171,7 +187,9 @@ def _sparse_pair_cos(
     return float(sim)
 
 
+# Dense cosine similarity between two vectors.
 def _cosine_dense(a: List[float], b: List[float]) -> float:
+    """Cosine similarity between two dense vectors (lists)."""
     va = np.array(a, dtype=float)
     vb = np.array(b, dtype=float)
     denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
@@ -180,9 +198,11 @@ def _cosine_dense(a: List[float], b: List[float]) -> float:
     return float(np.dot(va, vb) / denom)
 
 
+# Ensure a field condition is present in a filter.
 def _with_must_condition(
     flt: Optional[qm.Filter], condition: qm.FieldCondition
 ) -> qm.Filter:
+    """Return a new filter that ensures the given field condition is included."""
     if flt is None:
         return qm.Filter(must=[condition])
     must_items = list(flt.must or []) + [condition]
@@ -191,6 +211,7 @@ def _with_must_condition(
     return qm.Filter(must=must_items, should=should_items, must_not=must_not_items)
 
 
+# Fetch summaries payloads for provided doc_ids (best‑effort).
 def _fetch_doc_summaries(doc_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     """Fetch summaries for given doc_ids from the summaries collection.
 
@@ -243,9 +264,11 @@ def _fetch_doc_summaries(doc_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+# Build TF‑IDF sparse queries (content and summary) for the raw query.
 def _build_sparse_queries_for_query(query: str, use_hybrid: bool) -> Tuple[
     Optional[Tuple[List[int], List[float]]], Optional[Tuple[List[int], List[float]]]
 ]:
+    """Build content and summary TF-IDF queries for a given raw query string."""
     if not (use_hybrid and SPARSE_ENABLED):
         return None, None
     content_sparse_query: Optional[Tuple[List[int], List[float]]] = None
@@ -263,6 +286,7 @@ def _build_sparse_queries_for_query(query: str, use_hybrid: bool) -> Tuple[
     return content_sparse_query, summary_sparse_query
 
 
+# Stage‑1: select candidate documents (summaries) with hybrid scoring.
 def _stage1_select_documents(
     q_text: str,
     q_vec: List[float],
@@ -270,6 +294,11 @@ def _stage1_select_documents(
     summary_sparse_query: Optional[Tuple[List[int], List[float]]],
     req: Any,
 ) -> Tuple[List[str], Dict[str, Any]]:
+    """Stage-1: retrieve and score document summaries; return ids and map.
+
+    Supports single-query hybrid scoring and optional dual-query (dense+sparse)
+    path when configured.
+    """
     dual = bool(settings.search_dual_query_sparse and req.use_hybrid and SPARSE_ENABLED)
     point_type_filter = _with_must_condition(
         flt, qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary"))
@@ -446,6 +475,7 @@ def _stage1_select_documents(
     return cand_doc_ids, doc_map
 
 
+# Stage‑2: select candidate chunks and diversify with hybrid MMR.
 def _stage2_select_chunks(
     cand_doc_ids: Optional[List[str]],
     q_text: str,
@@ -455,6 +485,10 @@ def _stage2_select_chunks(
     req: Any,
     flt: Optional[qm.Filter] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[float]]:
+    """Stage-2: retrieve candidate chunks and apply hybrid MMR diversification.
+
+    Returns (final_hits, mmr_pool, rel2_scores).
+    """
     # Build filter for Stage-2 search
     must = [
         qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
@@ -589,7 +623,9 @@ def _stage2_select_chunks(
     return final_hits, mmr_pool, rel2
 
 
+# Heuristically classify mode if 'auto' (current/archival/all).
 def _classify_mode(query: str, mode: str) -> str:
+    """Heuristically classify mode when `mode` is 'auto'."""
     if mode != "auto":
         return mode
     q = query.lower()
@@ -600,7 +636,9 @@ def _classify_mode(query: str, mode: str) -> str:
     return "all"
 
 
+# Classic MMR over dense vectors: return selected indices.
 def mmr_diversify(vectors: np.ndarray, scores: np.ndarray, k: int, lam: float = DEFAULT_MMR_LAMBDA) -> List[int]:
+    """Classic MMR over dense vectors; returns indices of selected items."""
     selected: List[int] = []
     candidates = list(range(len(scores)))
     if len(candidates) <= k:
@@ -630,6 +668,7 @@ def mmr_diversify(vectors: np.ndarray, scores: np.ndarray, k: int, lam: float = 
     return selected
 
 
+# Hybrid MMR over dense+sparse representations with optional per-doc limit.
 def mmr_diversify_hybrid(
     dense_vecs: List[List[float]],
     sparse_vecs: List[Tuple[List[int], List[float]]],
@@ -640,6 +679,7 @@ def mmr_diversify_hybrid(
     per_doc_ids: Optional[List[str]] = None,
     per_doc_limit: Optional[int] = None,
 ) -> List[int]:
+    """MMR over hybrid representations with optional per-doc limit enforcement."""
     n = len(rel_scores)
     candidates = list(range(n))
     if n <= k:
@@ -743,6 +783,7 @@ def _fetch_doc_chunks(doc_id: str) -> List[Dict[str, Any]]:
         return []
 
 
+# Fetch chunk payloads for a given section (optionally include descendants).
 def _fetch_section_chunks(
     doc_id: str,
     section: Optional[str],
@@ -751,7 +792,7 @@ def _fetch_section_chunks(
     chunk_cache: Optional[Dict[Tuple[str, str], List[Dict[str, Any]]]] = None,
     merge_level: str = "ust",
 ) -> List[Dict[str, Any]]:
-    """Pobierz chunki sekcji; opcjonalnie z sekcjami potomnymi."""
+    """Fetch raw chunk payloads for a given section (optionally descendants)."""
     if not doc_id or not section:
         return []
 
@@ -824,14 +865,15 @@ def _fetch_section_chunks(
     return out
 
 
+# Batch-fetch chunks for multiple sections of a document in one scroll.
 def _fetch_sections_chunks_batch(
     doc_id: str,
     sections: List[str],
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Pobierz chunki dla wielu sekcji jednego dokumentu jednym scrollem.
+    """Fetch chunks for many sections of a single document with one scroll.
 
-    Zwraca mapę: normalized_section -> lista payloadów chunków (posortowana po chunk_id).
-    Sekcje obejmują również podsekcje (prefiksy).
+    Returns a map: normalized_section -> list of chunk payloads (sorted).
+    Sections include descendants via prefix matching.
     """
     result: Dict[str, List[Dict[str, Any]]] = {}
     if not doc_id or not sections:
@@ -884,17 +926,18 @@ def _fetch_sections_chunks_batch(
     return result
 
 
+# Build merged section blocks from chunk-level hits.
 def _build_blocks_from_hits(
     final_hits: List[Dict[str, Any]],
     summary_mode: str = "first",
 ) -> List[Dict[str, Any]]:
-    """Zbuduj bloki po pełnych sekcjach.
+    """Build merged evidence blocks by full sections.
 
-    - Grupuje trafienia po (doc_id, section).
-    - Dla sekcji z nazwą dociąga pełną zawartość sekcji oraz podsekcji z Qdrant i skleja tekst.
-    - Dla sekcji bez nazwy (None) pozostaje przy treści trafionych chunków.
-    - Score bloku = max(score) spośród trafień należących do tej sekcji.
-    - summary_mode: kontrola duplikacji streszczenia per dokument.
+    - Group hits by (doc_id, section)
+    - For named sections, fetch full section (and descendants) from Qdrant
+      and concatenate text in order; otherwise use hit chunks only
+    - Block score = max(score) among member hits
+    - `summary_mode` controls document summary duplication
     """
     merge_level_raw = getattr(settings, "section_merge_level", "ust")
     merge_level = str(merge_level_raw).strip().lower() if merge_level_raw else "ust"
@@ -1013,6 +1056,7 @@ def _build_blocks_from_hits(
     return blocks
 
 
+# Shape final results into the requested format (flat/grouped/blocks).
 def _shape_results(
     final_hits: List[Dict[str, Any]],
     doc_map: Dict[str, Any],
@@ -1020,6 +1064,11 @@ def _shape_results(
     rel2: List[float],
     req: Any,
 ) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]]:
+    """Transform final hits into the requested response shape.
+
+    Returns (hits, groups, blocks) where only one of groups/blocks is present
+    depending on `req.result_format`.
+    """
     if req.result_format == "blocks":
         blocks_payload = _build_blocks_from_hits(final_hits, summary_mode=req.summary_mode)
         return [], None, blocks_payload

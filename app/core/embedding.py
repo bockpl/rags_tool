@@ -36,6 +36,7 @@ embedding_client = OpenAI(base_url=settings.embedding_api_url, api_key=settings.
 _TOKENIZER_ADAPTER: TokenizerAdapter = load_tokenizer(getattr(settings, "embedding_tokenizer", None))
 
 
+# Re-iterable corpus proxy storing size metadata for TF-IDF fitting.
 class IterableCorpus:
     """Re-iterable corpus proxy storing size metadata for TF-IDF fitting."""
 
@@ -50,12 +51,20 @@ class IterableCorpus:
         yield from self._factory()
 
 
+# Embed a batch via the OpenAI-compatible embedding client.
 def _embed_raw(texts: List[str]) -> List[List[float]]:
+    """Call the embedding endpoint for a batch of texts.
+
+    Returns a list of float vectors in the same order as inputs.
+    Raises provider-specific exceptions on error.
+    """
     rsp = embedding_client.embeddings.create(model=settings.embedding_model, input=texts)
     return [d.embedding for d in rsp.data]
 
 
+# Add a textual prefix to each input if not already present.
 def _maybe_prefix(texts: List[str], prefix: str) -> List[str]:
+    """Optionally add a prefix to each text when not already present."""
     if not prefix:
         return texts
     pref = str(prefix)
@@ -69,6 +78,7 @@ def _maybe_prefix(texts: List[str], prefix: str) -> List[str]:
     return out
 
 
+# Embed user queries using the configured query prefix and safety limits.
 def embed_query(texts: List[str]) -> List[List[float]]:
     """Embed query strings with a model-specific query prefix.
 
@@ -84,6 +94,7 @@ def embed_query(texts: List[str]) -> List[List[float]]:
         raise
 
 
+# Embed passages/documents using the configured passage prefix and limits.
 def embed_passage(texts: List[str]) -> List[List[float]]:
     """Embed documents/passages with a model-specific passage prefix.
 
@@ -99,19 +110,26 @@ def embed_passage(texts: List[str]) -> List[List[float]]:
         raise
 
 
+# Probe the embedding dimension by embedding a trivial string.
 def get_embedding_dim() -> int:
+    """Probe embedding dimensionality by embedding a trivial string."""
     vec = _embed_raw(["test"])[0]
     return len(vec)
 
 
+# Count tokens using the configured tokenizer adapter.
 def _count_tokens(text: str) -> int:
+    """Count tokens using the configured tokenizer adapter."""
     return _adapter_count_tokens(_TOKENIZER_ADAPTER, text)
 
 
+# Truncate text to at most `max_tokens` tokens using the adapter.
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Truncate text to at most `max_tokens` according to the adapter."""
     return _adapter_truncate(_TOKENIZER_ADAPTER, text, max_tokens)
 
 
+# Enforce per-input token safety limit to avoid embedding 400s.
 def _limit_for_embedding(texts: List[str]) -> List[str]:
     """Ensure each input respects EMBEDDING_MAX_TOKENS to avoid 400 errors."""
     limit = int(getattr(settings, "embedding_max_tokens"))
@@ -124,6 +142,7 @@ def _limit_for_embedding(texts: List[str]) -> List[str]:
         out.append(ts)
     return out
 
+# Log detailed diagnostics for a failed embeddings batch (for debugging).
 def _log_embedding_error(original: List[str], limited: List[str], *, purpose: str, exc: Exception) -> None:
     """Log detailed diagnostics for a failed embeddings batch.
 
@@ -175,6 +194,7 @@ def _log_embedding_error(original: List[str], limited: List[str], *, purpose: st
     logger.error("Embedding request failed | details=%s | error=%s", json.dumps(payload, ensure_ascii=False), exc)
 
 
+# Embed many texts with simple micro-batching to respect backend limits.
 def _embed_many(texts: List[str]) -> List[List[float]]:
     """Embed list of texts with micro-batching and robust retries.
 
@@ -197,7 +217,9 @@ def _embed_many(texts: List[str]) -> List[List[float]]:
     return out
 
 
+# Load a TF-IDF vectorizer from disk if it exists.
 def load_vectorizer(path: Path = VECTORIZER_PATH) -> Optional[TfidfVectorizer]:
+    """Load a persisted TF-IDF vectorizer from JSON, if present."""
     if path.exists():
         obj = json.loads(path.read_text())
         vec = TfidfVectorizer(**obj["params"])  # type: ignore
@@ -207,7 +229,9 @@ def load_vectorizer(path: Path = VECTORIZER_PATH) -> Optional[TfidfVectorizer]:
     return None
 
 
+# Persist a TF-IDF vectorizer (params, vocab, idf) as JSON.
 def save_vectorizer(vec: TfidfVectorizer, path: Path = VECTORIZER_PATH):
+    """Persist a TF-IDF vectorizer to JSON (params, vocabulary, idf)."""
     params = vec.get_params()
     payload = {
         "params": {k: v for k, v in params.items() if k in ["lowercase", "ngram_range", "min_df", "max_df"]},
@@ -217,7 +241,9 @@ def save_vectorizer(vec: TfidfVectorizer, path: Path = VECTORIZER_PATH):
     path.write_text(json.dumps(payload))
 
 
+# Choose vectorizer params depending on corpus size for stability.
 def _vectorizer_params_for_corpus(corpus_size: int) -> Dict[str, Any]:
+    """Choose sensible TF-IDF params based on corpus size."""
     if corpus_size <= 1:
         return {"lowercase": True, "ngram_range": (1, 2), "min_df": 1, "max_df": 1.0}
     if corpus_size == 2:
@@ -225,18 +251,22 @@ def _vectorizer_params_for_corpus(corpus_size: int) -> Dict[str, Any]:
     return {"lowercase": True, "ngram_range": (1, 2), "min_df": 2, "max_df": 0.9}
 
 
+# Fit TF-IDF on provided corpus and save it to the given path.
 def fit_vectorizer(
     corpus: Iterable[str], corpus_size: int, path: Path = VECTORIZER_PATH
 ) -> TfidfVectorizer:
+    """Fit a TF-IDF vectorizer and persist it to `path`."""
     vec = TfidfVectorizer(**_vectorizer_params_for_corpus(corpus_size))
     vec.fit(corpus)
     save_vectorizer(vec, path=path)
     return vec
 
 
+# Transform texts into (indices, values) TF-IDF tuples using a vectorizer.
 def tfidf_vector(
     texts: List[str], vec: Optional[TfidfVectorizer], path: Path = VECTORIZER_PATH
 ) -> List[Tuple[List[int], List[float]]]:
+    """Transform texts into TF-IDF sparse vectors as (indices, values)."""
     if not vec:
         vec = load_vectorizer(path)
         if not vec:
@@ -252,7 +282,12 @@ def tfidf_vector(
     return results
 
 
+# Ensure corpus is sized and return (corpus, size) for TF-IDF prep.
 def _normalize_corpus(corpus: Optional[Iterable[str]]) -> Tuple[Optional[Iterable[str]], int]:
+    """Return (corpus, size) ensuring the object exposes a length.
+
+    Raises TypeError when the supplied object is not sized.
+    """
     if corpus is None:
         return None, 0
     try:
@@ -264,12 +299,20 @@ def _normalize_corpus(corpus: Optional[Iterable[str]]) -> Tuple[Optional[Iterabl
     return corpus, int(size)
 
 
+# Prepare/load TF-IDF vectorizers for content and summary corpora.
 def prepare_tfidf(
     all_chunks: Optional[Iterable[str]],
     summary_corpus: Optional[Iterable[str]],
     enable_sparse: bool,
     rebuild_tfidf: bool,
 ) -> Tuple[Optional[TfidfVectorizer], Optional[TfidfVectorizer]]:
+    """Prepare or load TF-IDF vectorizers for content and summaries.
+
+    - When `enable_sparse` is false, returns (None, None).
+    - If `rebuild_tfidf` is true or files are missing, fits and saves models.
+    - Otherwise tries to load existing models from disk.
+    Returns a pair: (content_vectorizer, summary_vectorizer).
+    """
     if not enable_sparse:
         return None, None
     content_vec: Optional[TfidfVectorizer] = None

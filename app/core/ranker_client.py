@@ -1,14 +1,15 @@
-"""OpenAI-compatible reranker client (HTTP), minimal dependency version.
+"""OpenAI-compatible reranker client (HTTP) with zero extra dependencies.
 
-Użycie:
+Usage:
     client = OpenAIReranker(base_url, api_key, model)
-    results = client.rerank(query="zapytanie", documents=["passage1", "passage2"], top_n=50)
+    results = client.rerank(query="question", documents=["passage1", "passage2"], top_n=50)
 
-Zwraca listę słowników: {"index": int, "relevance_score": float} zgodnie z konwencją OpenAI‑/Cohere‑like `/v1/rerank`.
+Returns a list of dicts: {"index": int, "relevance_score": float} following the
+OpenAI/Cohere-like `/v1/rerank` schema.
 
-Założenia:
+Assumptions:
 - Endpoint: POST {base_url}/v1/rerank
-- Nagłówki: Authorization: Bearer <API_KEY>, Content-Type: application/json
+- Headers: Authorization: Bearer <API_KEY>, Content-Type: application/json
 - Body: {"model": str, "query": str, "documents": List[str], "top_n": int, "return_documents": false}
 """
 
@@ -20,9 +21,9 @@ from urllib import request as _rq
 
 
 class OpenAIReranker:
-    """Prosty klient HTTP dla endpointu rerank (OpenAI‑compatible).
+    """Minimal HTTP client for an OpenAI-compatible rerank endpoint.
 
-    Celowo oparty o 'urllib' aby uniknąć dodatkowych zależności.
+    Intentionally built on `urllib` to avoid extra third-party dependencies.
     """
 
     # Stałe ścieżki i timeout (ms)
@@ -49,14 +50,15 @@ class OpenAIReranker:
             return f"{base}/rerank"
         return f"{base}{self.REQUEST_PATH}"
 
+    # Call /v1/rerank and return list of {index, relevance_score}.
     def rerank(self, *, query: str, documents: List[str], top_n: int) -> List[Dict[str, Any]]:
-        """Wywołaj endpoint rerank i zwróć listę {index, relevance_score}.
+        """Call the rerank endpoint and return a list of {index, relevance_score}.
 
-        Uwagi implementacyjne (opis kroków):
-        1) Budujemy JSON: model + query + documents + top_n; nie prosimy o return_documents.
-        2) Wysyłamy POST pod {base_url}/v1/rerank z Bearer (jeśli dostępny).
-        3) Odczytujemy JSON, walidujemy minimalne pola.
-        4) Zwracamy listę elementów z zachowaniem 'index' wejściowych dokumentów.
+        Implementation steps:
+        1) Build JSON with model + query + documents + top_n; do not request return_documents.
+        2) POST to {base_url}/v1/rerank with Bearer token (if provided).
+        3) Parse JSON; accept both "data" and "results" envelopes.
+        4) Return list items preserving the original document indices.
         """
         payload = {
             "model": self.model,

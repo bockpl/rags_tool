@@ -19,6 +19,7 @@ logger = logging.getLogger("rags_tool.summary")
 
 MAX_DOC_TO_SUMMARY = 75_000
 
+# Derive a default title from the first non-empty line of text.
 def _default_title_from_text(text: str) -> str:
     for line in text.splitlines():
         candidate = line.strip()
@@ -27,6 +28,7 @@ def _default_title_from_text(text: str) -> str:
     return ""
 
 
+# Minimal local summary used as a fallback when LLM is unavailable.
 def _naive_local_summary(text: str, max_sentences: int = 5) -> Dict[str, Any]:
     """Produce a minimal, deterministic summary locally when LLM is unavailable.
 
@@ -54,6 +56,7 @@ def _naive_local_summary(text: str, max_sentences: int = 5) -> Dict[str, Any]:
     }
 
 
+# Produce a structured summary via OpenAI-compatible chat API (JSON-mode if enabled).
 def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int = 300) -> Dict[str, Any]:
     text = text.strip()
     if len(text) > MAX_DOC_TO_SUMMARY:

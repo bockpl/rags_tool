@@ -25,6 +25,7 @@ class TokenizerAdapter:
     extra_token_count: int = 0  # tokens automatically added by the backend
 
 
+# Build a TokenizerAdapter backed by tiktoken for the given spec.
 def _build_tiktoken_adapter(spec: str) -> TokenizerAdapter:
     try:  # pragma: no cover - optional dependency
         import tiktoken  # type: ignore
@@ -49,6 +50,7 @@ def _build_tiktoken_adapter(spec: str) -> TokenizerAdapter:
     )
 
 
+# Build a TokenizerAdapter backed by Hugging Face transformers for the spec.
 def _build_hf_adapter(spec: str) -> TokenizerAdapter:
     try:  # pragma: no cover - optional dependency
         from transformers import AutoTokenizer  # type: ignore
@@ -87,6 +89,7 @@ def _build_hf_adapter(spec: str) -> TokenizerAdapter:
     )
 
 
+# Load a tokenizer adapter according to configuration string.
 def load_tokenizer(spec: str | None) -> TokenizerAdapter:
     """Instantiate a tokenizer adapter based on configuration string."""
 
@@ -105,6 +108,7 @@ def load_tokenizer(spec: str | None) -> TokenizerAdapter:
     )
 
 
+# Count tokens with the adapter, including backend-added specials.
 def count_tokens(adapter: TokenizerAdapter, text: str) -> int:
     """Count tokens using adapter, including backend-added specials."""
 
@@ -113,6 +117,7 @@ def count_tokens(adapter: TokenizerAdapter, text: str) -> int:
     return len(adapter.encode(text)) + adapter.extra_token_count
 
 
+# Truncate text so total tokens (incl. specials) do not exceed max_tokens.
 def truncate_to_tokens(adapter: TokenizerAdapter, text: str, max_tokens: int) -> str:
     """Trim text so that total tokens (including specials) do not exceed max_tokens."""
 
@@ -129,6 +134,7 @@ def truncate_to_tokens(adapter: TokenizerAdapter, text: str, max_tokens: int) ->
     return adapter.decode(tokens[:budget])
 
 
+# Yield token-aware sliding windows with a configurable overlap.
 def sliding_windows(
     adapter: TokenizerAdapter,
     text: str,

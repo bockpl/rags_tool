@@ -183,6 +183,7 @@ def chunk_text(
 _NLP_PIPELINE: Optional[Language] = None
 
 
+# Build a lightweight spaCy pipeline for section detection (Polish).
 def _get_nlp_pipeline() -> Optional[Language]:
     """Loads and caches the spaCy NLP pipeline with the custom section annotator."""
     global _NLP_PIPELINE
@@ -289,6 +290,7 @@ def _get_nlp_pipeline() -> Optional[Language]:
         return None
 
 
+# Split text into section-aware raw chunks (merging happens at search-time).
 def chunk_text_by_sections(
     text: str,
     target_tokens: Optional[int] = None,

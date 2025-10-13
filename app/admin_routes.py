@@ -58,14 +58,18 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
 ADMIN_UI_REQUEST_HEADER = "x-admin-ui"
 
 
+# Pack a sparse (indices, values) tuple into a serializable dict.
 def _sq_pack(sq: Optional[Tuple[List[int], List[float]]]) -> Optional[Dict[str, Any]]:
+    """Pack a sparse vector tuple into a JSON-serializable dict."""
     if not sq:
         return None
     idx, val = sq
     return {"indices": [int(i) for i in idx], "values": [float(v) for v in val]}
 
 
+# Inspect registered routes and assemble Admin UI operation specs.
 def _build_admin_operations(app) -> List[Dict[str, Any]]:
+    """Build Admin UI operation descriptors from registered routes."""
     route_lookup: Dict[Tuple[str, str], APIRoute] = {}
     for route in app.routes:
         if isinstance(route, APIRoute):
@@ -111,7 +115,9 @@ def _build_admin_operations(app) -> List[Dict[str, Any]]:
     return operations
 
 
+# Attach Admin UI and multi-step debug endpoints to the given FastAPI app.
 def attach_admin_routes(app) -> None:
+    """Attach Admin UI and multi-step debug endpoints to a FastAPI app."""
     # Collect existing routes to avoid duplicate registration when imported alongside legacy definitions
     existing = set()
     try:

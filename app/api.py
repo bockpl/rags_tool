@@ -100,24 +100,32 @@ INGEST_BUILD_BODY = json.dumps(
 )
 
 
+# Build a stable cache key for (summary, content) collections derived from base.
 def _collection_cache_key(base: Optional[str]) -> str:
+    """Stable cache key for a pair of (summary, content) collections."""
     summary_collection, content_collection = derive_collection_names(base)
     return f"{summary_collection}::{content_collection}"
 
 
+# Mark collections for the given base as initialized in this process.
 def _mark_collections_initialized(base: Optional[str]) -> None:
+    """Remember that collections for `base` were ensured in this process."""
     key = _collection_cache_key(base)
     with _collection_init_lock:
         _initialized_collections.add(key)
 
 
+# Clear the initialized-collections flag for the given base.
 def _clear_collection_cache(base: Optional[str]) -> None:
+    """Forget initialization status for collections derived from `base`."""
     key = _collection_cache_key(base)
     with _collection_init_lock:
         _initialized_collections.discard(key)
 
 
+# Ensure collections exist once per process (guards repeated init).
 def _ensure_collections_cached(base: Optional[str] = None) -> None:
+    """Ensure Qdrant collections exist once per process using a local cache."""
     key = _collection_cache_key(base)
     with _collection_init_lock:
         if key in _initialized_collections:
@@ -126,14 +134,21 @@ def _ensure_collections_cached(base: Optional[str] = None) -> None:
         _initialized_collections.add(key)
 
 
+# Scan filesystem for supported files matching pattern.
 def _scan_files(base: pathlib.Path, pattern: str, recursive: bool) -> List[pathlib.Path]:
+    """Scan `base` for files matching pattern and supported extensions."""
     iterator = base.rglob(pattern) if recursive else base.glob(pattern)
     return [p for p in iterator if p.is_file() and p.suffix.lower() in SUPPORTED_EXT]
 
 
+# Iterate ingest records: chunks + LLM summary (+ cached vectors) per file.
 def _iter_document_records(
     file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int, *, force_regen_summary: bool
 ) -> Iterable[Dict[str, Any]]:
+    """Yield ingest records for each document (chunks + summary + vectors).
+
+    Uses sidecar cache unless `force_regen_summary` is set.
+    """
     for path in file_paths:
         doc_start = time.time()
         logger.debug("Processing document %s", path)
@@ -230,7 +245,9 @@ def _iter_document_records(
         yield rec
 
 
+# Iterate JSONL records saved during ingest.
 def _iter_saved_records(path: pathlib.Path) -> Iterable[Dict[str, Any]]:
+    """Iterate JSONL records previously written by ingest step."""
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -239,7 +256,9 @@ def _iter_saved_records(path: pathlib.Path) -> Iterable[Dict[str, Any]]:
             yield json.loads(line)
 
 
+# Iterate chunk texts from saved ingest JSONL.
 def _iter_chunk_texts(path: pathlib.Path) -> Iterable[str]:
+    """Iterate chunk texts from stored ingest records."""
     for rec in _iter_saved_records(path):
         for chunk in rec.get("chunks", []):
             if isinstance(chunk, dict):
@@ -250,7 +269,9 @@ def _iter_chunk_texts(path: pathlib.Path) -> Iterable[str]:
                 yield text
 
 
+# Iterate summary texts from saved ingest JSONL (for TF‑IDF fitting).
 def _iter_summary_texts(path: pathlib.Path) -> Iterable[str]:
+    """Iterate summary texts (for TF-IDF fitting) from stored records."""
     for rec in _iter_saved_records(path):
         summary = rec.get("summary_sparse_text")
         if summary:
@@ -320,6 +341,7 @@ attach_admin_routes(app)
 # Ensure Qdrant collections and indexes at process startup
 @app.on_event("startup")
 def _startup_ensure_collections() -> None:
+    """Best-effort ensure of collections and TF-IDF warm-up at startup."""
     try:
         _ensure_collections_cached()
         # Pre-warm TF-IDF vectorizers (content + summaries) to avoid cold-start latency
@@ -355,7 +377,9 @@ def _startup_ensure_collections() -> None:
     summary="Informacje o aplikacji",
     description="Zwraca metadane serwisu rags_tool (nazwa, wersja, autor, opis).",
 )
+# Return static service metadata (name, version, author, description).
 def about():
+    """Return basic service metadata (name, version, author, description)."""
     return About()
 
 
@@ -365,7 +389,9 @@ def about():
     summary="Stan usługi",
     description="Sprawdza połączenie z Qdrant i raportuje kondycję aplikacji.",
 )
+# Lightweight health probe with Qdrant connectivity check.
 def health():
+    """Return health status with a light Qdrant connectivity check."""
     try:
         qdrant.get_collections()
         return {"status": "ok", "qdrant": True}
@@ -387,7 +413,9 @@ def health():
         "Tworzy parę kolekcji (streszczenia + treść) dla wskazanej nazwy bazowej (jeśli nie istnieją) i opcjonalnie sondą sprawdza wymiar embeddingów przy użyciu force_dim_probe."
     ),
 )
+# Initialize or validate summary/content collections for a base name.
 def collections_init(req: InitCollectionsRequest):
+    """Create or validate the pair of collections for the given base name."""
     from app.core.embedding import get_embedding_dim
 
     dim = get_embedding_dim() if req.force_dim_probe else None
@@ -408,7 +436,9 @@ def collections_init(req: InitCollectionsRequest):
     summary="Eksport kolekcji Qdrant",
     description="Eksportuje wszystkie kolekcje do archiwum .tar.gz zawierającego snapshoty Qdrant oraz lokalne artefakty TF-IDF.",
 )
+# Export all collections and TF‑IDF artifacts as a tar.gz bundle.
 def collections_export(req: CollectionsExportRequest):
+    """Export all Qdrant collections and local TF-IDF artifacts to tar.gz."""
     if req.collection_names:
         logger.info(
             "Parametr collection_names=%s został przesłany, ale eksport obejmuje wszystkie kolekcje.",
@@ -433,6 +463,7 @@ def collections_export(req: CollectionsExportRequest):
         "Przyjmuje archiwum .tar.gz wygenerowane przez /collections/export (plik lub base64) i odtwarza kolekcje ze snapshotów Qdrant oraz indeksy TF-IDF."
     ),
 )
+# Import collections from an uploaded tar.gz bundle (multipart or raw body).
 async def collections_import(
     request: Request,
     archive_file: UploadFile | None = File(
@@ -524,7 +555,9 @@ async def collections_import(
     summary="Skanowanie korpusu",
     description="Zwraca listę plików w katalogu bazowym, które kwalifikują się do ingestu.",
 )
+# List candidate files for ingest under base_dir.
 def ingest_scan(req: ScanRequest):
+    """Return files under base_dir that qualify for ingest (by extension)."""
     base = pathlib.Path(req.base_dir)
     if not base.exists():
         raise HTTPException(status_code=400, detail="base_dir nie istnieje")
@@ -538,7 +571,9 @@ def ingest_scan(req: ScanRequest):
     summary="Streszczenia wybranych plików",
     description="Generuje streszczenia oraz podpisy dla listy plików bez zapisu do Qdrant.",
 )
+# Generate summaries for the given files (no persistence).
 def summaries_generate(req: SummariesGenerateRequest):
+    """Generate summaries for the provided files without persisting results."""
     results = {}
     for f in req.files:
         p = pathlib.Path(f)
@@ -559,7 +594,9 @@ def summaries_generate(req: SummariesGenerateRequest):
         "Buduje indeks rags_tool: parsuje dokumenty, tworzy streszczenia, embeddingi oraz zapisuje punkty (wraz z TF-IDF) do Qdrant."
     ),
 )
+# Full ingest: parse, summarize, embed and upsert into Qdrant.
 def ingest_build(req: IngestBuildRequest):
+    """Parse, summarize, embed and upsert corpus into Qdrant (full ingest)."""
     t0 = time.time()
     logger.debug(
         "Starting ingest build | base_dir=%s glob=%s recursive=%s reindex=%s",
@@ -660,6 +697,7 @@ def ingest_build(req: IngestBuildRequest):
     tags=["tools"],
     description=settings.search_tool_description,
 )
+# Two‑stage hybrid search with optional reranker over merged blocks.
 def search_query(req: SearchQuery):
     """
     Endpoint: /search/query (POST)

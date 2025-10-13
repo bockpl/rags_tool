@@ -36,6 +36,7 @@ from typing import Any, Dict, Optional
 SCHEMA_VERSION = "1.0.0"
 
 
+# Compute SHA256 digest over raw file bytes (stable w.r.t extractor changes).
 def compute_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
     """Compute SHA256 over raw file bytes.
 
@@ -52,6 +53,7 @@ def compute_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+# Compute path for sidecar cache: <dir>/.summary/<stem>_summary.json.gz
 def sidecar_path_for(source: Path) -> Path:
     """Return sidecar cache path: `<dir>/.summary/<basename>_summary.json.gz`."""
     base = source.parent / ".summary"
@@ -59,6 +61,7 @@ def sidecar_path_for(source: Path) -> Path:
     return base / filename
 
 
+# Load sidecar if present and valid for the given file hash; else return None.
 def load_sidecar(source: Path, expected_sha256: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Load sidecar cache if present and valid.
 
@@ -89,6 +92,7 @@ def load_sidecar(source: Path, expected_sha256: Optional[str] = None) -> Optiona
     return data
 
 
+# Atomically write sidecar cache for a document's summary and vectors.
 def save_sidecar(
     source: Path,
     *,
@@ -121,4 +125,3 @@ def save_sidecar(
         json.dump(payload, fh, ensure_ascii=False)
     os.replace(tmp_path, sc_path)
     return sc_path
-

@@ -1,6 +1,9 @@
-# rags_tool (2.7.1)
+# rags_tool (2.7.2)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.7.2
+- Dokumentacja: dodano lub uzupełniono docstringi/komentarze dla wszystkich funkcji i metod w modułach API, wyszukiwania, Qdrant oraz przetwarzania. Wszystkie docstringi są po angielsku (zgodnie z wytycznymi), bez zmian funkcjonalnych.
 
 ## Nowości w 2.7.1
 - Poprawka: proces budowania z regeneracją streszczeń nie kończy się błędem 500 w przypadku błędnej konfiguracji endpointu LLM (np. odpowiedź 405 Not Allowed z reverse proxy/nginx). Dodano bezpieczny fallback lokalny w `llm_summary`, który tworzy minimalne streszczenie na podstawie treści, a w logach pojawia się czytelny komunikat diagnostyczny z `SUMMARY_API_URL`.
