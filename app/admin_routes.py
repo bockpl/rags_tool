@@ -9,11 +9,13 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, get_args, get_origin
+import inspect
 
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.routing import APIRoute
+from pydantic import BaseModel
 from qdrant_client.http import models as qm
 
 from app.core.embedding import embed_query
@@ -69,7 +71,159 @@ def _sq_pack(sq: Optional[Tuple[List[int], List[float]]]) -> Optional[Dict[str, 
 
 # Inspect registered routes and assemble Admin UI operation specs.
 def _build_admin_operations(app) -> List[Dict[str, Any]]:
-    """Build Admin UI operation descriptors from registered routes."""
+    """Build Admin UI operation descriptors from registered routes.
+
+    Enhancements:
+    - Derive human‑readable parameter docs for request body models (Pydantic),
+      so Admin UI shows a concise, up‑to‑date list of accepted fields with
+      defaults and allowed values when detectable. This avoids duplication by
+      sourcing directly from model `Field` descriptions.
+    """
+    def _short_type(tp: Any) -> str:
+        """Return a short, user‑friendly type name for display in UI."""
+        try:
+            origin = get_origin(tp)
+            args = get_args(tp)
+            if str(origin).endswith("Union"):
+                # Optional[X] is Union[X, NoneType]
+                args_set = set(args)
+                if type(None) in args_set and len(args) == 2:
+                    other = next(a for a in args if a is not type(None))
+                    return f"Optional[{_short_type(other)}]"
+                return "Union[" + ", ".join(_short_type(a) for a in args) + "]"
+            if origin is list or origin is List:
+                inner = _short_type(args[0]) if args else "Any"
+                return f"List[{inner}]"
+            if origin is tuple or origin is Tuple:
+                inner = ", ".join(_short_type(a) for a in args) if args else ""
+                return f"Tuple[{inner}]"
+            if origin is dict or origin is Dict:
+                if len(args) == 2:
+                    return f"Dict[{_short_type(args[0])}, {_short_type(args[1])}]"
+                return "Dict"
+            if origin is Optional:
+                inner = _short_type(args[0]) if args else "Any"
+                return f"Optional[{inner}]"
+        except Exception:
+            pass
+        # Builtins and typing names
+        try:
+            if tp in (str, int, float, bool):
+                return tp.__name__
+        except Exception:
+            pass
+        return getattr(tp, "__name__", str(tp))
+
+    def _extract_choices(desc: Optional[str]) -> Optional[str]:
+        """Extract pipe‑separated choices like a|b|c from description text."""
+        if not desc:
+            return None
+        import re
+
+        # Find sequences like word|word|word (letters, digits, _ . -)
+        candidates = re.findall(r"(?:[A-Za-z0-9_.-]+\|){1,}[A-Za-z0-9_.-]+", desc)
+        if not candidates:
+            return None
+        # Choose the longest by number of variants
+        best = max(candidates, key=lambda s: s.count("|"))
+        # De‑duplicate and keep order
+        parts: List[str] = []
+        for p in best.split("|"):
+            if p not in parts:
+                parts.append(p)
+        return " | ".join(parts)
+
+    def _model_param_doc(model_cls: Any) -> Optional[str]:
+        """Build a Polish parameter section for a Pydantic BaseModel class."""
+        try:
+            if not (isinstance(model_cls, type) and issubclass(model_cls, BaseModel)):
+                return None
+        except Exception:
+            return None
+        lines: List[str] = []
+        # Header
+        lines.append(f"Parametry ({getattr(model_cls, '__name__', 'model')}):")
+        try:
+            fields = getattr(model_cls, "model_fields", {})
+            # Preserve declared order
+            for name, fi in fields.items():
+                ann = getattr(fi, "annotation", Any)
+                typ = _short_type(ann)
+                # Default handling (pydantic v2)
+                default_val = getattr(fi, "default", ...)
+                if default_val is ...:
+                    # Try default factory (pydantic v2)
+                    factory = getattr(fi, "default_factory", None)
+                    if callable(factory):
+                        try:
+                            default_val = factory()
+                        except Exception:
+                            default_val = "<factory>"
+                default_str: str
+                if default_val is ...:
+                    default_str = "wymagany"
+                else:
+                    try:
+                        default_str = json.dumps(default_val, ensure_ascii=False)
+                    except Exception:
+                        default_str = str(default_val)
+                desc = getattr(fi, "description", None) or ""
+                choices = _extract_choices(desc)
+                bullet = f"- {name} ({typ}) domyślnie: {default_str}. {desc}".strip()
+                if choices:
+                    bullet += f" Dozwolone wartości: {choices}."
+                lines.append(bullet)
+        except Exception:
+            # Fallback without fields listing
+            return None
+        return "\n".join(lines)
+
+    def _request_model_from_route(route: Optional[APIRoute]) -> Optional[Any]:
+        if not route or not getattr(route, "endpoint", None):
+            return None
+        try:
+            sig = inspect.signature(route.endpoint)
+            for p in sig.parameters.values():
+                ann = p.annotation
+                try:
+                    if isinstance(ann, type) and issubclass(ann, BaseModel):
+                        return ann
+                except Exception:
+                    continue
+        except Exception:
+            return None
+        # Try FastAPI dependant/body_params for request model (robust path)
+        try:
+            dep = getattr(route, "dependant", None)
+            body_params = getattr(dep, "body_params", []) if dep else []
+            for bp in body_params or []:
+                # Try a few likely attribute names across FastAPI/Pydantic versions
+                for attr in ("annotation", "type_annotation", "type_", "outer_type_", "field"):  # type: ignore[attr-defined]
+                    ann = getattr(bp, attr, None)
+                    if ann is None:
+                        continue
+                    try:
+                        if isinstance(ann, type) and issubclass(ann, BaseModel):
+                            return ann
+                    except Exception:
+                        # Some wrappers carry nested `.type_` / `.annotation`
+                        inner = getattr(ann, "type_", None) or getattr(ann, "annotation", None)
+                        try:
+                            if isinstance(inner, type) and issubclass(inner, BaseModel):
+                                return inner
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        # Fallback for known route id/path
+        try:
+            if getattr(route, "path", "") == "/search/query" or getattr(route, "operation_id", "") == "rags_tool_search":
+                from app.models import SearchQuery as _SQ  # lazy import to avoid cycles
+                if isinstance(_SQ, type) and issubclass(_SQ, BaseModel):
+                    return _SQ
+        except Exception:
+            pass
+        return None
     route_lookup: Dict[Tuple[str, str], APIRoute] = {}
     for route in app.routes:
         if isinstance(route, APIRoute):
@@ -83,6 +237,11 @@ def _build_admin_operations(app) -> List[Dict[str, Any]]:
         summary = route.summary if route else None
         description = route.description if route else None
         doc_parts = [part for part in [summary, description] if part]
+        # Add dynamic parameter list for request model (keeps docs in sync)
+        model_cls = _request_model_from_route(route)
+        extra = _model_param_doc(model_cls) if model_cls else None
+        if extra:
+            doc_parts.append(extra)
         handler_name = None
         handler_loc = None
         if route and getattr(route, "endpoint", None):

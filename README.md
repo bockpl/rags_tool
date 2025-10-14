@@ -1,6 +1,10 @@
-# rags_tool (2.9.0)
+# rags_tool (2.9.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.9.1
+- Admin UI: widoczne, automatycznie generowane opisy dla operacji (funkcji) dostępnych w panelu. Sekcja dokumentacji per‑endpoint zawiera teraz listę parametrów, ich typy, wartości domyślne oraz — gdy dotyczy — dozwolone wartości (np. `auto|current|archival|all`, `flat|grouped|blocks`). Opisy są generowane dynamicznie na podstawie modeli Pydantic i metadanych endpointów FastAPI, dzięki czemu pozostają spójne z dokumentacją i nie wymagają duplikacji treści.
+- Brak zmian w API — zmiana dotyczy wyłącznie warstwy UI/dokumentacji w panelu administracyjnym.
 
 ## Nowości w 2.9.0
 - API: do wyników dodano pola `title`, `doc_date`, `is_active` we wszystkich formatach odpowiedzi (`flat`, `grouped`, `blocks`).
