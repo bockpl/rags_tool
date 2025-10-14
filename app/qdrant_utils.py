@@ -108,6 +108,7 @@ DEFAULT_PAYLOAD_INDEXES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("is_active", {"type": "bool"}),
     ("section_path", {"type": "keyword"}),
     ("section_path_prefixes", {"type": "keyword"}),
+    ("doc_date", {"type": "keyword"}),
 )
 
 
@@ -1043,6 +1044,7 @@ def build_and_upsert_points(
         doc_summary = rec["doc_summary"]
         doc_signature = rec["doc_signature"]
         summary_sparse_text = rec["summary_sparse_text"]
+        doc_date_val = str(rec.get("doc_date", "") or "").strip()
         replacement_info = str(rec.get("replacement", "") or "brak").strip() or "brak"
         if replacement_info.lower() == "brak":
             replacement_info = "brak"
@@ -1120,6 +1122,8 @@ def build_and_upsert_points(
             "signature": doc_signature,
         }
         summary_payload["replacement"] = replacement_info
+        if doc_date_val:
+            summary_payload["doc_date"] = doc_date_val
         summary_vectors: Dict[str, Any] = {
             SUMMARY_VECTOR_NAME: summary_dense_vec,
         }

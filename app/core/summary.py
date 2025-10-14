@@ -53,6 +53,7 @@ def _naive_local_summary(text: str, max_sentences: int = 5) -> Dict[str, Any]:
         "signature": [],
         "entities": "",
         "replacement": "brak",
+        "doc_date": "brak",
     }
 
 
@@ -105,6 +106,13 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
             replacement_str = replacement_str or "brak"
             if replacement_str.lower() == "brak":
                 replacement_str = "brak"
+            # Try several keys for date; prefer 'doc_date'
+            date_val = data.get("doc_date", data.get("date", data.get("document_date", "")))
+            if isinstance(date_val, list):
+                doc_date_str = " ".join(str(s).strip() for s in date_val if str(s).strip())
+            else:
+                doc_date_str = str(date_val or "").strip()
+            doc_date_str = doc_date_str or "brak"
             title_str = title_str or _default_title_from_text(text)
             if summary_val:
                 return {
@@ -113,6 +121,7 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
                     "signature": signature_list,
                     "entities": entities_str,
                     "replacement": replacement_str,
+                    "doc_date": doc_date_str,
                 }
         except Exception as exc:
             logger.warning("JSON-mode summary failed; falling back to text parser: %s", exc)
@@ -141,6 +150,7 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
     signature_list: List[str] = []
     entities_str = ""
     replacement_str = "brak"
+    doc_date_str = "brak"
     for line in out.splitlines():
         m = re.match(r"^\s*title\s*:\s*(.*)$", line, re.IGNORECASE)
         if m:
@@ -161,6 +171,11 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
         if m:
             entities_str = m.group(1).strip()
             continue
+        m = re.match(r"^\s*date\s*:\s*(.*)$", line, re.IGNORECASE)
+        if m:
+            dd = m.group(1).strip()
+            doc_date_str = dd if dd else "brak"
+            continue
         m = re.match(r"^\s*replacement\s*:\s*(.*)$", line, re.IGNORECASE)
         if m:
             replacement_candidate = m.group(1).strip()
@@ -178,4 +193,5 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
         "signature": signature_list,
         "entities": entities_str,
         "replacement": replacement_str,
+        "doc_date": doc_date_str or "brak",
     }

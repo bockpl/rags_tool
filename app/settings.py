@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.7.2"
+    app_version: str = "2.8.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -44,12 +44,13 @@ class SummRAGSettings(BaseSettings):
             "Streść poniższy tekst w maks. 5 zdaniach. Wypisz też sekcje: 'TITLE' (krótki, "
             " jednoznaczny tytuł dokumentu — preferuj pierwszą linię lub numer aktu; "
             " pojedyncza fraza, bez dodatkowego komentarza), 'SIGNATURE' (10–20 lematów "
-            " kluczowych), 'ENTITIES' (nazwy własne/ID/zakresy dat) oraz 'REPLACEMENT' "
-            " (krótka lista tytułów, zawsze w mianowniku; może składać się jedynie z krótkich "
-            " tytułów aktów zastępowanych, jeśli tekst jednolity wypisz wszystkie tytuły aktów "
-            " które ujednolica, rozdziel średnikami; wpisz dokładnie 'brak', jeżeli brak danych). "
-            " Bez komentarzy.\\n\\nFORMAT:\\nTITLE: ...\\nSUMMARY: ...\\nSIGNATURE: "
-            " lemma1, lemma2, ...\\nENTITIES: ...\\nREPLACEMENT: ...\\n\\nTEKST:\\n"
+            " kluczowych), 'ENTITIES' (nazwy własne/ID/zakresy dat), 'DATE' (data "
+            " wprowadzenia/ogłoszenia dokumentu; preferuj format YYYY-MM-DD lub YYYY; wpisz "
+            " dokładnie 'brak', jeśli brak informacji) oraz 'REPLACEMENT' (krótka lista tytułów, "
+            " zawsze w mianowniku; może składać się jedynie z krótkich tytułów aktów zastępowanych, "
+            " jeśli tekst jednolity wypisz wszystkie tytuły aktów które ujednolica, rozdziel „;”; "
+            " wpisz dokładnie 'brak', jeżeli brak danych). Bez komentarzy.\\n\\nFORMAT:\\nTITLE: ...\\nSUMMARY: ...\\nSIGNATURE: "
+            " lemma1, lemma2, ...\\nENTITIES: ...\\nDATE: ...\\nREPLACEMENT: ...\\n\\nTEKST:\\n"
         ),
         alias="SUMMARY_PROMPT",
     )
@@ -59,10 +60,10 @@ class SummRAGSettings(BaseSettings):
             " krótki jednoznaczny tytuł, preferuj pierwszą linię lub numer dokumentu; max 200 znaków, "
             " zawsze w mianowniku), 'summary' (string; max 5 zdań po polsku), 'signature' "
             " (lista 10–20 lematów kluczowych jako strings), 'entities' (string z nazwami "
-            " własnymi/ID/zakresami dat), 'replacement' (string; krótkie tytuły aktów zastępowanych, "
-            " zawsze w mianowniku; może składać się jedynie z krótkich tytułów aktów zastępowanych, "
-            " jeśli tekst jednolity wypisz wszystkie tytuły aktów które ujednolica, separator ';'; "
-            " wpisz dokładnie 'brak', jeśli brak informacji)."
+            " własnymi/ID/zakresami dat), 'doc_date' (string; data wprowadzenia/ogłoszenia dokumentu "
+            " w formacie 'YYYY-MM-DD' lub 'YYYY-MM' lub 'YYYY'; jeśli brak informacji wpisz dokładnie 'brak'), "
+            " 'replacement' (string; krótkie tytuły aktów zastępowanych, zawsze w mianowniku; może składać się jedynie z krótkich tytułów aktów "
+            " zastępowanych, jeśli tekst jednolity wypisz wszystkie tytuły aktów które ujednolica, separator ';'; wpisz dokładnie 'brak', jeśli brak informacji)."
         ),
         alias="SUMMARY_PROMPT_JSON",
     )

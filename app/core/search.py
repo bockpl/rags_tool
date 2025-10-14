@@ -309,6 +309,7 @@ def _stage1_select_documents(
             "path",
             "summary",
             "signature",
+            "doc_date",
         ]
         if summary_sparse_query is not None and SPARSE_ENABLED:
             include_fields.extend(["summary_sparse_indices", "summary_sparse_values"])
@@ -363,7 +364,7 @@ def _stage1_select_documents(
         hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
     else:
         # Dual-query: dense + sparse, then fuse (no TF-IDF payload needed)
-        include_fields = ["doc_id", "path", "summary", "signature"]
+        include_fields = ["doc_id", "path", "summary", "signature", "doc_date"]
         with_payload_dense = include_fields if settings.search_minimal_payload else True
         dense_hits = qdrant.search(
             collection_name=settings.qdrant_summary_collection,

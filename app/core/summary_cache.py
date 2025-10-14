@@ -11,11 +11,12 @@ Schema (versioned by SCHEMA_VERSION):
   "document": {
     "content_sha256": "..."
   },
-  "summary": {
+    "summary": {
     "title": "...",
     "summary": "...",
     "signature": ["..."],
-    "replacement": "brak | ..."
+    "replacement": "brak | ...",
+    "doc_date": "YYYY-MM-DD | YYYY | brak"
   },
   "vectors": {
     "summary_dense": [float, ...]
@@ -102,6 +103,7 @@ def save_sidecar(
     signature: list[str],
     replacement: str,
     summary_dense: list[float],
+    doc_date: str = "brak",
 ) -> Path:
     """Write sidecar cache atomically. Returns final path."""
     sc_path = sidecar_path_for(source)
@@ -116,6 +118,7 @@ def save_sidecar(
             "summary": summary,
             "signature": signature,
             "replacement": replacement,
+            "doc_date": doc_date or "brak",
         },
         "vectors": {"summary_dense": summary_dense},
     }

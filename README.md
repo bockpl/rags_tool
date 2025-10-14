@@ -1,4 +1,4 @@
-# rags_tool (2.7.2)
+# rags_tool (2.8.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
@@ -630,3 +630,37 @@ MIT
   Debug multi‑query przyjmuje ten sam zestaw parametrów co `/search/query` już od pierwszego kroku i przenosi je między etapami bez obcinania.
 -## Nowości w 2.2.1
 - Poprawka: błąd inicjalizacji Admin UI (literówka `true` → `True` w specyfikacji operacji importu) uniemożliwiał start serwisu.
+## Nowości w 2.8.0
+- Streszczenia zawierają teraz pole `doc_date` (data wprowadzenia/ogłoszenia dokumentu). Pole jest:
+  - wydobywane przez model (prompt uzupełniony o instrukcję),
+  - zapisywane w cache `.summary/*.json.gz`,
+  - dodawane do payloadu Qdrant dla punktów typu `summary`,
+  - włączane do wektoryzacji TF‑IDF streszczeń (lepsze dopasowania zapytań z datami).
+- Nowy indeks payload w Qdrant: `doc_date` (typ `keyword`). Tworzony automatycznie przy inicjalizacji kolekcji.
+
+### Dodanie indeksu `doc_date` do istniejących kolekcji
+Jeśli kolekcje powstały przed 2.8.0, możesz dodać brakujący indeks jednym skryptem:
+
+```bash
+python - <<'PY'
+from app.qdrant_utils import qdrant
+from app.settings import get_settings
+from qdrant_client.http import models as qm
+
+settings = get_settings()
+for coll in (settings.qdrant_summary_collection, settings.qdrant_content_collection):
+    try:
+        qdrant.create_payload_index(
+            collection_name=coll,
+            field_name="doc_date",
+            field_schema=qm.PayloadIndexParams(type="keyword"),
+        )
+        print(f"[OK] {coll}: doc_date")
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "already exists" in msg or getattr(exc, "status_code", None) == 409:
+            print(f"[SKIP] {coll}: doc_date (już istnieje)")
+        else:
+            raise
+PY
+```

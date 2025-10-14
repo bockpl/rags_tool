@@ -186,6 +186,7 @@ def _iter_document_records(
                 "summary": str(summ_block.get("summary") or ""),
                 "signature": list(summ_block.get("signature") or []),
                 "replacement": str(summ_block.get("replacement") or "brak") or "brak",
+                "doc_date": str(summ_block.get("doc_date") or "brak") or "brak",
             }
             summary_dense_vec = list(vectors_block.get("summary_dense") or [])
         else:
@@ -203,6 +204,7 @@ def _iter_document_records(
                     signature=list(doc_sum.get("signature", []) or []),
                     replacement=str(doc_sum.get("replacement", "brak") or "brak"),
                     summary_dense=list(summary_dense_vec),
+                    doc_date=str(doc_sum.get("doc_date", "brak") or "brak"),
                 )
                 logger.debug("Sidecar saved | path=%s sidecar=%s", path, sidecar_path_for(path).name)
             except Exception as exc:
@@ -220,6 +222,10 @@ def _iter_document_records(
             doc_sum.get("summary", ""),
             " ".join(summary_signature),
         ]
+        # Include doc_date in sparse summary if available and not 'brak'
+        doc_date_val = str(doc_sum.get("doc_date", "") or "").strip()
+        if doc_date_val and doc_date_val.lower() != "brak":
+            summary_sparse_parts.append(doc_date_val)
         if replacement_info.lower() != "brak":
             summary_sparse_parts.append(replacement_info)
         summary_sparse_text = " ".join(part for part in summary_sparse_parts if part).strip()
@@ -231,6 +237,7 @@ def _iter_document_records(
             "doc_summary": doc_sum.get("summary", ""),
             "doc_signature": summary_signature,
             "replacement": replacement_info,
+            "doc_date": doc_sum.get("doc_date", "brak"),
             "summary_sparse_text": summary_sparse_text,
             # Precomputed dense summary vector (used to skip embedding in upsert stage)
             "summary_dense_vec": list(summary_dense_vec) if (sidecar or summary_dense_vec is not None) else None,
