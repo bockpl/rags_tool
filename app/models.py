@@ -158,6 +158,9 @@ class SearchQuery(BaseModel):
 class SearchHit(BaseModel):
     doc_id: str = Field(..., description="Stable document identifier (sha1 over absolute path).")
     path: str = Field(..., description="Absolute document path (for citation).")
+    title: Optional[str] = Field(default=None, description="Document title extracted during ingest.")
+    doc_date: Optional[str] = Field(default=None, description="Document date (YYYY, YYYY-MM, or YYYY-MM-DD) or 'brak'.")
+    is_active: Optional[bool] = Field(default=None, description="Whether the document is marked as current (true) or archival (false).")
     section: Optional[str] = Field(default=None, description="Optional document section identifier, if present.")
     chunk_id: int = Field(..., description="Chunk index within the document (0-based).")
     score: float = Field(..., description="Hybrid relevance score (normalized according to score_norm).")
@@ -181,6 +184,9 @@ class SearchChunk(BaseModel):
 class SearchGroup(BaseModel):
     doc_id: str = Field(..., description="Stable document identifier.")
     path: str = Field(..., description="Absolute document path.")
+    title: Optional[str] = Field(default=None, description="Document title extracted during ingest.")
+    doc_date: Optional[str] = Field(default=None, description="Document date (YYYY, YYYY-MM, or YYYY-MM-DD) or 'brak'.")
+    is_active: Optional[bool] = Field(default=None, description="Whether the document is marked as current (true) or archival (false).")
     summary: Optional[str] = Field(default=None, description="Document-level summary (single copy per document).")
     score: float = Field(..., description="Max score among group's chunks.")
     chunks: List[SearchChunk] = Field(..., description="Chunk-level results belonging to this document.")
@@ -189,13 +195,15 @@ class SearchGroup(BaseModel):
 class MergedBlock(BaseModel):
     doc_id: str = Field(..., description="Stable document identifier.")
     path: str = Field(..., description="Absolute document path.")
+    title: Optional[str] = Field(default=None, description="Document title extracted during ingest.")
+    doc_date: Optional[str] = Field(default=None, description="Document date (YYYY, YYYY-MM, or YYYY-MM-DD) or 'brak'.")
+    is_active: Optional[bool] = Field(default=None, description="Whether the document is marked as current (true) or archival (false).")
     section: Optional[str] = Field(default=None, description="Optional section identifier.")
     first_chunk_id: int = Field(..., description="First chunk id (inclusive) in this merged block.")
     last_chunk_id: int = Field(..., description="Last chunk id (inclusive) in this merged block.")
     score: float = Field(..., description="Block score = max score among its member chunks.")
     summary: Optional[str] = Field(default=None, description="Document/section summary if requested by summary_mode.")
     text: str = Field(..., description="Merged textual content of the block (joined contiguous chunks).")
-    token_estimate: Optional[int] = Field(default=None, description="Heuristic token length (~4 chars/token).")
     # Pola opcjonalne dla rerankera (jeśli włączony):
     ranker_score: Optional[float] = Field(default=None, description="Ocena jakości nadana przez ranker (0..1).")
 

@@ -1,6 +1,14 @@
-# rags_tool (2.8.0)
+# rags_tool (2.9.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.9.0
+- API: do wyników dodano pola `title`, `doc_date`, `is_active` we wszystkich formatach odpowiedzi (`flat`, `grouped`, `blocks`).
+- API: usunięto pole `token_estimate` z bloków (`result_format=blocks`).
+- Dokumentacja endpointu zaktualizowana (lista pól `blocks`).
+
+## Nowości w 2.8.1
+- Poprawka: `POST /search/query` z `result_format="flat"` lub `"grouped"` kończył się błędem 500 (`UnboundLocalError: blocks_payload`). Zmienna pomocnicza była niezainicjalizowana w gałęzi nie‑"blocks" funkcji kształtującej wynik. Naprawiono przez jednoznaczne ustawienie `blocks_payload = None` dla tych formatów. Bez zmian funkcjonalnych.
 
 ## Nowości w 2.7.2
 - Dokumentacja: dodano lub uzupełniono docstringi/komentarze dla wszystkich funkcji i metod w modułach API, wyszukiwania, Qdrant oraz przetwarzania. Wszystkie docstringi są po angielsku (zgodnie z wytycznymi), bez zmian funkcjonalnych.

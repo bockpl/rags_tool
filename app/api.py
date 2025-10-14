@@ -743,6 +743,9 @@ def search_query(req: SearchQuery):
     * The returned payload contains `blocks` where each block includes:
         - `text` – concatenated chunk text (evidence).
         - `path` – source file path.
+        - `title` – document title.
+        - `doc_date` – document date (YYYY, YYYY-MM, or YYYY-MM-DD) or 'brak'.
+        - `is_active` – whether the document is current (true) or archival (false).
         - `first_chunk_id` / `last_chunk_id` – range of original chunk IDs.
         - `score` – relevance score.
 
