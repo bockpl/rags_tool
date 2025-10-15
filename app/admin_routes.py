@@ -40,6 +40,7 @@ logger = logging.getLogger("rags_tool")
 
 
 ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
+    {"id": "analysis-contradictions", "path": "/analysis/contradictions", "method": "POST", "label": "Analiza sprzeczności (sekcjami)", "body": "{\n  \"title\": \"Tytuł dokumentu\",\n  \"mode\": \"current\",\n  \"section_level\": \"ust\",\n  \"max_candidates_per_section\": 6,\n  \"include_archival_conflicts\": false,\n  \"confidence_threshold\": 0.6\n}"},
     # Multi-query flow mirroring /search/query
     {"id": "search-debug-embed-multi", "path": "/search/debug/embed_multi", "method": "POST", "label": "Search Debug (multi): 1) embed", "body": "{\n  \"query\": [\n    \"pierwsze zapytanie\",\n    \"drugie zapytanie\"\n  ],\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"top_m\": 100,\n  \"top_k\": 10,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"mmr_stage1\": true,\n  \"result_format\": \"blocks\",\n  \"summary_mode\": \"first\"\n}"},
     {"id": "search-debug-stage1-multi", "path": "/search/debug/stage1_multi", "method": "POST", "label": "Search Debug (multi): 2) stage1", "body": "{\n  \"queries\": [\n    \"pierwsze zapytanie\",\n    \"drugie zapytanie\"\n  ],\n  \"q_vecs\": [[0.0],[0.0]],\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"top_m\": 100,\n  \"score_norm\": \"minmax\",\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_stage1\": true,\n  \"mmr_lambda\": 0.3\n}"},

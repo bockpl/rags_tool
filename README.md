@@ -1,6 +1,48 @@
-# rags_tool (2.9.1)
+# rags_tool (2.12.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.12.1
+- Analiza sprzeczności: odpowiedź zawiera teraz `took_ms` (czas wykonania w ms) oraz w logach DEBUG wypisywany jest czas wraz z liczbą sekcji i kandydatów.
+
+## Nowości w 2.12.0
+- Analiza sprzeczności: odpowiedź zawiera teraz listę `processed_docs` (doc_id, title, doc_date, is_active) — pozwala potwierdzić zakres pracy nawet, gdy nie znaleziono niezgodności.
+
+## Nowości w 2.11.0
+- Analiza sprzeczności (rozszerzenie funkcjonalne):
+  - Ekstrakcja `subject` i `rule_type` z sekcji referencyjnej (LLM + heurystyki),
+  - Bramkowanie: reguły typu `entry_into_force` porównywane wyłącznie w obrębie tego samego dokumentu,
+  - Sędzia (LLM) otrzymuje dodatkowe meta: `subject_a/b`, `title_a/b`, `doc_id_a/b`, `rule_type` i ma jasną instrukcję, by oceniać sprzeczność tylko dla tego samego aktu,
+  - Odpowiedź zawiera pola audytowe: `rule_subject`, `rule_type`, oraz w konfliktach `subject_a`, `subject_b`, `same_subject`, `rule_type`.
+
+## Nowości w 2.10.1
+- Analiza sprzeczności: wzmocniono stabilność JSON po stronie sędziego (LLM) — tolerancja na bloki kodu/backticks i preambuły, lepsze logowanie diagnostyczne w razie nie‑JSON.
+
+## Nowości w 2.10.0
+- Nowy endpoint narzędziowy: `POST /analysis/contradictions` — analiza sprzeczności/niespójności między sekcjami dokumentów. Analiza wykonywana jest on‑the‑fly dla podanego tytułu dokumentu referencyjnego. Domyślnie:
+  - przeszukiwane są tylko dokumenty obowiązujące (`is_active=true`),
+  - raport powstaje sekcjami na poziomie `ust`,
+  - kandydatów na sekcję: 6 (konfigurowalne),
+  - próg pewności LLM: 0.6 (konfigurowalne),
+  - forma odpowiedzi: JSON.
+
+Przykład wywołania:
+
+```http
+POST /analysis/contradictions
+Content-Type: application/json
+
+{
+  "title": "Tytuł dokumentu",
+  "mode": "current",
+  "section_level": "ust",
+  "max_candidates_per_section": 6,
+  "include_archival_conflicts": false,
+  "confidence_threshold": 0.6
+}
+```
+
+Uwaga dla integracji LLM: to narzędzie powinno być używane wyłącznie, gdy użytkownik wprost prosi o wykrycie sprzeczności/niespójności dla wskazanego dokumentu. Do zwykłego wyszukiwania używaj `POST /search/query` (zwraca `blocks`).
 
 ## Nowości w 2.9.1
 - Admin UI: widoczne, automatycznie generowane opisy dla operacji (funkcji) dostępnych w panelu. Sekcja dokumentacji per‑endpoint zawiera teraz listę parametrów, ich typy, wartości domyślne oraz — gdy dotyczy — dozwolone wartości (np. `auto|current|archival|all`, `flat|grouped|blocks`). Opisy są generowane dynamicznie na podstawie modeli Pydantic i metadanych endpointów FastAPI, dzięki czemu pozostają spójne z dokumentacją i nie wymagają duplikacji treści.

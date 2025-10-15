@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.9.1"
+    app_version: str = "2.12.1"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -97,6 +97,46 @@ class SummRAGSettings(BaseSettings):
             "Używaj do pytań o treści z indeksu; przy braku wyników zawężaj temat lub doprecyzuj daty."
         ),
         alias="SEARCH_TOOL_DESCRIPTION",
+    )
+
+    # --- Contradictions analysis (on-the-fly) ---
+    contradictions_tool_description: str = Field(
+        default=(
+            "Analiza sprzeczności w korpusie. UŻYWAJ TYLKO, gdy użytkownik wprost prosi o "
+            "wykrycie sprzeczności/niespójności dla wskazanego tytułu dokumentu. Wywołuj "
+            "POST /analysis/contradictions z JSON: {\n  \"title\": \"Tytuł dokumentu\"\n}. "
+            "Domyślnie porównuje wyłącznie dokumenty obowiązujące (is_active=true) i raportuje sekcjami na poziomie 'ust'. "
+            "Nie używaj do zwykłego wyszukiwania — do tego służy /search/query."
+        ),
+        alias="CONTRADICTIONS_TOOL_DESCRIPTION",
+    )
+    contradictions_rule_prompt_json: str = Field(
+        default=(
+            "Zwróć wyłącznie JSON (bez bloków kodu, bez backticks, bez komentarzy). "
+            "Wyodrębnij z dostarczonego fragmentu: "
+            "- 'rule' (string; 1–2 zdania po polsku; bez cytowania, bez referencji), "
+            "- 'subject' (string; tytuł/oznaczenie aktu lub 'this' jeśli mowa o niniejszym akcie), "
+            "- 'rule_type' (string; jedno z: entry_into_force, repeal, deadline, threshold, scope, other). "
+            "Wskazówki: Jeśli fragment dotyczy wejścia w życie (np. 'wchodzi w życie', 'z dniem ...'), przypisz 'entry_into_force'."
+        ),
+        alias="CONTRADICTIONS_RULE_PROMPT_JSON",
+    )
+    contradictions_judge_prompt_json: str = Field(
+        default=(
+            "Zwróć wyłącznie JSON (bez bloków kodu, bez backticks, bez komentarzy). Oceniasz relację między dwoma fragmentami tekstu prawniczego/organizacyjnego. "
+            "Użyj następujących etykiet: 'contradiction' (A i B nie mogą być jednocześnie prawdziwe lub nakazują "
+            "sprzeczne działania), 'entails' (B wynika z A lub A z B), 'overlap' (częściowo związane, brak sprzeczności), "
+            "'unrelated' (brak związku). Wejście ma strukturę: {rule_a, subject_a, title_a, doc_id_a, context_a, subject_b, title_b, doc_id_b, context_b, rule_type}. "
+            "Zasady: Dwa różne akty mogą wchodzić w życie w różnych terminach — to NIE jest sprzeczność; sprzeczność rozważaj tylko, jeśli A i B dotyczą tego samego aktu (same_subject=true). "
+            "Zwróć: 'label' (string), 'confidence' (0..1), 'rationale' (krótkie uzasadnienie, max 2 zdania), "
+            "'quotes_a' (lista krótkich cytatów z A), 'quotes_b' (lista krótkich cytatów z B), "
+            "'subject_extracted_a' (string), 'subject_extracted_b' (string), 'same_subject' (bool). Cytuj tylko z dostarczonych kontekstów."
+        ),
+        alias="CONTRADICTIONS_JUDGE_PROMPT_JSON",
+    )
+    contradictions_max_context_chars: int = Field(
+        default=2500,
+        alias="CONTRADICTIONS_MAX_CONTEXT_CHARS",
     )
 
     # Globalny przełącznik: pomiń Etap 1 (streszczenia) i szukaj od razu w całym korpusie (chunkach).

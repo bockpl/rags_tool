@@ -46,6 +46,8 @@ from app.models import (
     SearchQuery,
     SearchResponse,
     SummariesGenerateRequest,
+    ContradictionAnalysisRequest,
+    ContradictionAnalysisResponse,
 )
 from app.qdrant_utils import (
     build_and_upsert_points,
@@ -65,6 +67,7 @@ from app.core.summary_cache import (
     sidecar_path_for,
 )
 from app.core.embedding import embed_passage
+from app.core.contradictions import analyze_contradictions
 
 
 settings = get_settings()
@@ -404,6 +407,27 @@ def health():
         return {"status": "ok", "qdrant": True}
     except Exception as e:
         return {"status": "degraded", "qdrant": False, "error": str(e)}
+
+
+@app.post(
+    "/analysis/contradictions",
+    response_model=ContradictionAnalysisResponse,
+    summary="Analiza sprzeczności (sekcjami)",
+    description=getattr(settings, "contradictions_tool_description", "Analiza sprzeczności dla tytułu dokumentu."),
+    tags=["tools"],
+)
+def analysis_contradictions(req: ContradictionAnalysisRequest):
+    """Przeprowadź analizę sprzeczności dla dokumentu wskazanego tytułem.
+
+    Domyślnie przeszukuje wyłącznie dokumenty obowiązujące (is_active=true) i raportuje
+    sekcjami na poziomie 'ust'. Analiza wykonywana jest on-the-fly (bez trwałej pamięci).
+    """
+    try:
+        _ensure_collections_cached()
+    except Exception:
+        # kontynuuj — analiza i tak spróbuje z Qdrant i zwróci błąd w razie problemów
+        pass
+    return analyze_contradictions(req)
 
 
 # --- Search debug: step-by-step endpoints ---
