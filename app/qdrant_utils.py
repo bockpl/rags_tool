@@ -50,6 +50,43 @@ qdrant = QdrantClient(
 )
 
 
+def find_path_by_content_sha256(content_sha256: str, collection_base: Optional[str]) -> Optional[str]:
+    """Return existing document path for a given content SHA-256, if present.
+
+    Looks up a summary point with payload "content_sha256" = value and returns its
+    "path" payload. Returns None when not found or on failure.
+    """
+    try:
+        if not content_sha256:
+            return None
+        summary_collection, _ = derive_collection_names(collection_base)
+        flt = qm.Filter(
+            must=[
+                qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary")),
+                qm.FieldCondition(key="content_sha256", match=qm.MatchValue(value=content_sha256)),
+            ]
+        )
+        res = qdrant.scroll(
+            collection_name=summary_collection,
+            scroll_filter=flt,
+            limit=1,
+            with_payload=["path"],
+            with_vectors=False,
+        )
+        if isinstance(res, tuple):
+            records = res[0]
+        else:
+            records = getattr(res, "points", None) or []
+        for rec in records:
+            payload = getattr(rec, "payload", None) or {}
+            path = payload.get("path")
+            if isinstance(path, str) and path.strip():
+                return path
+        return None
+    except Exception:
+        return None
+
+
 # Remove all entries within a directory without removing the directory itself.
 def _clear_dir_contents(target: pathlib.Path) -> None:
     """Remove all contents of a directory without removing the directory itself.
@@ -109,6 +146,7 @@ DEFAULT_PAYLOAD_INDEXES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("section_path", {"type": "keyword"}),
     ("section_path_prefixes", {"type": "keyword"}),
     ("doc_date", {"type": "keyword"}),
+    ("content_sha256", {"type": "keyword"}),
 )
 
 
@@ -1121,6 +1159,13 @@ def build_and_upsert_points(
             "summary": doc_summary,
             "signature": doc_signature,
         }
+        # propagate content hash if available in record (used for dedupe)
+        try:
+            csha = str(rec.get("content_sha256"))
+            if csha:
+                summary_payload["content_sha256"] = csha
+        except Exception:
+            pass
         summary_payload["replacement"] = replacement_info
         if doc_date_val:
             summary_payload["doc_date"] = doc_date_val

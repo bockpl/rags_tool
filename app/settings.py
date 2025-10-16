@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.12.1"
+    app_version: str = "2.13.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -160,6 +160,9 @@ class SummRAGSettings(BaseSettings):
     # Batchowanie sekcji per dokument (jedna kwerenda scroll łącząca sekcje po prefiksach)
     batch_section_fetch: bool = Field(default=True, alias="BATCH_SECTION_FETCH")
 
+    # Deduplication: skip identical files during ingest based on content hash
+    dedupe_on_ingest: bool = Field(default=True, alias="DEDUPE_ON_INGEST")
+
     # --- Validators for forgiving .env parsing (blank strings) ---
     @field_validator(
         "search_skip_stage1_default",
@@ -167,6 +170,7 @@ class SummRAGSettings(BaseSettings):
         "dual_query_dense_for_mmr",
         "search_minimal_payload",
         "batch_section_fetch",
+        "dedupe_on_ingest",
         mode="before",
     )
     @classmethod

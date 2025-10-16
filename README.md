@@ -1,6 +1,15 @@
-# rags_tool (2.12.1)
+# rags_tool (2.13.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.13.0
+- Ingest: deduplikacja identycznych plików po sumie kontrolnej SHA‑256 (bajtów pliku). Podczas budowania korpusu, jeżeli napotkany plik ma identyczną treść jak wcześniej przetworzony (w tym w poprzednich biegach), zostanie pominięty przed kosztowną obróbką (streszczenie/embedding). W logu INFO pojawi się komunikat:
+  - `Duplicate skipped | sha256=<hash> existing=<ścieżka_już_zaindeksowana> duplicate=<bieżąca_ścieżka>`
+  - W odpowiedzi endpointu `/ingest/build` zwracane jest pole `duplicates_skipped` z liczbą pominięć.
+- Konfiguracja: `DEDUPE_ON_INGEST=true` (domyślnie włączone). Wyłączenie przywraca pełne przetwarzanie wszystkich plików.
+- Qdrant: do payloadu streszczeń dodano `content_sha256` i indeks payload dla szybkiego sprawdzania duplikatów.
+
+Uwaga: aby deduplikacja między biegami działała na istniejących kolekcjach, potrzebne jest ponowne zbudowanie indeksu (lub re‑ingest) tak, by dotychczasowe dokumenty otrzymały `content_sha256` w payloadzie.
 
 ## Nowości w 2.12.1
 - Analiza sprzeczności: odpowiedź zawiera teraz `took_ms` (czas wykonania w ms) oraz w logach DEBUG wypisywany jest czas wraz z liczbą sekcji i kandydatów.

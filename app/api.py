@@ -57,6 +57,7 @@ from app.qdrant_utils import (
     import_collections_bundle,
     qdrant,
     sha1,
+    find_path_by_content_sha256,
 )
 from app.settings import get_settings
 from app.admin_routes import attach_admin_routes
@@ -146,15 +147,52 @@ def _scan_files(base: pathlib.Path, pattern: str, recursive: bool) -> List[pathl
 
 # Iterate ingest records: chunks + LLM summary (+ cached vectors) per file.
 def _iter_document_records(
-    file_paths: List[pathlib.Path], chunk_tokens: int, chunk_overlap: int, *, force_regen_summary: bool
+    file_paths: List[pathlib.Path],
+    chunk_tokens: int,
+    chunk_overlap: int,
+    *,
+    force_regen_summary: bool,
+    collection_base: Optional[str],
+    dedupe_on_ingest: bool,
+    stats: Optional[Dict[str, int]] = None,
 ) -> Iterable[Dict[str, Any]]:
     """Yield ingest records for each document (chunks + summary + vectors).
 
     Uses sidecar cache unless `force_regen_summary` is set.
     """
+    seen_by_hash: Dict[str, str] = {}
     for path in file_paths:
         doc_start = time.time()
         logger.debug("Processing document %s", path)
+        # Compute content hash up front to enable early dedupe
+        content_sha256 = compute_file_sha256(path)
+        if dedupe_on_ingest:
+            # in-run dedupe
+            existing_local = seen_by_hash.get(content_sha256)
+            if existing_local and str(path.resolve()) != existing_local:
+                logger.info(
+                    "Duplicate skipped | sha256=%s existing=%s duplicate=%s",
+                    content_sha256,
+                    existing_local,
+                    str(path.resolve()),
+                )
+                if stats is not None:
+                    stats["duplicates_skipped"] = int(stats.get("duplicates_skipped", 0)) + 1
+                continue
+            # cross-run dedupe via Qdrant (only for first occurrence in this run)
+            existing_remote = find_path_by_content_sha256(content_sha256, collection_base)
+            if existing_remote and str(path.resolve()) != str(existing_remote):
+                logger.info(
+                    "Duplicate skipped | sha256=%s existing=%s duplicate=%s",
+                    content_sha256,
+                    str(existing_remote),
+                    str(path.resolve()),
+                )
+                if stats is not None:
+                    stats["duplicates_skipped"] = int(stats.get("duplicates_skipped", 0)) + 1
+                # Do not record in seen_by_hash to allow logging more duplicates against the same existing_remote
+                continue
+
         # Always extract text and chunks (not cached here)
         raw = extract_text(path)
         chunk_items = chunk_text_by_sections(
@@ -167,7 +205,6 @@ def _iter_document_records(
             logger.debug("Document %s produced no chunks; skipping", path)
             continue
         # Try sidecar cache for summary + vectors (unless forced to regenerate)
-        content_sha256 = compute_file_sha256(path)
         sidecar = None
         sc_path = sidecar_path_for(path)
         sc_name = sc_path.name
@@ -214,6 +251,9 @@ def _iter_document_records(
                 logger.debug("Sidecar save skipped | path=%s error=%s", path, exc)
             if not force_regen_summary and sc_path.exists():
                 logger.debug("Sidecar rejected or stale; regenerated | path=%s sidecar=%s", path, sc_name)
+        # Mark as seen for subsequent in-run duplicates
+        if dedupe_on_ingest:
+            seen_by_hash[content_sha256] = str(path.resolve())
         doc_id = sha1(str(path.resolve()))
         doc_title = str(doc_sum.get("title", "") or "").strip() or path.stem
         summary_signature = doc_sum.get("signature", [])
@@ -244,6 +284,8 @@ def _iter_document_records(
             "summary_sparse_text": summary_sparse_text,
             # Precomputed dense summary vector (used to skip embedding in upsert stage)
             "summary_dense_vec": list(summary_dense_vec) if (sidecar or summary_dense_vec is not None) else None,
+            # Pass content hash for downstream payload persistence
+            "content_sha256": content_sha256,
         }
         logger.debug(
             "Document %s parsed | chunks=%d summary_len=%d took_ms=%d",
@@ -667,10 +709,17 @@ def ingest_build(req: IngestBuildRequest):
         doc_count = 0
         chunk_count = 0
         summary_count = 0
+        stats: Dict[str, int] = {"duplicates_skipped": 0}
 
         with store_path.open("w", encoding="utf-8") as fh:
             for record in _iter_document_records(
-                file_paths, req.chunk_tokens, req.chunk_overlap, force_regen_summary=req.force_regen_summary
+                file_paths,
+                req.chunk_tokens,
+                req.chunk_overlap,
+                force_regen_summary=req.force_regen_summary,
+                collection_base=req.collection_name,
+                dedupe_on_ingest=bool(settings.dedupe_on_ingest),
+                stats=stats,
             ):
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
                 doc_count += 1
@@ -680,7 +729,7 @@ def ingest_build(req: IngestBuildRequest):
 
         if doc_count == 0:
             took_ms = int((time.time() - t0) * 1000)
-            return {"ok": True, "indexed": 0, "documents": 0, "took_ms": took_ms}
+            return {"ok": True, "indexed": 0, "documents": 0, "duplicates_skipped": int(stats.get("duplicates_skipped", 0)), "took_ms": took_ms}
 
         if req.enable_sparse:
             chunk_corpus = IterableCorpus(
@@ -712,12 +761,19 @@ def ingest_build(req: IngestBuildRequest):
 
     took_ms = int((time.time() - t0) * 1000)
     logger.debug(
-        "Ingest build finished | documents=%d points=%d took_ms=%d",
+        "Ingest build finished | documents=%d points=%d duplicates_skipped=%d took_ms=%d",
         doc_count,
         point_count,
+        int(stats.get("duplicates_skipped", 0)),
         took_ms,
     )
-    return {"ok": True, "indexed": point_count, "documents": doc_count, "took_ms": took_ms}
+    return {
+        "ok": True,
+        "indexed": point_count,
+        "documents": doc_count,
+        "duplicates_skipped": int(stats.get("duplicates_skipped", 0)),
+        "took_ms": took_ms,
+    }
 
 
 @app.post(
