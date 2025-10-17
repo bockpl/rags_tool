@@ -302,6 +302,23 @@ class ContradictionAnalysisResponse(BaseModel):
     )
 
 
+# --- Documents listing (for external tools) ---
+
+class DocListItem(BaseModel):
+    """Lightweight document metadata used by tools to enumerate corpus."""
+
+    doc_id: str = Field(..., description="Stable document identifier (sha1 over absolute path).")
+    title: Optional[str] = Field(default=None, description="Document title extracted during ingest.")
+    doc_date: Optional[str] = Field(default=None, description="Document date (YYYY, YYYY-MM, or YYYY-MM-DD) or 'brak'.")
+    is_active: Optional[bool] = Field(default=None, description="Whether the document is marked as current (true) or archival (false).")
+
+
+class DocsListResponse(BaseModel):
+    """Response envelope for documents list endpoint."""
+
+    docs: List[DocListItem]
+
+
 # --- Multi-query debug models (mirror /search/query with step-by-step outputs) ---
 
 class DebugMultiEmbedRequest(BaseModel):

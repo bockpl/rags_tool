@@ -48,6 +48,7 @@ from app.models import (
     SummariesGenerateRequest,
     ContradictionAnalysisRequest,
     ContradictionAnalysisResponse,
+    DocsListResponse,
 )
 from app.qdrant_utils import (
     build_and_upsert_points,
@@ -470,6 +471,73 @@ def analysis_contradictions(req: ContradictionAnalysisRequest):
         # kontynuuj — analiza i tak spróbuje z Qdrant i zwróci błąd w razie problemów
         pass
     return analyze_contradictions(req)
+
+
+@app.get(
+    "/docs/list",
+    response_model=DocsListResponse,
+    summary="Lista dokumentów",
+    description="Zwraca listę dokumentów (metadane) dla trybu: current lub archival.",
+    tags=["tools"],
+)
+def docs_list(mode: str = Query(..., description="Tryb: current|archival")):
+    """List documents metadata for the given mode (current|archival).
+
+    Returns a lightweight list of documents with fields: doc_id, title, doc_date, is_active.
+    """
+    mode_l = (mode or "").strip().lower()
+    if mode_l not in {"current", "archival"}:
+        raise HTTPException(status_code=400, detail="Parametr 'mode' musi być 'current' lub 'archival'.")
+    try:
+        must = [
+            qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary")),
+        ]
+        if mode_l == "current":
+            must.append(qm.FieldCondition(key="is_active", match=qm.MatchValue(value=True)))
+        else:
+            must.append(qm.FieldCondition(key="is_active", match=qm.MatchValue(value=False)))
+        flt = qm.Filter(must=must)
+
+        docs: List[dict] = []
+        offset = None
+        while True:
+            res = qdrant.scroll(
+                collection_name=settings.qdrant_summary_collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=["doc_id", "title", "doc_date", "is_active"],
+                with_vectors=False,
+            )
+            if isinstance(res, tuple):
+                points, offset = res
+            else:
+                points = getattr(res, "points", None)
+                offset = getattr(res, "next_page_offset", None)
+                if points is None:
+                    points = []
+            if not points:
+                break
+            for p in points:
+                payload = p.payload or {}
+                did = payload.get("doc_id")
+                if not did:
+                    continue
+                docs.append(
+                    {
+                        "doc_id": str(did),
+                        "title": payload.get("title"),
+                        "doc_date": payload.get("doc_date"),
+                        "is_active": payload.get("is_active"),
+                    }
+                )
+            if offset is None:
+                break
+        # Sort for stable output (by title then doc_id)
+        docs.sort(key=lambda x: ((x.get("title") or "").lower(), x.get("doc_id") or ""))
+        return {"docs": docs}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Nie udało się pobrać listy dokumentów: {exc}") from exc
 
 
 # --- Search debug: step-by-step endpoints ---

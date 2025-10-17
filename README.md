@@ -1,6 +1,13 @@
-# rags_tool (2.13.0)
+# rags_tool (2.14.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.14.0
+- Analiza sprzeczności: rozróżnienie „zmiany” (label `change`) od sprzeczności. Gdy nowszy akt zmienia/uchyla/odwołuje wcześniejszy, nie jest to traktowane jako sprzeczność.
+- Sędzia otrzymuje teraz daty dokumentów (`doc_date_a`, `doc_date_b`) i instrukcję po polsku, by klasyfikować takie przypadki jako `change`.
+- Wyłącznie polski język odpowiedzi w ekstrakcji reguły i ocenie sędziego (prompty wymagają PL).
+- Bardziej odporny parser JSON odpowiedzi LLM (tolerancja list, cudzysłowów typograficznych, zbędnych przecinków; ratunek regexowy dla `label`/`confidence`).
+- Narzędzie skanujące (contradictions-scan): per‑dokumentowe raporty HTML zawierają teraz także wykaz przetworzonych dokumentów (audit).
 
 ## Nowości w 2.13.0
 - Ingest: deduplikacja identycznych plików po sumie kontrolnej SHA‑256 (bajtów pliku). Podczas budowania korpusu, jeżeli napotkany plik ma identyczną treść jak wcześniej przetworzony (w tym w poprzednich biegach), zostanie pominięty przed kosztowną obróbką (streszczenie/embedding). W logu INFO pojawi się komunikat:
@@ -10,6 +17,85 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 - Qdrant: do payloadu streszczeń dodano `content_sha256` i indeks payload dla szybkiego sprawdzania duplikatów.
 
 Uwaga: aby deduplikacja między biegami działała na istniejących kolekcjach, potrzebne jest ponowne zbudowanie indeksu (lub re‑ingest) tak, by dotychczasowe dokumenty otrzymały `content_sha256` w payloadzie.
+
+## Narzędzia: skaner sprzeczności (contradictions-scan 0.2.0)
+
+- Oddzielna aplikacja CLI korzystająca z API HTTP i/lub Qdrant do listowania dokumentów; analizę wykonuje przez `/analysis/contradictions`.
+- Przeszukuje cały korpus w trybie `current` lub `archival` i zapisuje wyniki per‑dokument w formacie HTML (dobrze sformatowane raporty).
+- Wznowienie: pliki per‑dokument zapisywane są do `reports/contradictions/per_doc/<mode>/`. Ponowny bieg pomija już istniejące pliki (chyba że użyjesz `--overwrite`).
+- Raporty biegu: `reports/contradictions/runs/<run_id>/index.json` oraz `report.html` (bez PDF). HTML zawiera podsumowanie i linki do plików per‑doc.
+- Raportowanie stanu: w trakcie pracy program wypisuje na konsoli postęp (ile przetworzono, ile konfliktów, błędy, czas).
+
+Uruchomienie (przykłady):
+
+```bash
+# Skanowanie dokumentów obowiązujących (lista auto: API→Qdrant)
+python tools/contradictions_scan.py --mode current \
+  --concurrency 2 --candidates 5 --section-level ust --confidence-threshold 0.6
+
+# Skanowanie dokumentów archiwalnych
+python tools/contradictions_scan.py --mode archival --concurrency 4
+
+# Z serwerem API pod innym adresem i własnym katalogiem wyjściowym
+python tools/contradictions_scan.py --mode current --api-url http://127.0.0.1:8000 \
+  --out-dir /data/reports/contradictions
+
+# Filtrowanie po ścieżce dokumentów (tylko dokumenty w tym podkatalogu)
+python tools/contradictions_scan.py --mode current --path-prefix /app/data/akty/2024/
+```
+
+Parametry:
+- `--mode` (`current`|`archival`) – wymagane.
+- `--path-prefix` – przetwarzaj tylko dokumenty, których absolutna `path` zaczyna się od tego prefiksu.
+- `--concurrency` – równoległość (domyślnie 2).
+- `--candidates` – maks. kandydatów na sekcję (domyślnie 5).
+- `--section-level` – poziom sekcji do raportowania (domyślnie `ust`).
+- `--confidence-threshold` – próg pewności LLM (domyślnie 0.6).
+- `--out-dir` – katalog wyjściowy (domyślnie `reports/contradictions`).
+- `--timeout` – limit czasu na analizę pojedynczego dokumentu w sekundach (domyślnie 600).
+- `--overwrite` – przelicza dokument nawet jeśli istnieje plik wynikowy.
+- `--list-mode` – `auto` (domyślnie), `api` (użyj `/docs/list`), `qdrant` (bezpośrednio Qdrant).
+- `--qdrant-url` – URL Qdrant (gdy `list-mode=qdrant` lub `auto` + brak `/docs/list`).
+- `--collection-base` / `--summary-collection` – nazwa bazowa kolekcji (domyślnie `rags_tool`) lub jawna nazwa kolekcji streszczeń (domyślnie `<base>_summaries`).
+
+Wymagania: uruchomiony serwer `rags_tool` (endpoint `/analysis/contradictions`) oraz dostęp do listy dokumentów przez `/docs/list` lub Qdrant (`/collections/<summary_collection>/points/scroll`).
+
+Lokalizacja i uruchomienie
+- Skrypt znajduje się w `tools/contradictions_scan.py`.
+- Uruchom z katalogu repo: `python tools/contradictions_scan.py [opcje]`.
+- W kontenerze Dockera: `docker exec -it <container> python tools/contradictions_scan.py --mode current`.
+
+Struktura wyjścia
+- Per‑dokument HTML: `reports/contradictions/per_doc/<mode>/<tytul-[rok]-[doc8]>.html`.
+- Raport biegu: `reports/contradictions/runs/<run_id>/report.html` i `index.json`.
+- Wznowienie: kolejne uruchomienie pomija istniejące pliki (chyba że `--overwrite`).
+
+Zawartość HTML per‑dokument
+- Nagłówek: tytuł, data, liczba sekcji z konfliktami, łączna liczba konfliktów, czas analizy.
+- „Przetworzone dokumenty”: tabela z tytułami, datami i statusem (obowiązujący/archiwalny) — ułatwia audyt zakresu porównywania.
+- Sekcje z niezgodnościami: dla każdej sekcji raportowane są kolizje z innymi dokumentami (tytuł drugiego aktu, data, pewność, krótkie uzasadnienie po polsku, cytaty A/B).
+- Uwaga: przypadki „zmiany/uchylenia” klasyfikowane są jako `change` (nie są sprzecznością) i nie trafiają do listy konfliktów.
+
+Status w konsoli (przykład)
+- `Do analizy: 120 | pominiętych (resume): 5` — podsumowanie przed startem.
+- `→ [1/125] Regulamin X | Aktywne: Regulamin X | do uruchomienia: 119` — zadanie rozpoczęte.
+- `✓ [1/125] Regulamin X — brak konfliktów | Aktywne: Uchwała Y` — zadanie ukończone bez konfliktów.
+- `✗ [2/125] BŁĄD: Uchwała Y: timed out | Aktywne: Zarządzenie Z` — błąd (np. timeout).
+
+Wskazówki wydajnościowe
+- Zacznij od `--concurrency=2` i `--candidates=5`. Przy dużym korpusie i słabszym LLM zwiększaj ostrożnie.
+- Zwiększ `--timeout` (np. 1200–1800 s) dla ciężkich aktów (wiele sekcji/kandydatów).
+- Jeśli używasz reverse proxy (nginx/traefik), ustaw jego timeout ≥ wartości `--timeout`.
+
+Zmienne środowiskowe (opcjonalnie)
+- `RAGS_TOOL_API_URL` — domyślna wartość dla `--api-url` (np. `http://127.0.0.1:8000`).
+- `QDRANT_URL` — domyślna wartość dla `--qdrant-url` (np. `http://127.0.0.1:6333`).
+- `COLLECTION_NAME` — domyślna baza kolekcji (tworzy `<base>_summaries`).
+
+Ograniczenia i uwagi
+- Skaner korzysta z `/analysis/contradictions` dokument‑po‑dokumencie — całkowity czas zależy od liczby sekcji i kandydatów (wywołań LLM).
+- Raport PDF nie jest generowany; rekomendujemy HTML.
+- Filtrowanie `--path-prefix` wymaga, by listowanie zwracało `path` (automatyczny fallback na Qdrant zapewnia ten atrybut).
 
 ## Nowości w 2.12.1
 - Analiza sprzeczności: odpowiedź zawiera teraz `took_ms` (czas wykonania w ms) oraz w logach DEBUG wypisywany jest czas wraz z liczbą sekcji i kandydatów.

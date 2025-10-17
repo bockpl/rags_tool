@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.13.0"
+    app_version: str = "2.14.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -117,18 +117,22 @@ class SummRAGSettings(BaseSettings):
             "- 'rule' (string; 1–2 zdania po polsku; bez cytowania, bez referencji), "
             "- 'subject' (string; tytuł/oznaczenie aktu lub 'this' jeśli mowa o niniejszym akcie), "
             "- 'rule_type' (string; jedno z: entry_into_force, repeal, deadline, threshold, scope, other). "
-            "Wskazówki: Jeśli fragment dotyczy wejścia w życie (np. 'wchodzi w życie', 'z dniem ...'), przypisz 'entry_into_force'."
+            "Wskazówki: Jeśli fragment dotyczy wejścia w życie (np. 'wchodzi w życie', 'z dniem ...'), przypisz 'entry_into_force'. "
+            "ODPOWIADAJ WYŁĄCZNIE PO POLSKU."
         ),
         alias="CONTRADICTIONS_RULE_PROMPT_JSON",
     )
     contradictions_judge_prompt_json: str = Field(
         default=(
             "Zwróć wyłącznie JSON (bez bloków kodu, bez backticks, bez komentarzy). Oceniasz relację między dwoma fragmentami tekstu prawniczego/organizacyjnego. "
-            "Użyj następujących etykiet: 'contradiction' (A i B nie mogą być jednocześnie prawdziwe lub nakazują "
-            "sprzeczne działania), 'entails' (B wynika z A lub A z B), 'overlap' (częściowo związane, brak sprzeczności), "
-            "'unrelated' (brak związku). Wejście ma strukturę: {rule_a, subject_a, title_a, doc_id_a, context_a, subject_b, title_b, doc_id_b, context_b, rule_type}. "
+            "Użyj etykiet: 'contradiction' (A i B nie mogą być jednocześnie prawdziwe lub nakazują "
+            "sprzeczne działania), 'change' (nowszy akt zmienia/uchyla/odwołuje wcześniejszy — to nie jest sprzeczność), "
+            "'entails' (B wynika z A lub A z B), 'overlap' (częściowy związek), 'unrelated' (brak związku). "
+            "Wejście ma strukturę: {rule_a, subject_a, title_a, doc_id_a, doc_date_a, context_a, subject_b, title_b, doc_id_b, doc_date_b, context_b, rule_type}. "
             "Zasady: Dwa różne akty mogą wchodzić w życie w różnych terminach — to NIE jest sprzeczność; sprzeczność rozważaj tylko, jeśli A i B dotyczą tego samego aktu (same_subject=true). "
-            "Zwróć: 'label' (string), 'confidence' (0..1), 'rationale' (krótkie uzasadnienie, max 2 zdania), "
+            "Jeśli B jest nowszy (doc_date_b > doc_date_a) i zmienia/uchyla/odwołuje treść A, wybierz 'change', nie 'contradiction'. "
+            "ODPOWIADAJ WYŁĄCZNIE PO POLSKU. "
+            "Zwróć: 'label' (string), 'confidence' (0..1), 'rationale' (krótkie uzasadnienie po polsku, max 2 zdania), "
             "'quotes_a' (lista krótkich cytatów z A), 'quotes_b' (lista krótkich cytatów z B), "
             "'subject_extracted_a' (string), 'subject_extracted_b' (string), 'same_subject' (bool). Cytuj tylko z dostarczonych kontekstów."
         ),

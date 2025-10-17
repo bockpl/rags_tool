@@ -46,39 +46,113 @@ contr_client = OpenAI(base_url=settings.summary_api_url, api_key=settings.summar
 
 
 def _loads_json_object(raw: str) -> Dict[str, Any]:
-    """Parse a JSON object robustly, tolerating code fences and preambles.
+    """Parse a JSON object robustly, tolerating code fences, lists and preambles.
 
-    - Accepts plain JSON
-    - Strips markdown code fences ```...```
-    - Extracts substring between first '{' and last '}'
+    Behaviour:
+    - Accepts an object or a list of objects (returns the first object found).
+    - Strips markdown code fences ```...```.
+    - If parsing fails, tries substring between first '{' and last '}'.
     Returns empty dict on failure.
     """
     s = (raw or "").strip()
     if not s:
         return {}
-    # Quick path
-    try:
-        return json.loads(s)
-    except Exception:
-        pass
-    # Remove code fences if present
-    s2 = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", s)
-    if s2 != s:
+
+    def _coerce_first_obj(val: Any) -> Dict[str, Any]:
+        if isinstance(val, dict):
+            return val
+        if isinstance(val, list):
+            for it in val:
+                if isinstance(it, dict):
+                    return it
+                # strings inside list that look like JSON objects
+                if isinstance(it, str):
+                    try:
+                        parsed = json.loads(it)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        continue
+        return {}
+
+    def _normalize_jsonish(text: str) -> str:
+        # Strip code fences anywhere
+        text = re.sub(r"```.*?```", "", text, flags=re.S)
+        # Also try start/end fences variants
+        text = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", text)
+        # Normalize curly quotes to ascii to reduce syntax breaks in keys/strings
+        trans = {
+            ord("“"): '"', ord("”"): '"', ord("„"): '"', ord("’"): "'",
+        }
+        text = text.translate(trans)
+        # Remove BOM or non-printables except whitespace
+        text = text.replace("\ufeff", "")
+        return text
+
+    def _try_parse(text: str) -> Optional[Dict[str, Any]]:
         try:
-            return json.loads(s2.strip())
+            val = json.loads(text)
+            return _coerce_first_obj(val)
         except Exception:
-            pass
-    # Heuristic: slice between first '{' and last '}'
+            return None
+
+    s_norm = _normalize_jsonish(s)
+
+    # Quick path
+    parsed = _try_parse(s_norm)
+    if parsed is not None:
+        return parsed
+
+    # Try removing trailing commas before } and ]
+    s_no_trailing = re.sub(r",\s*([}\]])", r"\1", s_norm)
+    parsed = _try_parse(s_no_trailing)
+    if parsed is not None:
+        return parsed
+
+    # Heuristic: slice between first '{' and last '}' (object case)
     try:
-        i = s.find("{")
-        j = s.rfind("}")
+        i = s_norm.find("{")
+        j = s_norm.rfind("}")
         if i != -1 and j != -1 and j > i:
-            sub = s[i : j + 1]
-            return json.loads(sub)
+            sub = s_norm[i : j + 1]
+            parsed = _try_parse(sub)
+            if parsed is not None:
+                return parsed
     except Exception:
         pass
+
+    # Heuristic: slice between first '[' and last ']' (list case)
+    try:
+        i = s_norm.find("[")
+        j = s_norm.rfind("]")
+        if i != -1 and j != -1 and j > i:
+            sub = s_norm[i : j + 1]
+            parsed = _try_parse(sub)
+            if parsed is not None:
+                return parsed
+    except Exception:
+        pass
+
+    # Last-resort salvage: extract a few fields via regex
+    try:
+        lab = None
+        m = re.search(r'"label"\s*:\s*"([a-zA-Z_]+)"', s_norm)
+        if m:
+            lab = m.group(1)
+        conf = None
+        m2 = re.search(r'"confidence"\s*:\s*([0-9]+(?:\.[0-9]+)?)', s_norm)
+        if m2:
+            try:
+                conf = float(m2.group(1))
+            except Exception:
+                conf = None
+        if lab or (conf is not None):
+            return {k: v for k, v in {"label": lab, "confidence": conf}.items() if v is not None}
+    except Exception:
+        pass
+
     # Failed — log short head for diagnostics
-    logger.debug("Judge JSON parse failed | head=%s", s[:200].replace("\n", " "))
+    logger.debug("Judge JSON parse failed | head=%s", s_norm[:200].replace("\n", " "))
     return {}
 
 
@@ -220,11 +294,13 @@ def _extract_rule_struct(text: str) -> Tuple[Optional[str], Optional[str], str]:
             ],
             max_tokens=220,
         )
-        content = rsp.choices[0].message.content or "{}"
+        if not rsp or not getattr(rsp, "choices", None):
+            raise RuntimeError("Empty response from LLM (rule extraction)")
+        content = (rsp.choices[0].message.content or "{}")
         data = _loads_json_object(content)
-        rule = str(data.get("rule", "") or "").strip() or None
-        subject_raw = str(data.get("subject", "") or "").strip() or None
-        rule_type_raw = str(data.get("rule_type", "") or "").strip().lower() or None
+        rule = str((data.get("rule") if isinstance(data, dict) else "") or "").strip() or None
+        subject_raw = str((data.get("subject") if isinstance(data, dict) else "") or "").strip() or None
+        rule_type_raw = str((data.get("rule_type") if isinstance(data, dict) else "") or "").strip().lower() or None
         if subject_raw:
             subject = subject_raw
         if rule_type_raw:
@@ -337,10 +413,12 @@ def _judge_pair(
         "subject_a": subject_a or "",
         "title_a": meta_a.get("title") or "",
         "doc_id_a": meta_a.get("doc_id") or "",
+        "doc_date_a": meta_a.get("doc_date") or "",
         "context_a": a_ctx,
         "subject_b": meta_b.get("subject") or "",
         "title_b": meta_b.get("title") or "",
         "doc_id_b": meta_b.get("doc_id") or "",
+        "doc_date_b": meta_b.get("doc_date") or "",
         "context_b": b_ctx,
         "rule_type": (rule_type or ""),
     }
@@ -363,13 +441,20 @@ def _judge_pair(
             ],
             max_tokens=220,
         )
-        content = rsp.choices[0].message.content or "{}"
+        if not rsp or not getattr(rsp, "choices", None):
+            raise RuntimeError("Empty response from LLM (judge)")
+        content = (rsp.choices[0].message.content or "{}")
         data = _loads_json_object(content)
-        raw_label = str(data.get("label", "") or "").strip().lower()
+        raw_label = str((data.get("label") if isinstance(data, dict) else "") or "").strip().lower()
         mapping = {
             "contradiction": "contradiction",
             "conflict": "contradiction",
             "inconsistent": "contradiction",
+            "change": "change",
+            "amend": "change",
+            "amendment": "change",
+            "repeal": "change",
+            "revokes": "change",
             "entails": "entails",
             "support": "entails",
             "overlap": "overlap",
@@ -378,15 +463,16 @@ def _judge_pair(
         }
         label = mapping.get(raw_label, "unrelated")
         try:
-            conf = float(data.get("confidence", 0.0))
+            conf_val = (data.get("confidence") if isinstance(data, dict) else 0.0)
+            conf = float(conf_val)
         except Exception:
             conf = 0.0
-        rationale = str(data.get("rationale", "") or "").strip() or None
-        qa = [str(x) for x in (data.get("quotes_a") or []) if str(x).strip()]
-        qb = [str(x) for x in (data.get("quotes_b") or []) if str(x).strip()]
-        subj_a_out = (str(data.get("subject_extracted_a") or "").strip() or subj_a_out)
-        subj_b_out = (str(data.get("subject_extracted_b") or "").strip() or None)
-        same_val = data.get("same_subject")
+        rationale = str((data.get("rationale") if isinstance(data, dict) else "") or "").strip() or None
+        qa = [str(x) for x in ((data.get("quotes_a") if isinstance(data, dict) else []) or []) if str(x).strip()]
+        qb = [str(x) for x in ((data.get("quotes_b") if isinstance(data, dict) else []) or []) if str(x).strip()]
+        subj_a_out = (str((data.get("subject_extracted_a") if isinstance(data, dict) else "") or "").strip() or subj_a_out)
+        subj_b_out = (str((data.get("subject_extracted_b") if isinstance(data, dict) else "") or "").strip() or None)
+        same_val = (data.get("same_subject") if isinstance(data, dict) else None)
         same_subj = (bool(same_val) if isinstance(same_val, bool) else None)
     except Exception as exc:
         logger.debug("Judge LLM failed; defaulting unrelated: %s", exc)
@@ -479,8 +565,12 @@ def analyze_contradictions(req: ContradictionAnalysisRequest) -> ContradictionAn
             text_b = cand_texts.get((did2, lab), "")
             if not text_b.strip():
                 continue
-            meta_a = {"doc_id": did, "title": title}
-            meta_b = {"doc_id": did2, "title": (meta_cache.get(did2, {}) or {}).get("doc_title")}
+            meta_a = {"doc_id": did, "title": title, "doc_date": doc_date}
+            meta_b = {
+                "doc_id": did2,
+                "title": (meta_cache.get(did2, {}) or {}).get("doc_title"),
+                "doc_date": (meta_cache.get(did2, {}) or {}).get("doc_date"),
+            }
             label, conf, rationale, qa, qb, subj_a_out, subj_b_out, same_subj = _judge_pair(
                 rule,
                 ref_text,
