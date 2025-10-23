@@ -447,3 +447,63 @@ class DebugMultiShapeResponse(BaseModel):
     results: List[SearchHit]
     groups: Optional[List[SearchGroup]] = None
     blocks: Optional[List[MergedBlock]] = None
+
+
+# --- Golden QA (generator/edytor) ---
+
+class GoldenGenerateRequest(BaseModel):
+    base_dir: str
+    glob: str = "**/*"
+    recursive: bool = True
+    out_dir: str = Field(default="data/golden", description="Katalog wyjściowy (pliki golden_qa.jsonl, golden_documents.jsonl)")
+    limit_docs: Optional[int] = Field(default=None, description="Maksymalna liczba dokumentów do przetworzenia")
+    per_doc_qa: int = Field(default=2, ge=1, description="Maksymalna liczba QA na dokument")
+    target_qa: Optional[int] = Field(default=None, description="Zatrzymaj się po przybliżonej liczbie QA")
+    seed: int = Field(default=123, description="Ziarno deterministycznego próbkowania")
+
+
+class GoldenGenerateResponse(BaseModel):
+    documents: int
+    qa_items: int
+    took_ms: int
+    seed: int
+    use_llm: bool
+    llm_model: Optional[str] = None
+    qa_path: str
+
+
+class GoldenItem(BaseModel):
+    id: str
+    query: str
+    expected_answer: str
+    answer_type: Optional[str] = None
+    score_rule: Optional[str] = None
+    unanswerable: Optional[bool] = None
+    difficulty: Optional[str] = None
+    key_values: Optional[List[dict]] = None
+    meta: Optional[dict] = None
+
+
+class GoldenListResponse(BaseModel):
+    items: List[GoldenItem]
+    qa_path: str
+
+
+class GoldenUpdateRequest(BaseModel):
+    out_dir: str = Field(default="data/golden")
+    id: str
+    query: str
+    expected_answer: str
+
+
+class GoldenRegenerateRequest(BaseModel):
+    out_dir: str = Field(default="data/golden")
+    id: str
+    # Random regeneration over whole corpus
+    use_random_doc: bool = Field(default=True, description="Gdy true, wybiera losowy dokument z korpusu zamiast trzymać się pierwotnego")
+    base_dir: Optional[str] = Field(default=None, description="Opcjonalny katalog bazowy do skanowania korpusu (fallback, gdy brak golden_documents.jsonl)")
+    glob: Optional[str] = Field(default=None, description="Wzorzec glob (domyślnie **/*)")
+    recursive: Optional[bool] = Field(default=True, description="Skanuj rekurencyjnie")
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Temperatura dla LLM podczas regeneracji")
+    ensure_different: bool = Field(default=True, description="Wymagaj, aby nowa para Q/A różniła się od poprzedniej i nie duplikowała istniejących")
+    seed: Optional[int] = Field(default=None, description="Ziarno deterministycznego wyboru dokumentu (opcjonalnie)")

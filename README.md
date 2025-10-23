@@ -1,6 +1,44 @@
-# rags_tool (2.14.0)
+# rags_tool (2.18.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.18.0
+- Golden QA — pytania bez post‑procesingu: usunięto funkcję dopisującą kwalifikatory (np. lata) do pytań.
+  - Zarówno generacja, jak i „Zregeneruj” zapisują pytania dokładnie takie, jak zwróci LLM (prompt decyduje o formie).
+  - Brak modyfikacji typu „(w 2021 r.)” po stronie aplikacji.
+
+## Nowości w 2.17.0
+- Golden QA — Regeneracja:
+  - Losuje dokument z całej puli wskazanej przez `base_dir` + `glob` (+ `recursive`), deterministycznie gdy podasz `seed`.
+  - Jeśli wylosowany dokument nie występuje w `golden_documents.jsonl`, zostaje dopisany (z tytułem/symbolem/as_of).
+  - UI: mniejsze pola tekstowe, odświeżanie listy po regeneracji oraz działający link „[plik]” (przez `/golden/file?path=...`).
+
+## Nowości w 2.16.0
+- Golden QA: „Zregeneruj” tworzy teraz zupełnie nową parę Q/A na tej samej pozycji, domyślnie z losowo wybranego dokumentu z korpusu.
+  - UI wysyła `use_random_doc=true` oraz przekazuje `base_dir`, `glob`, `recursive` (jeśli dostępne). Jeśli istnieje `golden_documents.jsonl`, dokument losowany jest z niego; w przeciwnym razie skanowany jest korpus.
+  - Parametry różnorodności: `temperature` (domyślnie 0.7), `ensure_different=true` (unika duplikatów i tej samej pary co wcześniej).
+  - Meta rekordu (`doc_title`, `doc_path`, `doc_symbol`, `as_of`) jest aktualizowane do nowego dokumentu, `id` pozostaje bez zmian.
+
+## Nowości w 2.15.0
+- Golden QA: prosty interfejs WWW pod `/golden` do generowania i edycji bazy pytań/odpowiedzi używanej w testach.
+  - Formularz pozwala wskazać `base_dir`, `glob`, rekurencję, katalog wyjściowy oraz limity (`per_doc_qa`, `target_qa`, `limit_docs`, `seed`).
+  - Po uruchomieniu generowania w tle wykorzystuje istniejący generator z `tools/golden_make.py`.
+  - Wymaga skonfigurowanego LLM: preferowane `GOLDEN_LLM_BASE_URL`, `GOLDEN_LLM_API_KEY`, `GOLDEN_LLM_MODEL`. Jeśli brak tych zmiennych, używany jest fallback z ustawień `SUMMARY_API_URL`, `SUMMARY_API_KEY`, `SUMMARY_MODEL` (jeśli dostępne).
+  - Lista pozycji ładowana jest z `golden_qa.jsonl` (domyślnie `data/golden/golden_qa.jsonl`). Każdą parę można edytować i zapisać lub zregenerować pojedynczo (LLM).
+  - API pomocnicze (ukryte w OpenAPI): `POST /golden/generate`, `GET /golden/list`, `POST /golden/update`, `POST /golden/regenerate`.
+
+Skrót uruchomienia:
+1) Otwórz `http://<host>:<port>/golden`.
+2) Ustaw ścieżkę `base_dir` do korpusu, opcjonalnie dostosuj parametry i kliknij „Uruchom generowanie”.
+3) Po wygenerowaniu przewiń w dół — pojawi się lista pozycji z możliwością edycji i regeneracji.
+
+Uwaga: generator golden QA korzysta z niezależnego LLM (OpenAI‑compatible). Skonfiguruj środowisko serwera:
+
+```bash
+export GOLDEN_LLM_BASE_URL=http://127.0.0.1:8001/v1
+export GOLDEN_LLM_API_KEY=sk-...
+export GOLDEN_LLM_MODEL=gpt-4o-mini
+```
 
 ## Nowości w 2.14.0
 - Analiza sprzeczności: rozróżnienie „zmiany” (label `change`) od sprzeczności. Gdy nowszy akt zmienia/uchyla/odwołuje wcześniejszy, nie jest to traktowane jako sprzeczność.

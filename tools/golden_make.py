@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import ast
 import os
 from pathlib import Path
 import random
@@ -154,7 +155,19 @@ def _llm_client_from_env() -> Optional[Any]:  # returns OpenAI client or None
     if not (base and key and model):
         return None
     try:
-        client = OpenAI(base_url=base, api_key=key)
+        # Sanitize base_url (fix common mistakes)
+        try:
+            b = (base or "").strip()
+            if b.startswith("https:/") and not b.startswith("https://"):
+                b = b.replace("https:/", "https://", 1)
+            if b.startswith("http:/") and not b.startswith("http://"):
+                b = b.replace("http:/", "http://", 1)
+            # Ensure /v1 suffix for OpenAI-compatible endpoints
+            if not b.rstrip("/").endswith("/v1"):
+                b = b.rstrip("/") + "/v1"
+        except Exception:
+            b = base
+        client = OpenAI(base_url=b, api_key=key)
         return client
     except Exception:
         return None
@@ -187,6 +200,7 @@ def _llm_generate_natural_qa_for_doc(
     doc_title: str,
     doc_symbol: str,
     max_items: int,
+    temperature: float = 0.0,
 ) -> List[Dict[str, Any]]:
     """Ask LLM to produce natural Q→A for the entire document.
 
@@ -195,19 +209,70 @@ def _llm_generate_natural_qa_for_doc(
     sys_prompt = (
         "Jesteś asystentem, który tworzy naturalne pytania i krótkie odpowiedzi "
         "na podstawie jednego dokumentu uczelni (po polsku). Przeczytaj dokument i "
-        "zaproponuj 1–3 pytań użytecznych dla użytkownika (np. limity, terminy, uprawnienia, obowiązki, procedury). "
+        "zaproponuj 1–3 rónorodnych pytań użytecznych dla użytkownika (np. limity, terminy, uprawnienia, obowiązki, procedury). "
+        "Pytanie powinny być ogólnie sensowne, pamiętaj że widzisz jeden dokument ale przetwarzany będzie cały korpus prawny uczelni. "
         "Odpowiedzi mają być krótkie (1–2 zdania), konkretne i bez żargonu typu '§/ust.'. "
-        "Jeśli bez dodatkowego kontekstu pytanie mogłoby odnosić się do wielu aktów, dodaj krótki QUALIFIER (np. rok lub określenie zdarzenia), "
-        "ale NIE używaj symboli ani numerów aktów; pisz jak realny użytkownik (np. '… z 1976 r.'). "
+        "Staraj sie by pytanie i odpowiedź były jednoznaczne, nie odnosiły się do podobnych aktów w rónych latach. "
         "FORMAT: Zwróć WYŁĄCZNIE JSON {\"items\":[{\"query\":str, \"answer_text\":str, \"key_values\":[{\"type\":one_of[number,date,percent,ects,duration_days], \"value\":str}]?}, ...]} bez komentarzy."
     )
     user_payload = (
         "TYTUŁ:\n" + (doc_title or "") + "\n\nTEKST:\n" + doc_text[:120_000]
     )
+    def _strip_fences(s: str) -> str:
+        x = (s or "").strip()
+        if x.startswith("```"):
+            x = x.split("\n", 1)[1] if "\n" in x else x[3:]
+        if x.endswith("```"):
+            x = x.rsplit("```", 1)[0]
+        return x.strip()
+
+    def _items_from_parsed(obj: Any) -> List[Dict[str, Any]]:
+        if isinstance(obj, dict):
+            cand = obj.get("items")
+        else:
+            cand = None
+        return [it for it in (cand or []) if isinstance(it, dict)]
+
+    def _scan_items_array(s: str) -> Optional[str]:
+        lower = (s or "").lower()
+        key_pos = lower.find("items")
+        if key_pos < 0:
+            return None
+        colon = s.find(":", key_pos)
+        if colon < 0:
+            return None
+        start = s.find("[", colon)
+        if start < 0:
+            return None
+        depth = 0
+        in_str: Optional[str] = None
+        escape = False
+        for i in range(start, len(s)):
+            ch = s[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == in_str:
+                    in_str = None
+            else:
+                if ch in ('"', "'"):
+                    in_str = ch
+                elif ch == '[':
+                    depth += 1
+                elif ch == ']':
+                    depth -= 1
+                    if depth == 0:
+                        return s[start:i+1]
+        return None
+
+    raw = ""
+    # Perform request — connection errors must propagate
     try:
         rsp = client.chat.completions.create(
             model=model,
-            temperature=0.0,
+            temperature=float(temperature),
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": sys_prompt},
@@ -216,32 +281,49 @@ def _llm_generate_natural_qa_for_doc(
             max_tokens=1200,
         )
         content = rsp.choices[0].message.content or "{}"
-        data = json.loads(content)
-        items = data.get("items") if isinstance(data, dict) else None
-        if not isinstance(items, list):
-            return []
-        out: List[Dict[str, Any]] = []
-        for it in items[: max_items]:
-            if not isinstance(it, dict):
-                continue
-            q = _norm_spaces(str(it.get("query", "")))
-            a = _norm_spaces(str(it.get("answer_text", "")))
-            if not q or not a:
-                continue
-            kv = it.get("key_values")
-            kv_list: List[Dict[str, Any]] = []
-            if isinstance(kv, list):
-                for kvp in kv:
-                    if not isinstance(kvp, dict):
-                        continue
-                    t = str(kvp.get("type", "")).strip().lower()
-                    v = _norm_spaces(str(kvp.get("value", "")))
-                    if t and v:
-                        kv_list.append({"type": t, "value": v})
-            out.append({"query": q, "answer_text": a, "key_values": kv_list})
-        return out
+        raw = _strip_fences(content)
+    except Exception as exc:
+        raise RuntimeError(f"LLM request failed: {exc}")
+
+    # Parse strictly, then fall back
+    items: List[Dict[str, Any]] = []
+    try:
+        items = _items_from_parsed(json.loads(raw))
     except Exception:
+        try:
+            arr_text = _scan_items_array(raw)
+            if arr_text:
+                try:
+                    arr = json.loads(arr_text)
+                except Exception:
+                    arr = ast.literal_eval(arr_text)
+                if isinstance(arr, list):
+                    items = [it for it in arr if isinstance(it, dict)]
+        except Exception:
+            items = []
+    if not items:
         return []
+
+    out: List[Dict[str, Any]] = []
+    for it in items[: max_items]:
+        if not isinstance(it, dict):
+            continue
+        q = _norm_spaces(str(it.get("query", "")))
+        a = _norm_spaces(str(it.get("answer_text", "")))
+        if not q or not a:
+            continue
+        kv = it.get("key_values")
+        kv_list: List[Dict[str, Any]] = []
+        if isinstance(kv, list):
+            for kvp in kv:
+                if not isinstance(kvp, dict):
+                    continue
+                t = str(kvp.get("type", "")).strip().lower()
+                v = _norm_spaces(str(kvp.get("value", "")))
+                if t and v:
+                    kv_list.append({"type": t, "value": v})
+        out.append({"query": q, "answer_text": a, "key_values": kv_list})
+    return out
 
 def _infer_as_of_year(text: str, title: str) -> Optional[str]:
     """Infer a 4-digit year from title or text (best-effort)."""
@@ -250,35 +332,6 @@ def _infer_as_of_year(text: str, title: str) -> Optional[str]:
         if m:
             return m.group(1)
     return None
-
-
-def _ensure_query_disambiguated(query: str, *, as_of: Optional[str], title: str) -> str:
-    """Add a light, natural qualifier (year or short title hint) when query is too generic.
-
-    - Prefer appending a year qualifier like ' (w 1976 r.)' if year is available and not present.
-    - Otherwise, append a short hint from the title (e.g., first 6–8 words), without symbols.
-    - Do not touch queries that already contain a year.
-    """
-    q = (query or "").strip()
-    if not q:
-        return q
-    # Already qualified by year?
-    if re.search(r"\b(19\d{2}|20\d{2})\b", q):
-        return q
-    if as_of and re.match(r"^(19\d{2}|20\d{2})$", as_of) and as_of not in q:
-        suffix = f" (w {as_of} r.)"
-        if q.endswith("?"):
-            return q[:-1].rstrip() + suffix + "?"
-        return q + suffix
-    # Title-based short hint
-    words = [w for w in (title or "").split() if w.strip()]
-    if words:
-        hint = " ".join(words[:8])
-        suffix = f" (dot. {hint})"
-        if q.endswith("?"):
-            return q[:-1].rstrip() + suffix + "?"
-        return q + suffix
-    return q
 
 
 def build_golden(
@@ -351,8 +404,8 @@ def build_golden(
                 kv = it.get("key_values") or []
                 if not q or not a:
                     continue
-                # Delikatnie doprecyzuj pytanie (rok/krótki hint), bez symboli
-                q = _ensure_query_disambiguated(str(q), as_of=as_of_year if as_of_year else None, title=title)
+                # Bez post-procesingu – pytanie pochodzi wprost z LLM
+                q = str(q)
                 record = {
                     "id": _mk_id(str(p), q, a),
                     "query": q,
@@ -402,15 +455,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[error] base-dir not found: {base}")
         return 2
     out_dir = Path(args.out_dir)
-    summary = build_golden(
-        base, out_dir,
-        glob=args.glob,
-        recursive=bool(args.recursive),
-        limit_docs=args.limit_docs,
-        per_doc_qa=max(1, int(args.per_doc_qa)),
-        target_qa=(int(args.target_qa) if args.target_qa is not None else None),
-        seed=int(args.seed),
-    )
+    try:
+        summary = build_golden(
+            base, out_dir,
+            glob=args.glob,
+            recursive=bool(args.recursive),
+            limit_docs=args.limit_docs,
+            per_doc_qa=max(1, int(args.per_doc_qa)),
+            target_qa=(int(args.target_qa) if args.target_qa is not None else None),
+            seed=int(args.seed),
+        )
+    except Exception as exc:
+        print(f"[error] Golden generation failed: {exc}")
+        return 3
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

@@ -62,6 +62,7 @@ from app.qdrant_utils import (
 )
 from app.settings import get_settings
 from app.admin_routes import attach_admin_routes
+from app.golden_routes import attach_golden_routes
 from app.core.summary_cache import (
     compute_file_sha256,
     load_sidecar,
@@ -389,6 +390,7 @@ app = FastAPI(title=f"{settings.app_name} OpenAPI Tool", version=settings.app_ve
 
 # Attach Admin UI and debug endpoints from isolated module
 attach_admin_routes(app)
+attach_golden_routes(app)
 
 
 # Ensure Qdrant collections and indexes at process startup
