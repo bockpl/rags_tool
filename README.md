@@ -1,6 +1,22 @@
-# rags_tool (2.18.0)
+# rags_tool (2.19.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.19.1
+- Poprawka: naprawiono błąd składni w promptcie endpointu `POST /golden/answer` (problem z ucieczką cudzysłowów). Serwis uruchamia się poprawnie.
+
+## Nowości w 2.19.0
+- Golden QA — „Nowa odpowiedź”: nowy przycisk przy każdej pozycji generuje odpowiedź na istniejące pytanie, używając treści dokumentu z metadanych. Pytanie pozostaje bez zmian; LLM zwraca krótką odpowiedź, która trafia do pola „expected_answer”. Endpoint: `POST /golden/answer`.
+- Golden QA — UI: komunikaty o stanie „Zapisano/Regeneracja/Zregenerowano/Błąd …” wyświetlane są lokalnie przy edytowanej pozycji (obok przycisków), a nie na górze strony.
+- Golden QA — UI: poprawka wyświetlania tytułu obok linku do pliku po regeneracji (fallback do symbolu, gdy tytuł jest zbyt krótki).
+
+## Nowości w 2.18.2
+- Golden QA — UI: komunikaty o stanie „Zapisano/Regeneracja/Zregenerowano/Błąd …” wyświetlane są lokalnie przy edytowanej pozycji (obok przycisków), a nie na górze strony.
+- Golden QA — UI: poprawka wyświetlania tytułu obok linku do pliku po regeneracji. Jeśli tytuł jest zbyt krótki (np. pojedynczy znak), UI pokazuje symbol dokumentu — eliminuje to przypadek pojedynczego „P”.
+
+## Nowości w 2.18.1
+- Golden QA — Regeneracja (UI): pole Seed nie ma domyślnej wartości; gdy pozostawisz je puste, UI nie wysyła `seed`, a backend wybiera dokument losowo (na bazie entropii systemowej). Aby uzyskać deterministyczny wybór, wpisz konkretny seed.
+- Dokumentacja: doprecyzowano kolejność wyboru puli dokumentów w „Zregeneruj”: preferowany jest skan `base_dir` + `glob` (+ `recursive`), a dopiero gdy brak wyników — fallback do `golden_documents.jsonl`.
 
 ## Nowości w 2.18.0
 - Golden QA — pytania bez post‑procesingu: usunięto funkcję dopisującą kwalifikatory (np. lata) do pytań.
@@ -25,7 +41,7 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
   - Po uruchomieniu generowania w tle wykorzystuje istniejący generator z `tools/golden_make.py`.
   - Wymaga skonfigurowanego LLM: preferowane `GOLDEN_LLM_BASE_URL`, `GOLDEN_LLM_API_KEY`, `GOLDEN_LLM_MODEL`. Jeśli brak tych zmiennych, używany jest fallback z ustawień `SUMMARY_API_URL`, `SUMMARY_API_KEY`, `SUMMARY_MODEL` (jeśli dostępne).
   - Lista pozycji ładowana jest z `golden_qa.jsonl` (domyślnie `data/golden/golden_qa.jsonl`). Każdą parę można edytować i zapisać lub zregenerować pojedynczo (LLM).
-  - API pomocnicze (ukryte w OpenAPI): `POST /golden/generate`, `GET /golden/list`, `POST /golden/update`, `POST /golden/regenerate`.
+  - API pomocnicze (ukryte w OpenAPI): `POST /golden/generate`, `GET /golden/list`, `POST /golden/update`, `POST /golden/regenerate`, `POST /golden/answer`.
 
 Skrót uruchomienia:
 1) Otwórz `http://<host>:<port>/golden`.

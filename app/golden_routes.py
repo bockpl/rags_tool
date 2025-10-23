@@ -25,6 +25,7 @@ from app.models import (
     GoldenListResponse,
     GoldenUpdateRequest,
     GoldenRegenerateRequest,
+    GoldenAnswerRequest,
 )
 
 
@@ -390,3 +391,125 @@ def attach_golden_routes(app) -> None:
         return {"status": "ok", "regenerated": req.id, "query": q, "expected_answer": a}
 
     app.post("/golden/regenerate", include_in_schema=False, summary="Zregeneruj pojedynczą pozycję QA")(golden_regenerate)
+
+    # API: answer current question using the document from meta (LLM required)
+    def golden_answer(req: GoldenAnswerRequest) -> Dict[str, Any]:
+        qa_path = _golden_file_path(req.out_dir)
+        items = _read_jsonl(qa_path)
+        idx = -1
+        cur: Optional[Dict[str, Any]] = None
+        for i, it in enumerate(items):
+            if str(it.get("id")) == req.id:
+                idx = i
+                cur = it
+                break
+        if idx < 0 or cur is None:
+            raise HTTPException(status_code=404, detail="Nie znaleziono pozycji o podanym id")
+
+        meta = cur.get("meta") or {}
+        doc_path = meta.get("doc_path") or meta.get("path")
+        if not doc_path:
+            raise HTTPException(status_code=400, detail="Brak ścieżki dokumentu w meta; nie można wygenerować odpowiedzi")
+
+        p = pathlib.Path(str(doc_path))
+        if not p.exists():
+            raise HTTPException(status_code=400, detail="Plik dokumentu nie istnieje (meta.doc_path)")
+
+        # Import LLM helpers from CLI module
+        try:
+            from tools.golden_make import (  # type: ignore
+                _extract_text as _gm_extract_text,
+                _llm_client_from_env as _gm_llm_client,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Brak narzędzi LLM: {exc}")
+
+        # Ensure LLM env (fallback to SUMMARY_*)
+        import os
+        from app.settings import get_settings
+        client = _gm_llm_client()
+        model = os.environ.get("GOLDEN_LLM_MODEL")
+        if not (client and model):
+            s = get_settings()
+            if s.summary_api_url and s.summary_api_key and s.summary_model:
+                os.environ["GOLDEN_LLM_BASE_URL"] = str(s.summary_api_url)
+                os.environ["GOLDEN_LLM_API_KEY"] = str(s.summary_api_key)
+                os.environ["GOLDEN_LLM_MODEL"] = str(s.summary_model)
+                client = _gm_llm_client()
+                model = os.environ.get("GOLDEN_LLM_MODEL")
+        if not (client and model):
+            raise HTTPException(status_code=400, detail="LLM nie jest skonfigurowany (GOLDEN_* lub SUMMARY_*). Ustaw GOLDEN_LLM_* albo SUMMARY_API_URL/KEY/MODEL.")
+
+        # Read document
+        try:
+            text = _gm_extract_text(p)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Nie można odczytać dokumentu: {exc}")
+
+        # Build prompt to answer the current question concisely based only on the document
+        q = str(cur.get("query", "")).strip()
+        if not q:
+            raise HTTPException(status_code=400, detail="Brak pytania w rekordzie; nie można wygenerować odpowiedzi")
+
+        # Compose request (OpenAI JSON mode)
+        sys_prompt = (
+            '''Jesteś asystentem, który udziela krótkich, konkretnych odpowiedzi po polsku '''
+            '''wyłącznie na podstawie treści jednego dokumentu. Odpowiadaj zwięźle (1–2 zdania), '''
+            '''bez żargonu typu '§/ust.'. Zwróć WYŁĄCZNIE JSON {"answer_text": str, "key_values":[{"type":one_of[number,date,percent,ects,duration_days], "value":str}]?}.'''
+        )
+        # Try to pass along a usable title; tolerant to missing meta
+        title = str(meta.get("doc_title") or "").strip()
+        user_payload = (
+            "PYTANIE:\n" + q + "\n\nTEKST:\n" + (text or "")[:120_000]
+        )
+
+        try:
+            rsp = client.chat.completions.create(
+                model=model,
+                temperature=float(req.temperature or 0.4),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": ("TYTUŁ:\n" + title + "\n\n" + user_payload) if title else user_payload},
+                ],
+                max_tokens=600,
+            )
+            raw = (rsp.choices[0].message.content or "{}").strip()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}")
+
+        ans_text: str = ""
+        key_values: list = []
+        try:
+            import json as _json  # local alias
+            def _strip_fences(s: str) -> str:
+                x = (s or "").strip()
+                if x.startswith("```"):
+                    x = x.split("\n", 1)[1] if "\n" in x else x[3:]
+                if x.endswith("```"):
+                    x = x.rsplit("```", 1)[0]
+                return x.strip()
+            obj = _json.loads(_strip_fences(raw))
+            cand = str(obj.get("answer_text") or "").strip()
+            if cand:
+                ans_text = cand
+            kv = obj.get("key_values")
+            if isinstance(kv, list):
+                key_values = [kvp for kvp in kv if isinstance(kvp, dict)]
+        except Exception:
+            # Fallback: treat raw as plain text
+            ans_text = raw
+
+        ans_text = (ans_text or "").strip()
+        if not ans_text:
+            raise HTTPException(status_code=500, detail="LLM nie zwrócił odpowiedzi")
+
+        # Update item (keep id, question, meta)
+        cur["expected_answer"] = ans_text
+        if key_values:
+            cur["key_values"] = key_values
+        items[idx] = cur
+        _write_jsonl_atomic(qa_path, items)
+        return {"status": "ok", "updated": req.id, "expected_answer": ans_text}
+
+    app.post("/golden/answer", include_in_schema=False, summary="Wygeneruj nową odpowiedź dla istniejącego pytania")(golden_answer)

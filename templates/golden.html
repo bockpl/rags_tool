@@ -64,7 +64,7 @@
       </div>
       <div class="field">
         <label for="seed">Seed</label>
-        <input id="seed" type="number" value="123" />
+        <input id="seed" type="number" placeholder="opcjonalny" />
       </div>
       <div class="field">
         <label>&nbsp;</label>
@@ -104,8 +104,11 @@
         limit_docs: val('limitDocs') ? parseInt(val('limitDocs'), 10) : null,
         per_doc_qa: Math.max(1, parseInt(val('perDocQa') || '2', 10)),
         target_qa: val('targetQa') ? parseInt(val('targetQa'), 10) : null,
-        seed: parseInt(val('seed') || '123', 10)
       };
+      const seedStrGen = (val('seed') || '').trim();
+      if (seedStrGen) {
+        payload.seed = parseInt(seedStrGen, 10);
+      }
       try {
         const res = await fetch('/golden/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const data = await res.json();
@@ -121,7 +124,7 @@
       }
     }
 
-    async function loadList() {
+    async function loadList(highlightId = null, message = null) {
       const url = new URL(window.location.origin + '/golden/list');
       url.searchParams.set('out_dir', currentOutDir);
       setStatus('Wczytywanie listy…');
@@ -134,6 +137,15 @@
         setText('qaPath', data.qa_path || '');
         renderList(data.items || []);
         setStatus(`Załadowano: ${data.items?.length || 0} pozycji`);
+        if (highlightId && message) {
+          const card = document.querySelector(`.card[data-id="${highlightId}"]`);
+          if (card) {
+            const s = card.querySelector('.status');
+            if (s) {
+              s.textContent = message;
+            }
+          }
+        }
       } catch (err) {
         setStatus('Błąd: ' + err);
       }
@@ -145,9 +157,13 @@
       items.forEach((it) => {
         const card = document.createElement('div');
         card.className = 'card';
+        card.dataset.id = it.id || '';
         const meta = document.createElement('div');
         meta.className = 'meta';
-        const doc = (it.meta && (it.meta.doc_title || it.meta.doc_symbol)) || '';
+        const docTitle = (it.meta && it.meta.doc_title) || '';
+        const docSymbol = (it.meta && it.meta.doc_symbol) || '';
+        // Prefer a reasonably long title; fall back to symbol to avoid single-letter artifacts like "P"
+        const doc = (docTitle && docTitle.trim().length >= 3) ? docTitle : (docSymbol || '');
         const path = (it.meta && it.meta.doc_path) || '';
         const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = it.id;
         meta.appendChild(tag);
@@ -168,8 +184,10 @@
         const q = document.createElement('textarea'); q.value = it.query || '';
         const a = document.createElement('textarea'); a.value = it.expected_answer || '';
         const actions = document.createElement('div'); actions.className = 'actions';
+        const localStatus = document.createElement('span'); localStatus.className = 'small status';
         const save = document.createElement('button'); save.textContent = 'Zapisz';
         const regen = document.createElement('button'); regen.textContent = 'Zregeneruj'; regen.className = 'warn';
+        const answerBtn = document.createElement('button'); answerBtn.textContent = 'Nowa odpowiedź'; answerBtn.className = 'success';
         save.onclick = async () => {
           save.disabled = true; regen.disabled = true;
           try {
@@ -177,9 +195,9 @@
             const res = await fetch('/golden/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || 'Błąd');
-            setStatus('Zapisano ' + it.id);
+            localStatus.textContent = 'Zapisano';
           } catch (err) {
-            setStatus('Błąd zapisu: ' + err);
+            localStatus.textContent = 'Błąd zapisu: ' + err;
           } finally {
             save.disabled = false; regen.disabled = false;
           }
@@ -187,7 +205,7 @@
         regen.onclick = async () => {
           save.disabled = true; regen.disabled = true;
           try {
-            setStatus('Regeneracja losowa…');
+            localStatus.textContent = 'Regeneracja…';
             const payload = {
               out_dir: currentOutDir,
               id: it.id,
@@ -197,23 +215,41 @@
               recursive: bool('recursive'),
               temperature: 0.7,
               ensure_different: true,
-              seed: parseInt(val('seed') || '123', 10),
             };
+            const seedStr = (val('seed') || '').trim();
+            if (seedStr) {
+              payload.seed = parseInt(seedStr, 10);
+            }
             const res = await fetch('/golden/regenerate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || 'Błąd');
             q.value = data.query || q.value;
             a.value = data.expected_answer || a.value;
             // Odśwież listę, aby zaktualizować link do pliku i tytuł z nowego dokumentu
-            await loadList();
-            setStatus('Zregenerowano ' + it.id);
+            await loadList(it.id, 'Zregenerowano');
           } catch (err) {
-            setStatus('Błąd regeneracji: ' + err);
+            localStatus.textContent = 'Błąd regeneracji: ' + err;
           } finally {
             save.disabled = false; regen.disabled = false;
           }
         };
-        actions.appendChild(save); actions.appendChild(regen);
+        answerBtn.onclick = async () => {
+          save.disabled = true; regen.disabled = true; answerBtn.disabled = true;
+          try {
+            localStatus.textContent = 'Generuję odpowiedź…';
+            const payload = { out_dir: currentOutDir, id: it.id, temperature: 0.5 };
+            const res = await fetch('/golden/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Błąd');
+            a.value = data.expected_answer || a.value;
+            localStatus.textContent = 'Zaktualizowano odpowiedź';
+          } catch (err) {
+            localStatus.textContent = 'Błąd generowania odpowiedzi: ' + err;
+          } finally {
+            save.disabled = false; regen.disabled = false; answerBtn.disabled = false;
+          }
+        };
+        actions.appendChild(save); actions.appendChild(regen); actions.appendChild(answerBtn); actions.appendChild(localStatus);
         card.appendChild(meta); card.appendChild(q); card.appendChild(a); card.appendChild(actions);
         root.appendChild(card);
       });

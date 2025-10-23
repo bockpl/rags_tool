@@ -507,3 +507,9 @@ class GoldenRegenerateRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Temperatura dla LLM podczas regeneracji")
     ensure_different: bool = Field(default=True, description="Wymagaj, aby nowa para Q/A różniła się od poprzedniej i nie duplikowała istniejących")
     seed: Optional[int] = Field(default=None, description="Ziarno deterministycznego wyboru dokumentu (opcjonalnie)")
+
+
+class GoldenAnswerRequest(BaseModel):
+    out_dir: str = Field(default="data/golden")
+    id: str
+    temperature: float = Field(default=0.4, ge=0.0, le=2.0, description="Temperatura generowania odpowiedzi")
