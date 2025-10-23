@@ -3,7 +3,12 @@ set -euo pipefail
 
 # Golden QA end-to-end pipeline (LLM-only generation → predictions → LLM-judge eval)
 #
-# Konfiguracja odbywa się przez zmienne środowiskowe. Poniżej wartości domyślne.
+# Usage:
+#   tools/golden_pipeline.sh [--regenerate]
+#
+# Behavior:
+# - If golden file exists, generation step is skipped unless --regenerate is passed.
+# - Configuration is provided via environment variables (defaults below).
 
 # === LLM do generacji pytań i sędziego (ten sam endpoint) ===
 : "${GOLDEN_LLM_BASE_URL:=https://ai.p.lodz.pl/api}"
@@ -42,33 +47,71 @@ export EVAL_SEARCH_URL EVAL_SEARCH_PATH EVAL_SEARCH_TOP_K EVAL_TOOL_MAX_CHARS
 
 mkdir -p "$OUT_DIR"
 
-echo "== [1/3] Golden set (LLM-only) =="
-python tools/golden_make.py \
-  --base-dir "$BASE_DIR" \
-  --glob "$GLOB" \
-  --recursive \
-  --out-dir "$OUT_DIR" \
-  --per-doc-qa "$PER_DOC_QA" \
-  --target-qa "$TARGET_QA" \
-  --seed 123
+# --- CLI flags ---
+REGENERATE=0
+for arg in "$@"; do
+  case "$arg" in
+    --regenerate)
+      REGENERATE=1
+      shift || true
+      ;;
+    *)
+      # ignore unknown positional/flags to keep script simple
+      ;;
+  esac
+done
 
 GOLDEN_FILE="$OUT_DIR/golden_qa.jsonl"
+
+# Optional seed override from env. If empty, use a random seed by default.
+: "${GOLDEN_SEED:=}"
+
+run_generation() {
+  local seed_arg=()
+  if [[ -n "${GOLDEN_SEED}" ]]; then
+    seed_arg=(--seed "${GOLDEN_SEED}")
+    echo "Using provided seed: ${GOLDEN_SEED}"
+  else
+    # Generate a pseudo-random 31-bit seed using shell primitives
+    local auto_seed=$(( (RANDOM << 16) ^ (RANDOM << 1) ^ $$ ^ $(date +%s) ))
+    seed_arg=(--seed "${auto_seed}")
+    echo "Using random seed: ${auto_seed} (set GOLDEN_SEED to override)"
+  fi
+
+  python tools/golden_make.py \
+    --base-dir "$BASE_DIR" \
+    --glob "$GLOB" \
+    --recursive \
+    --out-dir "$OUT_DIR" \
+    --per-doc-qa "$PER_DOC_QA" \
+    --target-qa "$TARGET_QA" \
+    "${seed_arg[@]}"
+}
+
+echo "== [1/3] Golden set (LLM-only) =="
+if [[ $REGENERATE -eq 1 ]]; then
+  echo "Regenerating golden set (flag --regenerate)."
+  run_generation
+elif [[ -f "$GOLDEN_FILE" ]]; then
+  echo "Golden file exists: $GOLDEN_FILE — skipping generation (use --regenerate to force)."
+else
+  echo "Golden file not found — generating to $OUT_DIR."
+  run_generation
+fi
+
 PRED_FILE="$OUT_DIR/predictions.jsonl"
 REPORT_FILE="$OUT_DIR/eval_report.json"
 
 echo "== [2/3] Predykcje badanego modelu =="
+RUN_ARGS=(
+  --golden "$GOLDEN_FILE"
+  --out "$PRED_FILE"
+  --sleep-ms "$SLEEP_MS"
+)
 if [[ "$USE_TOOLS" == "1" ]]; then
-  python tools/golden_run.py \
-    --golden "$GOLDEN_FILE" \
-    --out "$PRED_FILE" \
-    --sleep-ms "$SLEEP_MS" \
-    --use-tools
-else
-  python tools/golden_run.py \
-    --golden "$GOLDEN_FILE" \
-    --out "$PRED_FILE" \
-    --sleep-ms "$SLEEP_MS"
+  RUN_ARGS+=(--use-tools)
 fi
+python tools/golden_run.py "${RUN_ARGS[@]}"
 
 echo "== [3/3] Ewaluacja (LLM-as-judge) =="
 JUDGE_ARGS=()

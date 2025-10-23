@@ -1,6 +1,11 @@
-# rags_tool (2.19.1)
+# rags_tool (2.20.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.20.0
+- tools/golden_pipeline.sh: skrypt wykrywa istnienie pliku `golden_qa.jsonl` i pomija krok generacji golden setu. Aby wymusić ponowną generację, uruchom z przełącznikiem `--regenerate`.
+  - Przykład: `bash tools/golden_pipeline.sh --regenerate`
+  - Seed: domyślnie używany jest losowy seed. Aby uzyskać deterministyczną generację, ustaw zmienną `GOLDEN_SEED` (liczba całkowita), np. `GOLDEN_SEED=42 bash tools/golden_pipeline.sh`.
 
 ## Nowości w 2.19.1
 - Poprawka: naprawiono błąd składni w promptcie endpointu `POST /golden/answer` (problem z ucieczką cudzysłowów). Serwis uruchamia się poprawnie.
