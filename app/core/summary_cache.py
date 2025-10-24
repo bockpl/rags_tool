@@ -15,6 +15,7 @@ Schema (versioned by SCHEMA_VERSION):
     "title": "...",
     "summary": "...",
     "signature": ["..."],
+    "entities": ["..."],
     "replacement": "brak | ...",
     "doc_date": "YYYY-MM-DD | YYYY | brak"
   },
@@ -101,6 +102,7 @@ def save_sidecar(
     title: str,
     summary: str,
     signature: list[str],
+    entities: list[str],
     replacement: str,
     summary_dense: list[float],
     doc_date: str = "brak",
@@ -117,6 +119,7 @@ def save_sidecar(
             "title": title,
             "summary": summary,
             "signature": signature,
+            "entities": entities,
             "replacement": replacement,
             "doc_date": doc_date or "brak",
         },

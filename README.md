@@ -1,4 +1,4 @@
-# rags_tool (2.20.0)
+# rags_tool (2.22.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
@@ -314,7 +314,7 @@ PY
 ## Nowości w 2.5.0
 
 - Sidecar cache streszczeń i wektorów w katalogu `.summary/` obok plików źródłowych:
-  - Dla każdego dokumentu zapisywany jest plik `.summary/<basename>_summary.json.gz` zawierający: `title`, `summary`, `signature`, `replacement` oraz gotowy wektor gęsty `summary_dense`.
+  - Dla każdego dokumentu zapisywany jest plik `.summary/<basename>_summary.json.gz` zawierający: `title`, `summary`, `signature`, `entities`, `replacement`, `doc_date` oraz wektor gęsty `summary_dense`.
   - Plik jest kompresowany gzip (duża oszczędność przy listach floatów).
   - Spójność weryfikowana jest przez `document.content_sha256` oraz `schema_version` (1.0.0). Przy rozbieżności cache jest ignorowany.
   - Podczas ingestu, gdy cache jest zgodny, pomijane są wywołania LLM oraz embedding streszczenia (znaczące skrócenie czasu i kosztu).
@@ -902,3 +902,12 @@ for coll in (settings.qdrant_summary_collection, settings.qdrant_content_collect
             raise
 PY
 ```
+## Nowości w 2.22.0
+- ENTITIES: utrwalanie i indeksowanie
+  - Streszczenia zapisują teraz pole `entities` tak samo jak `signature`:
+    - w cache sidecar `.summary/<basename>_summary.json.gz` (sekcja `summary.entities` jako lista stringów),
+    - w payloadzie punktów typu `summary` w Qdrant (`entities: [string, ...]`).
+  - Tworzony jest indeks payload `entities` (typ `keyword`) w obu kolekcjach, aby przyspieszyć filtrowanie/przeglądanie po nazwach i identyfikatorach (field condition `MatchAny`).
+  - `/search/query` dołącza `entities` do minimalnego payloadu dla Etapu 1 i propaguje je do wyników (flat/grouped/blocks) — tak jak `signature`.
+  - W JSON‑mode prompt streszczeń oczekuje teraz `entities` jako listy stringów.
+  - Zgodność wsteczna: istniejące pliki sidecar bez `entities` pozostają ważne; pole pojawi się po kolejnej regeneracji streszczeń.

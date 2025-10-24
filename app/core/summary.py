@@ -34,7 +34,7 @@ def _naive_local_summary(text: str, max_sentences: int = 5) -> Dict[str, Any]:
 
     - Title: first non-empty line (trimmed to 200 chars)
     - Summary: first few sentences (up to max_sentences) or first 600 chars
-    - Signature/entities: left minimal/empty
+    - Signature/entities: left minimal/empty (entities: [])
     - Replacement: "brak"
     """
     title = _default_title_from_text(text)
@@ -51,7 +51,7 @@ def _naive_local_summary(text: str, max_sentences: int = 5) -> Dict[str, Any]:
         "title": title,
         "summary": summary,
         "signature": [],
-        "entities": "",
+        "entities": [],
         "replacement": "brak",
         "doc_date": "brak",
     }
@@ -93,11 +93,13 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
                 signature_list = [str(s).strip() for s in signature_val if str(s).strip()]
             else:
                 signature_list = []
-            entities_val = data.get("entities", "")
-            if isinstance(entities_val, list):
-                entities_str = ", ".join(str(x) for x in entities_val)
+            entities_val = data.get("entities", [])
+            if isinstance(entities_val, str):
+                entities_list = [s.strip() for s in re.split(r",|;|\n", entities_val) if s.strip()]
+            elif isinstance(entities_val, list):
+                entities_list = [str(s).strip() for s in entities_val if str(s).strip()]
             else:
-                entities_str = str(entities_val)
+                entities_list = []
             replacement_val = data.get("replacement", "")
             if isinstance(replacement_val, list):
                 replacement_str = ", ".join(str(x).strip() for x in replacement_val if str(x).strip())
@@ -119,7 +121,7 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
                     "title": title_str,
                     "summary": summary_val,
                     "signature": signature_list,
-                    "entities": entities_str,
+                    "entities": entities_list,
                     "replacement": replacement_str,
                     "doc_date": doc_date_str,
                 }
@@ -148,7 +150,7 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
     summary = ""
     title = ""
     signature_list: List[str] = []
-    entities_str = ""
+    entities_list: List[str] = []
     replacement_str = "brak"
     doc_date_str = "brak"
     for line in out.splitlines():
@@ -169,7 +171,8 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
             continue
         m = re.match(r"^\s*entities\s*:\s*(.*)$", line, re.IGNORECASE)
         if m:
-            entities_str = m.group(1).strip()
+            raw = m.group(1).strip()
+            entities_list = [s.strip() for s in re.split(r",|;|\n", raw) if s.strip()]
             continue
         m = re.match(r"^\s*date\s*:\s*(.*)$", line, re.IGNORECASE)
         if m:
@@ -191,7 +194,7 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
         "title": title,
         "summary": summary,
         "signature": signature_list,
-        "entities": entities_str,
+        "entities": entities_list,
         "replacement": replacement_str,
         "doc_date": doc_date_str or "brak",
     }

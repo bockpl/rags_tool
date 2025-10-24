@@ -227,6 +227,7 @@ def _iter_document_records(
                 "title": str(summ_block.get("title") or ""),
                 "summary": str(summ_block.get("summary") or ""),
                 "signature": list(summ_block.get("signature") or []),
+                "entities": [str(x).strip() for x in list(summ_block.get("entities") or []) if str(x).strip()],
                 "replacement": str(summ_block.get("replacement") or "brak") or "brak",
                 "doc_date": str(summ_block.get("doc_date") or "brak") or "brak",
             }
@@ -244,6 +245,7 @@ def _iter_document_records(
                     title=str(doc_sum.get("title", "") or ""),
                     summary=summary_text,
                     signature=list(doc_sum.get("signature", []) or []),
+                    entities=[str(x).strip() for x in list(doc_sum.get("entities", []) or []) if str(x).strip()],
                     replacement=str(doc_sum.get("replacement", "brak") or "brak"),
                     summary_dense=list(summary_dense_vec),
                     doc_date=str(doc_sum.get("doc_date", "brak") or "brak"),
@@ -267,6 +269,10 @@ def _iter_document_records(
             doc_sum.get("summary", ""),
             " ".join(summary_signature),
         ]
+        # Include entities (as tokens) to improve Stage-1 sparse matching
+        entities_list = [str(x).strip() for x in list(doc_sum.get("entities", []) or []) if str(x).strip()]
+        if entities_list:
+            summary_sparse_parts.append(" ".join(entities_list))
         # Include doc_date in sparse summary if available and not 'brak'
         doc_date_val = str(doc_sum.get("doc_date", "") or "").strip()
         if doc_date_val and doc_date_val.lower() != "brak":
@@ -281,6 +287,7 @@ def _iter_document_records(
             "doc_title": doc_title,
             "doc_summary": doc_sum.get("summary", ""),
             "doc_signature": summary_signature,
+            "doc_entities": entities_list,
             "replacement": replacement_info,
             "doc_date": doc_sum.get("doc_date", "brak"),
             "summary_sparse_text": summary_sparse_text,

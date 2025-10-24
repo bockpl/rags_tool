@@ -147,6 +147,7 @@ DEFAULT_PAYLOAD_INDEXES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("section_path_prefixes", {"type": "keyword"}),
     ("doc_date", {"type": "keyword"}),
     ("content_sha256", {"type": "keyword"}),
+    ("entities", {"type": "keyword"}),
 )
 
 
@@ -1081,6 +1082,15 @@ def build_and_upsert_points(
         chunks = rec["chunks"]
         doc_summary = rec["doc_summary"]
         doc_signature = rec["doc_signature"]
+        doc_entities_raw = rec.get("doc_entities", [])
+        if isinstance(doc_entities_raw, (list, tuple)):
+            doc_entities = [str(x).strip() for x in doc_entities_raw if str(x).strip()]
+        elif isinstance(doc_entities_raw, str):
+            # Backward-compat: accept legacy string, split to tokens on commas/semicolons/newlines
+            parts = re.split(r",|;|\n", doc_entities_raw)
+            doc_entities = [p.strip() for p in parts if p.strip()]
+        else:
+            doc_entities = []
         summary_sparse_text = rec["summary_sparse_text"]
         doc_date_val = str(rec.get("doc_date", "") or "").strip()
         replacement_info = str(rec.get("replacement", "") or "brak").strip() or "brak"
@@ -1158,6 +1168,7 @@ def build_and_upsert_points(
             "title": doc_title,
             "summary": doc_summary,
             "signature": doc_signature,
+            "entities": doc_entities,
         }
         # propagate content hash if available in record (used for dedupe)
         try:

@@ -215,7 +215,7 @@ def _with_must_condition(
 def _fetch_doc_summaries(doc_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     """Fetch summaries for given doc_ids from the summaries collection.
 
-    Returns a map: doc_id -> { doc_id, doc_summary, doc_signature }
+    Returns a map: doc_id -> { doc_id, doc_summary, doc_signature, doc_entities }
     """
     out: Dict[str, Dict[str, Any]] = {}
     if not doc_ids:
@@ -255,6 +255,7 @@ def _fetch_doc_summaries(doc_ids: List[str]) -> Dict[str, Dict[str, Any]]:
                     "doc_id": str(did),
                     "doc_summary": payload.get("summary"),
                     "doc_signature": payload.get("signature"),
+                    "doc_entities": payload.get("entities"),
                     "doc_title": payload.get("title"),
                     "doc_date": payload.get("doc_date"),
                     "is_active": payload.get("is_active"),
@@ -312,6 +313,7 @@ def _stage1_select_documents(
             "path",
             "summary",
             "signature",
+            "entities",
             "title",
             "doc_date",
             "is_active",
@@ -356,6 +358,7 @@ def _stage1_select_documents(
                 "path": payload.get("path"),
                 "doc_summary": payload.get("summary"),
                 "doc_signature": payload.get("signature"),
+                "doc_entities": payload.get("entities"),
                 "doc_title": payload.get("title"),
                 "doc_date": payload.get("doc_date"),
                 "is_active": payload.get("is_active"),
@@ -372,7 +375,7 @@ def _stage1_select_documents(
         hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
     else:
         # Dual-query: dense + sparse, then fuse (no TF-IDF payload needed)
-        include_fields = ["doc_id", "path", "summary", "signature", "title", "doc_date", "is_active"]
+        include_fields = ["doc_id", "path", "summary", "signature", "entities", "title", "doc_date", "is_active"]
         with_payload_dense = include_fields if settings.search_minimal_payload else True
         dense_hits = qdrant.search(
             collection_name=settings.qdrant_summary_collection,
@@ -417,6 +420,7 @@ def _stage1_select_documents(
                 "path": p.get("path"),
                 "doc_summary": p.get("summary"),
                 "doc_signature": p.get("signature"),
+                "doc_entities": p.get("entities"),
                 "doc_title": p.get("title"),
                 "doc_date": p.get("doc_date"),
                 "is_active": p.get("is_active"),
@@ -434,6 +438,7 @@ def _stage1_select_documents(
                     "path": p.get("path"),
                     "doc_summary": None,
                     "doc_signature": None,
+                    "doc_entities": None,
                     "doc_title": None,
                     "doc_date": None,
                     "is_active": None,
@@ -574,6 +579,8 @@ def _stage2_select_chunks(
             p.setdefault("summary", info.get("doc_summary"))
             if info.get("doc_signature") is not None:
                 p.setdefault("signature", info.get("doc_signature"))
+            if info.get("doc_entities") is not None:
+                p.setdefault("entities", info.get("doc_entities"))
             if info.get("doc_title") is not None:
                 p.setdefault("title", info.get("doc_title"))
             if info.get("doc_date") is not None:
@@ -638,6 +645,8 @@ def _stage2_select_chunks(
             payload.setdefault("summary", doc_info.get("doc_summary"))
             if doc_info.get("doc_signature") is not None:
                 payload.setdefault("signature", doc_info.get("doc_signature"))
+            if doc_info.get("doc_entities") is not None:
+                payload.setdefault("entities", doc_info.get("doc_entities"))
             if doc_info.get("doc_title") is not None:
                 payload.setdefault("title", doc_info.get("doc_title"))
             if doc_info.get("doc_date") is not None:
