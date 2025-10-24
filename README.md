@@ -196,7 +196,7 @@ Content-Type: application/json
 }
 ```
 
-Uwaga dla integracji LLM: to narzędzie powinno być używane wyłącznie, gdy użytkownik wprost prosi o wykrycie sprzeczności/niespójności dla wskazanego dokumentu. Do zwykłego wyszukiwania używaj `POST /search/query` (zwraca `blocks`).
+Uwaga dla integracji LLM: to narzędzie powinno być używane wyłącznie, gdy użytkownik wprost prosi o wykrycie sprzeczności/niespójności dla wskazanego dokumentu. Do zwykłego wyszukiwania używaj `POST /search/query` (obsługuje intencje evidence/doc_list, domyślnie zwraca `blocks`).
 
 ## Nowości w 2.9.1
 - Admin UI: widoczne, automatycznie generowane opisy dla operacji (funkcji) dostępnych w panelu. Sekcja dokumentacji per‑endpoint zawiera teraz listę parametrów, ich typy, wartości domyślne oraz — gdy dotyczy — dozwolone wartości (np. `auto|current|archival|all`, `flat|grouped|blocks`). Opisy są generowane dynamicznie na podstawie modeli Pydantic i metadanych endpointów FastAPI, dzięki czemu pozostają spójne z dokumentacją i nie wymagają duplikacji treści.
@@ -778,6 +778,31 @@ Wartości `SECTION_LEVELS` to unia poziomów znalezionych we wszystkich dokument
 - `summary_mode`: `none` | `first` | `all` — kontrola tego, czy i kiedy dołączać streszczenie dokumentu do trafień (domyślnie `first`).
 - `result_format`: `flat` | `grouped` | `blocks` — kształt odpowiedzi; domyślnie `blocks` (zalecane dla narzędzi). W `blocks` zwracane są pojedyncze sekcyjne fragmenty (chunki) z ingestu.
 
+#### Intencje: evidence vs doc_list
+
+Endpoint obsługuje dwie główne intencje pytań:
+
+- evidence (domyślne) – potrzebne są fragmenty treści do cytowania w odpowiedzi.
+- doc_list – potrzebny jest wykaz unikalnych dokumentów (tytuł, data, ścieżka, opcjonalnie punktacja), bez długich cytatów.
+
+Wykrywanie doc_list przez LLM: jeżeli w pytaniu pojawiają się słowa/zwroty takie jak „lista”, „wykaz”, „spis”, „które dokumenty…”, „pokaż dokumenty/akty/uchwały…”, „wszystkie dokumenty dot. …”, traktuj zapytanie jako doc_list. W pozostałych przypadkach użyj evidence.
+
+Preset „DocList” (gdy intencja = doc_list):
+
+- `query`: zbuduj 3–8 zwięzłych wariantów (tytuły/sygnatury/datacje/słowa kluczowe). Dodaj warianty leksykalne (synonimy, odmiany), aby zwiększyć recall.
+- `top_m`: 100–300 (wyższy recall w Etapie 1).
+- `top_k`: ustaw na docelową długość listy (np. 30–100).
+- `mode`: zwykle `all`, chyba że użytkownik prosi o „obowiązujące” → `current`.
+- `use_hybrid`: `true`.
+- `dense_weight` / `sparse_weight`: np. `0.4 / 0.6` (lekki bias na leksykalne pokrycie).
+- `mmr_lambda`: `0.4–0.5` (większa różnorodność, mniej duplikatów treści).
+- `per_doc_limit`: `1` (wymusza jeden wpis na dokument).
+- `score_norm`: `zscore` (stabilniejsze fuzje wielu zapytań).
+- `rep_alpha`: `0.5–0.6`.
+- `mmr_stage1`: `true` (dywersyfikacja listy już na selekcji dokumentów).
+- `summary_mode`: `first` (jedno streszczenie/dokument do cytatu).
+- `result_format`: możesz pozostać przy `blocks` (zalecane) albo użyć `grouped`, jeśli potrzebujesz lżejszego payloadu.
+
 Przykładowe zapytanie (flat, bez duplikacji streszczeń):
 
 ```json
@@ -826,6 +851,11 @@ Przykładowe zapytanie (blocks):
 ## Licencja
 
 MIT
+## Nowości w 2.20.2
+- OpenAPI dla narzędzi: ukryto pozostałe funkcje narzędziowe w specyfikacji (`include_in_schema=false`) tak, aby importer LLM widział wyłącznie `POST /search/query` (operation_id `rags_tool_search`). Brak zmian w działaniu endpointów — nadal dostępne HTTP, ale niewidoczne w OpenAPI.
+
+## Nowości w 2.20.1
+- Dokumentacja narzędzia: dodano opis dwóch intencji dla `/search/query` (evidence i doc_list), heurystyki wykrywania (słowa kluczowe) oraz preset „DocList” z zalecanymi parametrami. Zaktualizowano opis w OpenAPI (widoczny dla narzędzia LLM). Bez zmian w API.
 ## Nowości w 1.9.1
 
 - Refaktor: wydzielono kod Admin UI i endpointy debug (`/admin`, `/search/debug/*`) do oddzielnego modułu `app/admin_routes.py` i podpinane są przez `attach_admin_routes(app)`. Kod funkcjonalny pozostaje w `app/api.py`.

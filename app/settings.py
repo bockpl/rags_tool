@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.20.0"
+    app_version: str = "2.20.2"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -90,11 +90,20 @@ class SummRAGSettings(BaseSettings):
     # via .env to tailor the wording for a specific corpus (e.g., PŁ documents).
     search_tool_description: str = Field(
         default=(
-            "Proste wyszukiwanie w korpusie (RAG + reranker). Wywołuj TYLKO w ten sposób: "
-            "POST /search/query z JSON: {\n  \"query\": [\n    \"krótkie pytanie\",\n    \"wariant pytania\"\n  ],\n  \"mode\": \"auto\"\n}. "
-            "Nie wysyłaj innych pól — limity, wagi i scalanie są ustawione po stronie serwera. "
-            "Zwracane jest pole 'blocks' (lista z polami: text, path, ranker_score gdy dostępny). "
-            "Używaj do pytań o treści z indeksu; przy braku wyników zawężaj temat lub doprecyzuj daty."
+            "Wyszukiwanie dwustopniowe (RAG + reranker) z obsługą dwóch intencji: \n"
+            "- evidence (domyślne): potrzebne są fragmenty treści do cytowania.\n"
+            "- doc_list: potrzebny jest wykaz unikalnych dokumentów (tytuł, data, ścieżka, opcjonalnie punktacja), bez długich cytatów.\n\n"
+            "Wykrywanie doc_list: traktuj zapytanie jako listę dokumentów, gdy pojawia się: \"lista\", \"wykaz\", \"spis\", \"które dokumenty…\", \"pokaż dokumenty/akty/uchwały…\", \"wszystkie dokumenty dot. …\".\n"
+            "W innym wypadku użyj evidence.\n\n"
+            "Preset DocList (gdy intencja = doc_list):\n"
+            "- query: 3–8 zwięzłych wariantów (tytuły/sygnatury/datacje/słowa kluczowe) + warianty leksykalne (synonimy/odmiany) dla wyższego recall.\n"
+            "- top_m: 100–300; top_k: docelowa długość listy (np. 30–100).\n"
+            "- mode: zwykle 'all' (chyba że użytkownik prosi o 'obowiązujące' → 'current').\n"
+            "- use_hybrid: true; dense/sparse: 0.4/0.6; mmr_lambda: 0.4–0.5; per_doc_limit: 1; score_norm: 'zscore'; rep_alpha: 0.5–0.6; mmr_stage1: true; summary_mode: 'first'.\n"
+            "- result_format: 'blocks' (zalecane) lub 'grouped' dla lżejszego payloadu.\n\n"
+            "Preset Answering (gdy intencja = evidence): domyślne parametry endpointu, \n"
+            "zwraca pole 'blocks' gotowe do cytowania (text, path, title, doc_date, is_active, score; ranker_score jeśli dostępny).\n"
+            "Narzędzie RAG używa modeli szkolonych w języku polski i cała baza jest po polsku, używaj tylko polskiego."
         ),
         alias="SEARCH_TOOL_DESCRIPTION",
     )

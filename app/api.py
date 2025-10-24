@@ -457,9 +457,9 @@ def health():
 @app.post(
     "/analysis/contradictions",
     response_model=ContradictionAnalysisResponse,
+    include_in_schema=False,
     summary="Analiza sprzeczności (sekcjami)",
     description=getattr(settings, "contradictions_tool_description", "Analiza sprzeczności dla tytułu dokumentu."),
-    tags=["tools"],
 )
 def analysis_contradictions(req: ContradictionAnalysisRequest):
     """Przeprowadź analizę sprzeczności dla dokumentu wskazanego tytułem.
@@ -478,9 +478,9 @@ def analysis_contradictions(req: ContradictionAnalysisRequest):
 @app.get(
     "/docs/list",
     response_model=DocsListResponse,
+    include_in_schema=False,
     summary="Lista dokumentów",
     description="Zwraca listę dokumentów (metadane) dla trybu: current lub archival.",
-    tags=["tools"],
 )
 def docs_list(mode: str = Query(..., description="Tryb: current|archival")):
     """List documents metadata for the given mode (current|archival).
@@ -866,6 +866,23 @@ def search_query(req: SearchQuery):
     combination of dense embeddings and TF‑IDF sparse vectors, with optional hybrid MMR
     diversification and a per‑document cap.
 
+    Intents
+    -------
+    The endpoint supports two primary intents from LLM callers:
+    - evidence (default): return concise evidence blocks to cite in answers.
+    - doc_list: return a list of unique documents (title, date, path, optional score)
+      without long quotations.
+
+    LLM intent detection (Polish hints): treat the user request as doc_list when it
+    contains cues like: "lista", "wykaz", "spis", "które dokumenty…",
+    "pokaż dokumenty/akty/uchwały…", "wszystkie dokumenty dot. …". Otherwise, use
+    evidence.
+
+    Presets
+    -------
+    - If intent = doc_list, apply the "DocList" preset (guidelines below).
+    - If intent = evidence, apply the "Answering" preset (default parameters below).
+
     Parameters (SearchQuery)
     ------------------------
     - **query** (List[str]): list of focused queries (3–12 words each; prefer titles/signatures/dates). All queries are executed and results are fused.
@@ -883,10 +900,27 @@ def search_query(req: SearchQuery):
     - **summary_mode** (str): `"none" | "first" | "all"` (summary duplication strategy).
     - **result_format** (str): `"flat" | "grouped" | "blocks"` (`"blocks"` is default and recommended for tools).
 
+    DocList preset (when intent = doc_list)
+    ---------------------------------------
+    - query: provide 3–8 concise variants (titles/signatures/dates/keywords) and add
+      lexical variants (synonyms/inflections) to improve recall.
+    - top_m: 100–300 (higher recall in Stage 1).
+    - top_k: set to the desired list length (e.g., 30–100).
+    - mode: typically "all" unless the user asks explicitly for "obowiązujące" → "current".
+    - use_hybrid: true.
+    - dense_weight / sparse_weight: e.g., 0.4 / 0.6 (slight bias to lexical coverage).
+    - mmr_lambda: 0.4–0.5 (more diversity, fewer near‑duplicates).
+    - per_doc_limit: 1 (enforce one entry per document).
+    - score_norm: "zscore" (more stable multi‑query fusions).
+    - rep_alpha: 0.5–0.6.
+    - mmr_stage1: true (diversify already at document selection).
+    - summary_mode: "first" (single summary per document, useful for citation).
+    - result_format: keep "blocks" (recommended) or use "grouped" for a lighter payload.
+
     Recommendations for LLM callers
     --------------------------------
-    * Prefer `result_format="blocks"` to obtain concise evidence blocks; bloki są
-      budowane przez scalenie wszystkich chunków danej sekcji w pełny blok tekstu.
+    * Prefer `result_format="blocks"` to obtain concise evidence blocks; blocks are
+      built by merging all chunks of a given section into a single text block.
     * Keep `top_k` between 5‑10 unless you need finer granularity.
     * `summary_mode="first"` returns a single document summary per hit, useful for
       citation.
