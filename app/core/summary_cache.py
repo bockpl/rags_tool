@@ -1,4 +1,4 @@
-    """Sidecar cache for document summaries and vectors.
+"""Sidecar cache for document summaries and vectors.
 
 Stores gzipped JSON files next to source documents under a hidden
 `.summary/` subdirectory. Cache contains only what is necessary to
