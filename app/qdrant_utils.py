@@ -1160,10 +1160,11 @@ def build_and_upsert_points(
             sparse_chunks = [([], []) for _ in chunks]
             summary_sparse = ([], [])
 
+        is_active_flag = bool(rec.get("is_active", True))
         summary_payload: Dict[str, Any] = {
             "doc_id": doc_id,
             "path": path,
-            "is_active": True,
+            "is_active": is_active_flag,
             "point_type": "summary",
             "title": doc_title,
             "summary": doc_summary,
@@ -1213,7 +1214,7 @@ def build_and_upsert_points(
                 "doc_id": doc_id,
                 "path": path,
                 "chunk_id": i,
-                "is_active": True,
+                "is_active": is_active_flag,
                 "point_type": "chunk",
                 "text": chunk_text_val,
             }

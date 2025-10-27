@@ -1,4 +1,4 @@
-"""Sidecar cache for document summaries and vectors.
+    """Sidecar cache for document summaries and vectors.
 
 Stores gzipped JSON files next to source documents under a hidden
 `.summary/` subdirectory. Cache contains only what is necessary to
@@ -106,6 +106,7 @@ def save_sidecar(
     replacement: str,
     summary_dense: list[float],
     doc_date: str = "brak",
+    is_active: bool = True,
 ) -> Path:
     """Write sidecar cache atomically. Returns final path."""
     sc_path = sidecar_path_for(source)
@@ -122,6 +123,7 @@ def save_sidecar(
             "entities": entities,
             "replacement": replacement,
             "doc_date": doc_date or "brak",
+            "is_active": bool(is_active),
         },
         "vectors": {"summary_dense": summary_dense},
     }

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
@@ -58,7 +58,12 @@ def _naive_local_summary(text: str, max_sentences: int = 5) -> Dict[str, Any]:
 
 
 # Produce a structured summary via OpenAI-compatible chat API (JSON-mode if enabled).
-def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int = 300) -> Dict[str, Any]:
+def llm_summary(
+    text: str,
+    model: str = settings.summary_model,
+    max_tokens: int = 300,
+    path: Optional[str] = None,
+) -> Dict[str, Any]:
     text = text.strip()
     if len(text) > MAX_DOC_TO_SUMMARY:
         text = text[:MAX_DOC_TO_SUMMARY]
@@ -73,7 +78,12 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
                     {"role": "system", "content": settings.summary_system_prompt},
                     {
                         "role": "user",
-                        "content": settings.summary_prompt_json + "\n\nTEKST:\n" + text,
+                        "content": (
+                            settings.summary_prompt_json
+                            + ("\n\nPATH:\n" + str(path) if path else "")
+                            + "\n\nTEKST:\n"
+                            + text
+                        ),
                     },
                 ],
                 max_tokens=max_tokens,
@@ -115,6 +125,22 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
             else:
                 doc_date_str = str(date_val or "").strip()
             doc_date_str = doc_date_str or "brak"
+            # Optional is_active returned by the model; default to True when missing
+            def _to_bool(v: Any) -> Optional[bool]:
+                if isinstance(v, bool):
+                    return v
+                if isinstance(v, (int, float)):
+                    return bool(v)
+                if isinstance(v, str):
+                    s = v.strip().lower()
+                    if s in {"true", "yes", "1"}:
+                        return True
+                    if s in {"false", "no", "0"}:
+                        return False
+                return None
+            is_active_val = _to_bool(data.get("is_active"))
+            if is_active_val is None:
+                is_active_val = True
             title_str = title_str or _default_title_from_text(text)
             if summary_val:
                 return {
@@ -124,6 +150,7 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
                     "entities": entities_list,
                     "replacement": replacement_str,
                     "doc_date": doc_date_str,
+                    "is_active": bool(is_active_val),
                 }
         except Exception as exc:
             logger.warning("JSON-mode summary failed; falling back to text parser: %s", exc)
@@ -134,7 +161,7 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
             temperature=0.0,
             messages=[
                 {"role": "system", "content": settings.summary_system_prompt},
-                {"role": "user", "content": settings.summary_prompt + text},
+                {"role": "user", "content": settings.summary_prompt + (text)},
             ],
             max_tokens=max_tokens,
         )
@@ -197,4 +224,6 @@ def llm_summary(text: str, model: str = settings.summary_model, max_tokens: int 
         "entities": entities_list,
         "replacement": replacement_str,
         "doc_date": doc_date_str or "brak",
+        # Text-mode fallback does not infer active status; default to True
+        "is_active": True,
     }

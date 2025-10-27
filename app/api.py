@@ -256,11 +256,12 @@ def _iter_document_records(
                 "entities": [str(x).strip() for x in list(summ_block.get("entities") or []) if str(x).strip()],
                 "replacement": str(summ_block.get("replacement") or "brak") or "brak",
                 "doc_date": str(summ_block.get("doc_date") or "brak") or "brak",
+                "is_active": bool(summ_block.get("is_active", True)),
             }
             summary_dense_vec = list(vectors_block.get("summary_dense") or [])
         else:
             # Generate with LLM and compute dense embedding for summary; then cache
-            doc_sum = llm_summary(raw)
+            doc_sum = llm_summary(raw, path=str(path.resolve()))
             summary_text = doc_sum.get("summary", "") or ""
             summary_dense_vec = embed_passage([summary_text])[0]
             # Persist sidecar (atomic write); best-effort, ignore failures
@@ -275,6 +276,7 @@ def _iter_document_records(
                     replacement=str(doc_sum.get("replacement", "brak") or "brak"),
                     summary_dense=list(summary_dense_vec),
                     doc_date=str(doc_sum.get("doc_date", "brak") or "brak"),
+                    is_active=bool(doc_sum.get("is_active", True)),
                 )
                 logger.debug("Sidecar saved | path=%s sidecar=%s", path, sidecar_path_for(path).name)
             except Exception as exc:
@@ -321,6 +323,8 @@ def _iter_document_records(
             "summary_dense_vec": list(summary_dense_vec) if (sidecar or summary_dense_vec is not None) else None,
             # Pass content hash for downstream payload persistence
             "content_sha256": content_sha256,
+            # Initial active flag based on LLM (default True when absent)
+            "is_active": bool(doc_sum.get("is_active", True)),
         }
         logger.debug(
             "Document %s parsed | chunks=%d summary_len=%d took_ms=%d",
@@ -851,7 +855,7 @@ def summaries_generate(req: SummariesGenerateRequest):
             results[f] = {"error": "not found"}
             continue
         text = extract_text(p)
-        summ = llm_summary(text)
+        summ = llm_summary(text, path=str(p))
         results[f] = summ
     return {"results": results}
 

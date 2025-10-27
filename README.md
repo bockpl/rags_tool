@@ -1,6 +1,11 @@
-# rags_tool (2.26.0)
+# rags_tool (2.27.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.27.0
+- Ingest: LLM ocenia pole `is_active` podczas streszczenia na podstawie ścieżki pliku (`PATH`). Jeśli ścieżka sugeruje archiwum (np. `archiwum/`, `archive/`, `stare/`, `old/`), model powinien zwrócić `is_active=false`; w przeciwnym razie `true`. Gdy model nie zwróci pola, przyjmujemy `true`.
+- Sidecar: `is_active` jest zapisywane dodatkowo w pliku cache streszczenia. Starsze cache bez tego pola pozostają ważne — ich `is_active` domyślnie traktujemy jako `true`.
+- Zasady istniejące (REPLACEMENT): dotychczasowy mechanizm ustawiania `is_active=false` dla dokumentów zastępowanych nadal działa i ma zastosowanie po ingestcie, niezależnie od powyższej oceny LLM.
 
 ## Nowości w 2.26.0
 - Browse po treści: `POST /browse/count`, `POST /browse/doc-ids`, `POST /browse/facets` selekcjonują kandydatów wyłącznie na podstawie treści (chunków), bez przeszukiwania streszczeń. Streszczenia mogą być użyte jedynie do wzbogacenia metadanych (tytuł/data) po selekcji.
