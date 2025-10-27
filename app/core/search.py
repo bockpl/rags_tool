@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import numpy as np
 from qdrant_client.http import models as qm
@@ -43,6 +43,71 @@ def _normalize_whitespace(text: Optional[str]) -> str:
     if not isinstance(text, str):
         return ""
     return " ".join(text.strip().split())
+
+
+# --- Entities helpers ---
+def _normalize_entity(value: Optional[str]) -> str:
+    """Normalize an entity string for matching: casefold + collapse spaces."""
+    if not isinstance(value, str):
+        return ""
+    s = value.casefold().strip()
+    s = " ".join(s.split())
+    # strip common quotes
+    if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+        s = s[1:-1].strip()
+    return s
+
+
+def _norm_entities_list(values: Optional[List[str]]) -> List[str]:
+    """Normalize a list of entities and drop empties/duplicates preserving order."""
+    out: List[str] = []
+    seen: Set[str] = set()
+    for v in (values or []):
+        n = _normalize_entity(v)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _extract_entities_from_text(text: str) -> List[str]:
+    """Heuristic entity extraction from a single query string.
+
+    Captures:
+    - quoted phrases ("...") including Polish quotes „…”
+    - uppercase acronyms (2+ letters, may include dots)
+    - numbers with slashes (e.g., 12/2024) and years (19xx/20xx)
+    """
+    s = (text or "").strip()
+    if not s:
+        return []
+    ents: List[str] = []
+    # quoted phrases
+    for m in re.finditer(r'"([^"\n]{2,})"', s):
+        ents.append(m.group(1))
+    for m in re.finditer(r"„([^”\n]{2,})”", s):
+        ents.append(m.group(1))
+    # uppercase acronyms/words (allow dots and hyphens inside)
+    for m in re.finditer(r"\b[A-ZĄĆĘŁŃÓŚŹŻ]{2,}(?:[.-][A-ZĄĆĘŁŃÓŚŹŻ0-9]{2,})*\b", s):
+        ents.append(m.group(0))
+    # numbers with slash or dash (IDs)
+    for m in re.finditer(r"\b\d{1,4}[/-]\d{2,4}\b", s):
+        ents.append(m.group(0))
+    # years
+    for m in re.finditer(r"\b(19|20)\d{2}\b", s):
+        ents.append(m.group(0))
+    return _norm_entities_list(ents)
+
+
+def _query_entities_for(q_text: str, req: Any) -> List[str]:
+    """Return normalized entities for this query, using req.entities or heuristics."""
+    # prefer explicit entities provided by caller
+    explicit = getattr(req, "entities", None)
+    if explicit:
+        return _norm_entities_list(explicit)
+    if getattr(settings, "auto_extract_query_entities", True):
+        return _extract_entities_from_text(q_text)
+    return []
 
 
 # Build canonical section label up to the merge level.
@@ -452,6 +517,26 @@ def _stage1_select_documents(
         sparse_norm = _normalize(sparse_vals, req.score_norm)
         hybrid_rel = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm, sparse_norm)]
 
+    # --- Entities soft boost at Stage 1 (after fusion, before MMR/order) ---
+    try:
+        strat = str(getattr(req, "entity_strategy", "auto") or "auto").strip().lower()
+    except Exception:
+        strat = "auto"
+    q_entities = set(_query_entities_for(q_text, req))
+    if hybrid_rel and q_entities and strat != "exclude":
+        ids_for_order = list(doc_map.keys())
+        for i, did in enumerate(ids_for_order):
+            ents_raw = doc_map.get(did, {}).get("doc_entities") or []
+            ents = set(_norm_entities_list(ents_raw if isinstance(ents_raw, list) else []))
+            if not ents:
+                continue
+            inter = ents.intersection(q_entities)
+            if inter:
+                # Cap contribution to prevent overpowering dense/sparse fusion
+                boost = float(getattr(settings, "entity_boost_stage1", 0.15) or 0.0)
+                scale = min(1.0, len(inter) / 3.0)
+                hybrid_rel[i] = float(hybrid_rel[i]) + boost * scale
+
     if req.mmr_stage1 and (len(doc_map) > 1):
         rep_alpha = req.rep_alpha if req.rep_alpha is not None else req.dense_weight
         ids = list(doc_map.keys())
@@ -607,6 +692,25 @@ def _stage2_select_chunks(
     sparse_norm2 = _normalize(sparse_scores2, req.score_norm)
     rel2 = [req.dense_weight * d + req.sparse_weight * s for d, s in zip(dense_norm2, sparse_norm2)]
 
+    # Entities soft boost at Stage 2
+    try:
+        strat2 = str(getattr(req, "entity_strategy", "auto") or "auto").strip().lower()
+    except Exception:
+        strat2 = "auto"
+    q_entities2 = set(_query_entities_for(q_text, req))
+    if rel2 and q_entities2 and strat2 != "exclude":
+        boost2 = float(getattr(settings, "entity_boost_stage2", 0.10) or 0.0)
+        for i, item in enumerate(mmr_pool):
+            p = item.get("payload") or {}
+            ents_raw = p.get("entities") or []
+            ents = set(_norm_entities_list(ents_raw if isinstance(ents_raw, list) else []))
+            if not ents:
+                continue
+            inter = ents.intersection(q_entities2)
+            if inter:
+                scale = min(1.0, len(inter) / 3.0)
+                rel2[i] = float(rel2[i]) + boost2 * scale
+
     # Etap 2: brak reranku na poziomie chunków — reranking odbywa się
     # na poziomie scalonych sekcji w warstwie API po zbudowaniu bloków.
 
@@ -661,15 +765,26 @@ def _stage2_select_chunks(
 
 # Heuristically classify mode if 'auto' (current/archival/all).
 def _classify_mode(query: str, mode: str) -> str:
-    """Heuristically classify mode when `mode` is 'auto'."""
+    """Heuristically classify mode when `mode` is 'auto'.
+
+    Policy: prefer "current" by default. Switch to "archival" only when the query
+    clearly points to historical/archival context (keywords like 'archiwal*',
+    'stara', explicit years, 'wersja z ...'). Use "all" only on explicit cues
+    ('wszystkie', 'cała historia', 'pełen zakres').
+    """
     if mode != "auto":
         return mode
-    q = query.lower()
-    if re.search(r"archiw|stara|z \d{4}|wersja\s+z", q):
+    q = (query or "").lower()
+    # Archival cues: explicit year, 'archiwal', 'stara', 'wersja z'
+    if re.search(r"archiw|stara|wersja\s+z|\b(19|20)\d{2}\b", q):
         return "archival"
+    # All-history cues
+    if re.search(r"\bwszystkie\b|cała\s+histori|pełen\s+zakres|od\s+zawsze", q):
+        return "all"
+    # Default: current
     if re.search(r"obowiązując|aktualn|teraz|bieżąc", q):
         return "current"
-    return "all"
+    return "current"
 
 
 # Classic MMR over dense vectors: return selected indices.

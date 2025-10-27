@@ -65,7 +65,6 @@ class OpenAIReranker:
             "query": query,
             "documents": documents,
             "top_n": int(max(1, top_n)),
-            "return_documents": False,
         }
         data = json.dumps(payload).encode("utf-8")
         url = self._build_url()

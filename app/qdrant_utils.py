@@ -1217,6 +1217,9 @@ def build_and_upsert_points(
                 "point_type": "chunk",
                 "text": chunk_text_val,
             }
+            # Replicate document-level entities at chunk-level payload to enable entity filters
+            if doc_entities:
+                payload["entities"] = doc_entities
             if isinstance(section_path, str) and section_path.strip():
                 payload["section_path"] = section_path.strip()
             if isinstance(section_path_prefixes, (list, tuple)) and section_path_prefixes:

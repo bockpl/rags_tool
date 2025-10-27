@@ -49,6 +49,11 @@ from app.models import (
     ContradictionAnalysisRequest,
     ContradictionAnalysisResponse,
     DocsListResponse,
+    BrowseQuery,
+    BrowseCountResponse,
+    BrowseIdsResponse,
+    BrowseFacetsRequest,
+    BrowseFacetsResponse,
 )
 from app.qdrant_utils import (
     build_and_upsert_points,
@@ -71,6 +76,7 @@ from app.core.summary_cache import (
 )
 from app.core.embedding import embed_passage
 from app.core.contradictions import analyze_contradictions
+from app.core import browse_service
 
 
 settings = get_settings()
@@ -138,6 +144,26 @@ def _ensure_collections_cached(base: Optional[str] = None) -> None:
             return
         ensure_collections(base)
         _initialized_collections.add(key)
+
+
+# Qdrant preflight check with explicit logging instead of bubbling exceptions.
+def _qdrant_available_or_log(context: str) -> bool:
+    """Return True if Qdrant responds; otherwise log a clear error and return False.
+
+    Intended to protect tool endpoints from returning 500 when Qdrant is down by
+    allowing a graceful empty response. Affects only the endpoints that use it.
+    """
+    try:
+        qdrant.get_collections()
+        return True
+    except Exception as exc:
+        logger.error(
+            "Qdrant unavailable | context=%s url=%s error=%s",
+            context,
+            getattr(settings, "qdrant_url", ""),
+            exc,
+        )
+        return False
 
 
 # Scan filesystem for supported files matching pattern.
@@ -549,6 +575,94 @@ def docs_list(mode: str = Query(..., description="Tryb: current|archival")):
         raise HTTPException(status_code=500, detail=f"Nie udało się pobrać listy dokumentów: {exc}") from exc
 
 
+# --- Browse/analytics (LLM-friendly) ---
+
+
+@app.post(
+    "/browse/count",
+    response_model=BrowseCountResponse,
+    summary="Ile dokumentów pasuje do zapytania (Stage‑1)",
+    description="Zwraca liczbę dokumentów-kandydatów (unikalne doc_id) dla zapytań w trybie Stage‑1 (streszczenia).",
+)
+def browse_count(req: BrowseQuery) -> BrowseCountResponse:
+    t0 = time.time()
+    if not _qdrant_available_or_log("/browse/count"):
+        took_ms = int((time.time() - t0) * 1000)
+        return BrowseCountResponse(took_ms=took_ms, total=0, approx=False)
+    try:
+        _ensure_collections_cached()
+    except Exception as exc:
+        logger.error(
+            "Qdrant ensure_collections failed | context=/browse/count url=%s error=%s",
+            getattr(settings, "qdrant_url", ""),
+            exc,
+        )
+        took_ms = int((time.time() - t0) * 1000)
+        return BrowseCountResponse(took_ms=took_ms, total=0, approx=False)
+    queries = req.query if isinstance(req.query, list) else [str(req.query)]
+    params = browse_service.BrowseParams(queries=queries, top_m=int(req.top_m), use_hybrid=bool(req.use_hybrid), mode=str(req.mode))
+    total, approx = browse_service.count_documents(params)
+    took_ms = int((time.time() - t0) * 1000)
+    return BrowseCountResponse(took_ms=took_ms, total=total, approx=bool(approx))
+
+
+@app.post(
+    "/browse/doc-ids",
+    response_model=BrowseIdsResponse,
+    summary="Lista doc_id i metadanych (Stage‑1)",
+    description="Zwraca listę doc_id (z tytułem, datą, is_active) dla kandydatów Stage‑1. Dane uporządkowane stabilnie.",
+)
+def browse_doc_ids(req: BrowseQuery, limit: int = Query(200, ge=1, le=2000)) -> BrowseIdsResponse:
+    t0 = time.time()
+    if not _qdrant_available_or_log("/browse/doc-ids"):
+        took_ms = int((time.time() - t0) * 1000)
+        return BrowseIdsResponse(took_ms=took_ms, total=0, approx=False, docs=[])
+    try:
+        _ensure_collections_cached()
+    except Exception as exc:
+        logger.error(
+            "Qdrant ensure_collections failed | context=/browse/doc-ids url=%s error=%s",
+            getattr(settings, "qdrant_url", ""),
+            exc,
+        )
+        took_ms = int((time.time() - t0) * 1000)
+        return BrowseIdsResponse(took_ms=took_ms, total=0, approx=False, docs=[])
+    queries = req.query if isinstance(req.query, list) else [str(req.query)]
+    params = browse_service.BrowseParams(queries=queries, top_m=int(req.top_m), use_hybrid=bool(req.use_hybrid), mode=str(req.mode))
+    docs, approx = browse_service.list_document_minimal(params, limit=int(limit))
+    took_ms = int((time.time() - t0) * 1000)
+    return BrowseIdsResponse(took_ms=took_ms, total=len(docs), approx=bool(approx), docs=docs)
+
+
+@app.post(
+    "/browse/facets",
+    response_model=BrowseFacetsResponse,
+    summary="Facety po dokumentach-kandydatach (Stage‑1)",
+    description="Zwraca proste rozkłady (np. is_active, year) dla kandydatów Stage‑1.",
+)
+def browse_facets(req: BrowseFacetsRequest) -> BrowseFacetsResponse:
+    t0 = time.time()
+    if not _qdrant_available_or_log("/browse/facets"):
+        took_ms = int((time.time() - t0) * 1000)
+        return BrowseFacetsResponse(took_ms=took_ms, approx=False, total_docs=0, facets={})
+    try:
+        _ensure_collections_cached()
+    except Exception as exc:
+        logger.error(
+            "Qdrant ensure_collections failed | context=/browse/facets url=%s error=%s",
+            getattr(settings, "qdrant_url", ""),
+            exc,
+        )
+        took_ms = int((time.time() - t0) * 1000)
+        return BrowseFacetsResponse(took_ms=took_ms, approx=False, total_docs=0, facets={})
+    queries = req.query if isinstance(req.query, list) else [str(req.query)]
+    params = browse_service.BrowseParams(queries=queries, top_m=int(req.top_m), use_hybrid=bool(req.use_hybrid), mode=str(req.mode))
+    facets, approx = browse_service.facet_counts(params, req.fields or [])
+    total, _ = browse_service.count_documents(params)
+    took_ms = int((time.time() - t0) * 1000)
+    return BrowseFacetsResponse(took_ms=took_ms, approx=bool(approx), total_docs=int(total), facets=facets)
+
+
 # --- Search debug: step-by-step endpoints ---
 
 
@@ -861,34 +975,30 @@ def ingest_build(req: IngestBuildRequest):
     tags=["tools"],
     description=settings.search_tool_description,
 )
-# Two‑stage hybrid search with optional reranker over merged blocks.
+# Two‑stage hybrid RAG retrieval returning evidence blocks for answers.
 def search_query(req: SearchQuery):
     """
     Endpoint: /search/query (POST)
 
     Purpose
     -------
-    Provides two‑stage hybrid retrieval for LLM‑powered tools. Stage 1 ranks document
+    Two‑stage hybrid RAG retrieval for LLM‑powered tools. Stage 1 ranks document
     summaries; Stage 2 ranks full‑text chunks within the selected documents using a
     combination of dense embeddings and TF‑IDF sparse vectors, with optional hybrid MMR
-    diversification and a per‑document cap.
+    diversification and a per‑document cap. The endpoint returns concise, merged
+    evidence blocks suitable for direct citation in answers.
 
-    Intents
-    -------
-    The endpoint supports two primary intents from LLM callers:
-    - evidence (default): return concise evidence blocks to cite in answers.
-    - doc_list: return a list of unique documents (title, date, path, optional score)
-      without long quotations.
+    Important
+    ---------
+    This endpoint is for answer retrieval only. Do not use it to count or list
+    documents. For counts/lists/facets use the browse endpoints: POST /browse/count,
+    POST /browse/doc-ids, POST /browse/facets.
 
-    LLM intent detection (Polish hints): treat the user request as doc_list when it
-    contains cues like: "lista", "wykaz", "spis", "które dokumenty…",
-    "pokaż dokumenty/akty/uchwały…", "wszystkie dokumenty dot. …". Otherwise, use
-    evidence.
-
-    Presets
-    -------
-    - If intent = doc_list, apply the "DocList" preset (guidelines below).
-    - If intent = evidence, apply the "Answering" preset (default parameters below).
+    Default scope
+    -------------
+    When `mode` is "auto", prefer current (obowiązujące) documents by default. Switch
+    to archival only when the query clearly points to historical context (keywords or
+    explicit years), and to all only on explicit user intent (e.g., "wszystkie").
 
     Parameters (SearchQuery)
     ------------------------
@@ -906,23 +1016,8 @@ def search_query(req: SearchQuery):
     - **mmr_stage1** (bool): apply MMR already at document selection.
     - **summary_mode** (str): `"none" | "first" | "all"` (summary duplication strategy).
     - **result_format** (str): `"flat" | "grouped" | "blocks"` (`"blocks"` is default and recommended for tools).
-
-    DocList preset (when intent = doc_list)
-    ---------------------------------------
-    - query: provide 3–8 concise variants (titles/signatures/dates/keywords) and add
-      lexical variants (synonyms/inflections) to improve recall.
-    - top_m: 100–300 (higher recall in Stage 1).
-    - top_k: set to the desired list length (e.g., 30–100).
-    - mode: typically "all" unless the user asks explicitly for "obowiązujące" → "current".
-    - use_hybrid: true.
-    - dense_weight / sparse_weight: e.g., 0.4 / 0.6 (slight bias to lexical coverage).
-    - mmr_lambda: 0.4–0.5 (more diversity, fewer near‑duplicates).
-    - per_doc_limit: 1 (enforce one entry per document).
-    - score_norm: "zscore" (more stable multi‑query fusions).
-    - rep_alpha: 0.5–0.6.
-    - mmr_stage1: true (diversify already at document selection).
-    - summary_mode: "first" (single summary per document, useful for citation).
-    - result_format: keep "blocks" (recommended) or use "grouped" for a lighter payload.
+    - **entities** (List[str], optional): encje wydobyte z intencji (nazwy/ID/lata/cytowane frazy). Gdy pominięte i `AUTO_EXTRACT_QUERY_ENTITIES=true`, backend użyje heurystyk dla boostingu.
+    - **entity_strategy** (str): `"auto" | "boost" | "must_any" | "must_all" | "exclude"`. Filtry `must_*`/`exclude` ograniczają pulę na Etapie 1 (i Etapie 2 w trybie skip Stage‑1); `boost`/`auto` dodają miękki bonus do rankingów.
 
     Recommendations for LLM callers
     --------------------------------
@@ -969,6 +1064,10 @@ def search_query(req: SearchQuery):
     The endpoint returns a JSON with `blocks` ready for citation by the LLM.
     """
     t0 = time.time()
+    # Preflight: log and degrade to an empty response if Qdrant is unavailable
+    if not _qdrant_available_or_log("/search/query"):
+        took_ms = int((time.time() - t0) * 1000)
+        return SearchResponse(took_ms=took_ms, hits=[])
     # --- RERANKER: konfiguracja z .env ---
     # Włączony wtedy, gdy podano zarówno BASE_URL, jak i MODEL.
     ranker_enabled = bool(settings.ranker_base_url and settings.ranker_model)
@@ -987,7 +1086,16 @@ def search_query(req: SearchQuery):
         raise HTTPException(status_code=422, detail="Field 'query' must contain at least one non-empty string")
 
     query_hash = sha1(json.dumps(queries, ensure_ascii=False))
-    _ensure_collections_cached()
+    try:
+        _ensure_collections_cached()
+    except Exception as exc:
+        logger.error(
+            "Qdrant ensure_collections failed | context=/search/query url=%s error=%s",
+            getattr(settings, "qdrant_url", ""),
+            exc,
+        )
+        took_ms = int((time.time() - t0) * 1000)
+        return SearchResponse(took_ms=took_ms, hits=[])
 
     # Determine unified mode when 'auto' is requested
     if req.mode != "auto":
@@ -1004,6 +1112,38 @@ def search_query(req: SearchQuery):
     flt = None
     if mode in ("current", "archival"):
         flt = qm.Filter(must=[qm.FieldCondition(key="is_active", match=qm.MatchValue(value=(mode == "current")))])
+
+    # Entities filtering (only when LLM requests a filter strategy)
+    try:
+        strat = str(getattr(req, "entity_strategy", "auto") or "auto").strip().lower()
+    except Exception:
+        strat = "auto"
+    if strat in {"must_any", "must_all", "exclude"}:
+        raw_list = getattr(req, "entities", None) or []
+        ents = []
+        seen = set()
+        for v in raw_list:
+            s = str(v or "").casefold().strip()
+            s = " ".join(s.split())
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            ents.append(s)
+        if ents:
+            base_must = list(getattr(flt, "must", []) or []) if flt else []
+            base_must_not = list(getattr(flt, "must_not", []) or []) if flt else []
+            if strat == "must_any":
+                base_must.append(qm.FieldCondition(key="entities", match=qm.MatchAny(any=ents)))
+            elif strat == "must_all":
+                for e in ents:
+                    base_must.append(qm.FieldCondition(key="entities", match=qm.MatchValue(value=e)))
+            elif strat == "exclude":
+                base_must_not.append(qm.FieldCondition(key="entities", match=qm.MatchAny(any=ents)))
+            flt = qm.Filter(
+                must=base_must or None,
+                must_not=base_must_not or None,
+                should=(getattr(flt, "should", None) if flt else None),
+            )
 
     # Batch-embed queries (with model-specific query prefix)
     q_vecs = embed_query(queries)

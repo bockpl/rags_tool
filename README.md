@@ -1,6 +1,19 @@
-# rags_tool (2.22.0)
+# rags_tool (2.25.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.25.0
+- Domyślny zakres wyszukiwania dla `mode=auto` to teraz dokumenty obowiązujące (`current`). Tylko gdy kontekst wyraźnie wskazuje inaczej używamy `archival` (np. słowa „archiwalne”, „stara”, konkretne lata, „wersja z …”) lub `all` (np. „wszystkie”, „cała historia”).
+- Opis narzędzia `/search/query` w OpenAPI doprecyzowany (RAG‑only, domyślny zakres, odsyłacz do `/browse/*` dla liczenia/listowania).
+ 
+## Nowości w 2.24.0
+- Wydzielenie funkcji przeglądowych (LLM‑friendly) od wyszukiwania odpowiedzi:
+  - Nowe endpointy browse (Stage‑1, działa na streszczeniach, bez MMR/rerank/shaping):
+    - `POST /browse/count` — zwraca liczbę dokumentów‑kandydatów; pole `approx=true` oznacza, że osiągnięto limit `top_m`.
+    - `POST /browse/doc-ids` — lista `doc_id` z podstawowymi metadanymi (tytuł, `doc_date`, `is_active`).
+    - `POST /browse/facets` — proste rozkłady (facety) po kandydatach; obsługiwane pola: `is_active`, `year` (z `doc_date`).
+  - Wspólne helpery dostępu do magazynu przeniesione do `app/core/store_access.py` i używane m.in. przez analizę sprzeczności.
+  - Bez zmian w istniejącym endpointzie `POST /search/query` — podział dotyczy struktury i nowych tras.
 
 ## Nowości w 2.20.0
 - tools/golden_pipeline.sh: skrypt wykrywa istnienie pliku `golden_qa.jsonl` i pomija krok generacji golden setu. Aby wymusić ponowną generację, uruchom z przełącznikiem `--regenerate`.
@@ -196,7 +209,7 @@ Content-Type: application/json
 }
 ```
 
-Uwaga dla integracji LLM: to narzędzie powinno być używane wyłącznie, gdy użytkownik wprost prosi o wykrycie sprzeczności/niespójności dla wskazanego dokumentu. Do zwykłego wyszukiwania używaj `POST /search/query` (obsługuje intencje evidence/doc_list, domyślnie zwraca `blocks`).
+Uwaga dla integracji LLM: to narzędzie powinno być używane wyłącznie, gdy użytkownik wprost prosi o wykrycie sprzeczności/niespójności dla wskazanego dokumentu. Do zwykłego wyszukiwania używaj `POST /search/query` (RAG — wyłącznie zwrot bloków dowodowych `blocks`). Do liczenia/listowania/facetów korzystaj z endpointów `POST /browse/*`.
 
 ## Nowości w 2.9.1
 - Admin UI: widoczne, automatycznie generowane opisy dla operacji (funkcji) dostępnych w panelu. Sekcja dokumentacji per‑endpoint zawiera teraz listę parametrów, ich typy, wartości domyślne oraz — gdy dotyczy — dozwolone wartości (np. `auto|current|archival|all`, `flat|grouped|blocks`). Opisy są generowane dynamicznie na podstawie modeli Pydantic i metadanych endpointów FastAPI, dzięki czemu pozostają spójne z dokumentacją i nie wymagają duplikacji treści.
@@ -765,43 +778,21 @@ Wartości `SECTION_LEVELS` to unia poziomów znalezionych we wszystkich dokument
 
 ### Parametry wyszukiwania (`POST /search/query`)
 
-- `query`: lista zapytań (`List[str]`), każde krótkie i konkretne (3–12 słów). Dodanie synonimów/wariantów zwiększa recall; wyniki są łączone i sortowane globalnie.
-- `top_m`: liczba docelowych dokumentów po Etapie 1 (streszczenia).
-- `top_k`: końcowa liczba wyników (po Etapie 2).
-- `use_hybrid`: włącza TF‑IDF po stronie zapytania (domyślnie true).
-- `dense_weight`, `sparse_weight`: wagi składników hybrydowych.
-- `mmr_lambda`: balans trafności vs. dywersyfikacji (MMR).
-- `per_doc_limit`: maksymalna liczba wyników z jednego dokumentu (domyślnie 2).
-- `score_norm`: `minmax` | `zscore` | `none` — sposób normalizacji przed fuzją.
-- `rep_alpha`: udział dense w repulsji MMR (domyślnie = `dense_weight`).
-- `mmr_stage1`: MMR po stronie streszczeń (domyślnie true).
-- `summary_mode`: `none` | `first` | `all` — kontrola tego, czy i kiedy dołączać streszczenie dokumentu do trafień (domyślnie `first`).
-- `result_format`: `flat` | `grouped` | `blocks` — kształt odpowiedzi; domyślnie `blocks` (zalecane dla narzędzi). W `blocks` zwracane są pojedyncze sekcyjne fragmenty (chunki) z ingestu.
+To narzędzie służy wyłącznie do wyszukiwania RAG i zwracania bloków dowodowych (`blocks`) do cytowania. Nie używaj go do liczenia ani listowania dokumentów — do tego służą:
 
-#### Intencje: evidence vs doc_list
+- `POST /browse/count` — policz kandydatów (unikalne `doc_id`) na Etapie 1,
+- `POST /browse/doc-ids` — lista `doc_id` + `title` + `doc_date` + `is_active`,
+- `POST /browse/facets` — proste rozkłady (np. `is_active`, rok z `doc_date`).
 
-Endpoint obsługuje dwie główne intencje pytań:
+Najważniejsze pola `POST /search/query`:
 
-- evidence (domyślne) – potrzebne są fragmenty treści do cytowania w odpowiedzi.
-- doc_list – potrzebny jest wykaz unikalnych dokumentów (tytuł, data, ścieżka, opcjonalnie punktacja), bez długich cytatów.
-
-Wykrywanie doc_list przez LLM: jeżeli w pytaniu pojawiają się słowa/zwroty takie jak „lista”, „wykaz”, „spis”, „które dokumenty…”, „pokaż dokumenty/akty/uchwały…”, „wszystkie dokumenty dot. …”, traktuj zapytanie jako doc_list. W pozostałych przypadkach użyj evidence.
-
-Preset „DocList” (gdy intencja = doc_list):
-
-- `query`: zbuduj 3–8 zwięzłych wariantów (tytuły/sygnatury/datacje/słowa kluczowe). Dodaj warianty leksykalne (synonimy, odmiany), aby zwiększyć recall.
-- `top_m`: 100–300 (wyższy recall w Etapie 1).
-- `top_k`: ustaw na docelową długość listy (np. 30–100).
-- `mode`: zwykle `all`, chyba że użytkownik prosi o „obowiązujące” → `current`.
-- `use_hybrid`: `true`.
-- `dense_weight` / `sparse_weight`: np. `0.4 / 0.6` (lekki bias na leksykalne pokrycie).
-- `mmr_lambda`: `0.4–0.5` (większa różnorodność, mniej duplikatów treści).
-- `per_doc_limit`: `1` (wymusza jeden wpis na dokument).
-- `score_norm`: `zscore` (stabilniejsze fuzje wielu zapytań).
-- `rep_alpha`: `0.5–0.6`.
-- `mmr_stage1`: `true` (dywersyfikacja listy już na selekcji dokumentów).
-- `summary_mode`: `first` (jedno streszczenie/dokument do cytatu).
-- `result_format`: możesz pozostać przy `blocks` (zalecane) albo użyć `grouped`, jeśli potrzebujesz lżejszego payloadu.
+- `query`: lista krótkich wariantów (3–12 słów) — tytuły/sygnatury/datacje/hasła; warianty zwiększają recall; wyniki łączone są globalnie.
+- `top_m`: liczba kandydatów po Etapie 1 (streszczenia).
+- `top_k`: liczba końcowych bloków (Etap 2). Zalecane 5–10.
+- `use_hybrid`: hybryda dense+TF‑IDF (domyślnie true); `dense_weight`/`sparse_weight` ustawiają proporcje.
+- `mmr_lambda`, `per_doc_limit`, `score_norm`, `rep_alpha`, `mmr_stage1`: kontrola dywersyfikacji i fuzji.
+- `summary_mode`: `none` | `first` | `all` — steruje duplikowaniem streszczeń w wynikach.
+- `result_format`: `blocks` (zalecane) | `grouped` | `flat`.
 
 Przykładowe zapytanie (flat, bez duplikacji streszczeń):
 
@@ -851,6 +842,18 @@ Przykładowe zapytanie (blocks):
 ## Licencja
 
 MIT
+## Nowości w 2.23.0
+- Entity‑aware search: nowe pola w zapytaniu `POST /search/query` sterowane przez LLM:
+  - `entities` (opcjonalnie): lista encji (nazwy/ID/lata/cytowane frazy).
+  - `entity_strategy`: `auto|boost|must_any|must_all|exclude`.
+    - `auto/boost` – miękki bonus do rankingów (Stage‑1 i Stage‑2), bez ryzyka 0 wyników.
+    - `must_any/must_all` – twardy filtr po encjach na Etapie 1 (i Etapie 2, gdy Stage‑1 pominięty).
+    - `exclude` – wykluczenie dokumentów/chunków z tymi encjami.
+- Ustawienia w `.env` (szyny, poza kontrolą LLM):
+  - `ENTITY_BOOST_STAGE1=0.15`, `ENTITY_BOOST_STAGE2=0.10` – siła bonusu encji.
+  - `AUTO_EXTRACT_QUERY_ENTITIES=true` – heurystyczne wydobycie encji z zapytania, gdy `entities` pominięte.
+- Ingest: encje dokumentu są replikowane do payloadu chunków, aby filtry encji działały także przy `SEARCH_SKIP_STAGE1_DEFAULT=true`.
+- Dokumentacja OpenAPI uzupełniona o opis pól `entities` i `entity_strategy` oraz sekcję „DocList” bez zmian w dotychczasowych polach.
 ## Nowości w 2.20.2
 - OpenAPI dla narzędzi: ukryto pozostałe funkcje narzędziowe w specyfikacji (`include_in_schema=false`) tak, aby importer LLM widział wyłącznie `POST /search/query` (operation_id `rags_tool_search`). Brak zmian w działaniu endpointów — nadal dostępne HTTP, ale niewidoczne w OpenAPI.
 

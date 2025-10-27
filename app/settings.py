@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.22.0"
+    app_version: str = "2.25.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -90,20 +90,27 @@ class SummRAGSettings(BaseSettings):
     # via .env to tailor the wording for a specific corpus (e.g., PŁ documents).
     search_tool_description: str = Field(
         default=(
-            "Wyszukiwanie dwustopniowe (RAG + reranker) z obsługą dwóch intencji: \n"
-            "- evidence (domyślne): potrzebne są fragmenty treści do cytowania.\n"
-            "- doc_list: potrzebny jest wykaz unikalnych dokumentów (tytuł, data, ścieżka, opcjonalnie punktacja), bez długich cytatów.\n\n"
-            "Wykrywanie doc_list: traktuj zapytanie jako listę dokumentów, gdy pojawia się: \"lista\", \"wykaz\", \"spis\", \"które dokumenty…\", \"pokaż dokumenty/akty/uchwały…\", \"wszystkie dokumenty dot. …\".\n"
-            "W innym wypadku użyj evidence.\n\n"
-            "Preset DocList (gdy intencja = doc_list):\n"
-            "- query: 3–8 zwięzłych wariantów (tytuły/sygnatury/datacje/słowa kluczowe) + warianty leksykalne (synonimy/odmiany) dla wyższego recall.\n"
-            "- top_m: 100–300; top_k: docelowa długość listy (np. 30–100).\n"
-            "- mode: zwykle 'all' (chyba że użytkownik prosi o 'obowiązujące' → 'current').\n"
-            "- use_hybrid: true; dense/sparse: 0.4/0.6; mmr_lambda: 0.4–0.5; per_doc_limit: 1; score_norm: 'zscore'; rep_alpha: 0.5–0.6; mmr_stage1: true; summary_mode: 'first'.\n"
-            "- result_format: 'blocks' (zalecane) lub 'grouped' dla lżejszego payloadu.\n\n"
-            "Preset Answering (gdy intencja = evidence): domyślne parametry endpointu, \n"
-            "zwraca pole 'blocks' gotowe do cytowania (text, path, title, doc_date, is_active, score; ranker_score jeśli dostępny).\n"
-            "Narzędzie RAG używa modeli szkolonych w języku polski i cała baza jest po polsku, używaj tylko polskiego."
+            "Dwustopniowe wyszukiwanie RAG (streszczenia → pełne treści) zwracające krótkie, "
+            "cytowalne bloki ('blocks') jako materiał dowodowy do odpowiedzi. Endpoint nie służy do liczenia ani listowania dokumentów.\n\n"
+            "Zakres domyślny:\n"
+            "- Gdy 'mode' = 'auto', traktuj zapytanie jako 'current' (obowiązujące akty), chyba że kontekst wyraźnie wskazuje inaczej: \n"
+            "  • 'archiwal*', 'stara', 'wersja z ...' lub konkretne lata → użyj 'archival',\n"
+            "  • 'wszystkie', 'cała historia', 'pełen zakres' → użyj 'all'.\n\n"
+            "Zachowanie:\n"
+            "- Etap 1 selekcjonuje dokumenty po streszczeniach (hybryda dense + TF‑IDF, opcjonalny MMR).\n"
+            "- Etap 2 wyszukuje w chunkach wybranych dokumentów i buduje zmergowane sekcje ('blocks').\n"
+            "- Opcjonalny reranker porządkuje gotowe bloki.\n\n"
+            "Jak wołać (dla modeli LLM):\n"
+            "- Podawaj 2–8 zwięzłych wariantów 'query' (tytuły/sygnatury/datacje/słowa kluczowe).\n"
+            "- Preferuj wynik 'result_format' = 'blocks' (domyślnie).\n"
+            "- Utrzymuj 'top_k' w zakresie 5–10; kontroluj dominację jednego dokumentu 'per_doc_limit'.\n"
+            "- Jeśli masz encje (nazwy/ID/lata/cytaty), przekaż w 'entities' i wybierz 'entity_strategy' (auto/boost/must_any/must_all/exclude).\n\n"
+            "Czego NIE robić tym endpointem:\n"
+            "- Nie proś o liczbę dokumentów ani same listy doc_id/tytułów. Do tego używaj: \n"
+            "  • POST /browse/count — liczba dokumentów‑kandydatów (Stage‑1),\n"
+            "  • POST /browse/doc-ids — lista doc_id + meta (tytuł, data, is_active),\n"
+            "  • POST /browse/facets — proste rozkłady (is_active, rok).\n\n"
+            "Używaj wyłącznie języka polskiego. Cały korpus oraz metadane są po polsku."
         ),
         alias="SEARCH_TOOL_DESCRIPTION",
     )
@@ -176,6 +183,14 @@ class SummRAGSettings(BaseSettings):
     # Deduplication: skip identical files during ingest based on content hash
     dedupe_on_ingest: bool = Field(default=True, alias="DEDUPE_ON_INGEST")
 
+    # --- Entities-aware search (filters and boosting) ---
+    # Soft boost for entity matches at Stage 1 (summaries)
+    entity_boost_stage1: float = Field(default=0.15, alias="ENTITY_BOOST_STAGE1")
+    # Soft boost for entity matches at Stage 2 (chunks/sections)
+    entity_boost_stage2: float = Field(default=0.10, alias="ENTITY_BOOST_STAGE2")
+    # Auto-extract entities from user queries when not provided explicitly
+    auto_extract_query_entities: bool = Field(default=True, alias="AUTO_EXTRACT_QUERY_ENTITIES")
+
     # --- Validators for forgiving .env parsing (blank strings) ---
     @field_validator(
         "search_skip_stage1_default",
@@ -184,6 +199,7 @@ class SummRAGSettings(BaseSettings):
         "search_minimal_payload",
         "batch_section_fetch",
         "dedupe_on_ingest",
+        "auto_extract_query_entities",
         mode="before",
     )
     @classmethod

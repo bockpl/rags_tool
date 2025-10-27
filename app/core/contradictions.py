@@ -22,11 +22,11 @@ from openai import OpenAI
 from qdrant_client.http import models as qm
 
 from app.core.embedding import embed_query
-from app.core.search import (
-    _canonical_section_label,
-    _fetch_sections_chunks_batch,
-    _fetch_doc_summaries,
-    _truncate_head_tail,
+from app.core.store_access import (
+    canonical_section_label,
+    fetch_sections_chunks_batch,
+    fetch_doc_summaries,
+    truncate_head_tail,
 )
 from app.qdrant_utils import qdrant
 from app.settings import get_settings
@@ -172,7 +172,7 @@ def _find_document_by_title_or_id(title: str, doc_id_hint: Optional[str]) -> Tup
     Returns (doc_id, title, doc_date, is_active).
     """
     if doc_id_hint:
-        info = _fetch_doc_summaries([doc_id_hint])
+        info = fetch_doc_summaries([doc_id_hint])
         meta = info.get(doc_id_hint, {})
         return doc_id_hint, meta.get("doc_title"), meta.get("doc_date"), meta.get("is_active")
 
@@ -243,7 +243,7 @@ def _list_sections_for_doc(doc_id: str, level: str) -> List[str]:
             for rec in records:
                 p = rec.payload or {}
                 sec = p.get("section_path")
-                canon = _canonical_section_label(sec, level)
+                canon = canonical_section_label(sec, level)
                 if canon:
                     labels.add(canon)
             if offset is None:
@@ -279,7 +279,7 @@ def _extract_rule_struct(text: str) -> Tuple[Optional[str], Optional[str], str]:
     raw = (text or "").strip()
     if not raw:
         return None, None, "other"
-    ctx = _truncate_head_tail(raw, int(getattr(settings, "contradictions_max_context_chars", 2500)))
+    ctx = truncate_head_tail(raw, int(getattr(settings, "contradictions_max_context_chars", 2500)))
     rule: Optional[str] = None
     subject: Optional[str] = None
     rule_type: Optional[str] = None
@@ -308,7 +308,7 @@ def _extract_rule_struct(text: str) -> Tuple[Optional[str], Optional[str], str]:
     except Exception as exc:
         logger.debug("Rule extraction failed; will use heuristic: %s", exc)
     if not rule:
-        rule = _truncate_head_tail(raw, 500)
+        rule = truncate_head_tail(raw, 500)
     if not rule_type:
         rule_type = _detect_rule_type_heuristic(raw)
     return rule, subject, rule_type
@@ -324,7 +324,7 @@ def _group_candidates_by_section(hits: Iterable[Any], level: str) -> Dict[Tuple[
             continue
         if p.get("point_type") and p.get("point_type") != "chunk":
             continue
-        canon = _canonical_section_label(p.get("section_path"), level)
+        canon = canonical_section_label(p.get("section_path"), level)
         key = (did, canon)
         ent = groups.get(key)
         score = float(h.score or 0.0)
@@ -402,8 +402,8 @@ def _judge_pair(
     Returns (label, confidence, rationale, quotes_a, quotes_b).
     """
     # Prepare compact contexts
-    a_ctx = _truncate_head_tail(text_a or "", int(getattr(settings, "contradictions_max_context_chars", 2500)))
-    b_ctx = _truncate_head_tail(text_b or "", int(getattr(settings, "contradictions_max_context_chars", 2500)))
+    a_ctx = truncate_head_tail(text_a or "", int(getattr(settings, "contradictions_max_context_chars", 2500)))
+    b_ctx = truncate_head_tail(text_b or "", int(getattr(settings, "contradictions_max_context_chars", 2500)))
     # Pre‑gate: entry_into_force porównujemy tylko w obrębie tego samego dokumentu
     if (rule_type or "").strip().lower() == "entry_into_force" and (meta_a.get("doc_id") != meta_b.get("doc_id")):
         return "unrelated", 0.0, None, [], [], subject_a, None, False
@@ -494,7 +494,7 @@ def analyze_contradictions(req: ContradictionAnalysisRequest) -> ContradictionAn
         return ContradictionAnalysisResponse(doc_id=did, title=title, doc_date=doc_date, is_active=is_active, findings=[])
 
     # Fetch full sections of the reference doc in one go
-    ref_chunks_map = _fetch_sections_chunks_batch(did, sections)
+    ref_chunks_map = fetch_sections_chunks_batch(did, sections)
     findings: List[ContradictionSectionReport] = []
 
     # Prepare metadata cache for candidate docs (title/date/is_active)
@@ -539,7 +539,7 @@ def analyze_contradictions(req: ContradictionAnalysisRequest) -> ContradictionAn
         for chunk in range(0, len(c_doc_ids), 200):
             ids_slice = c_doc_ids[chunk : chunk + 200]
             try:
-                meta_cache.update(_fetch_doc_summaries(ids_slice))
+                meta_cache.update(fetch_doc_summaries(ids_slice))
             except Exception:
                 pass
         processed_ids.update([x for x in c_doc_ids if x])
@@ -553,7 +553,7 @@ def analyze_contradictions(req: ContradictionAnalysisRequest) -> ContradictionAn
                 labels_by_doc.setdefault(did2, []).append(lab)
         cand_texts: Dict[Tuple[str, str], str] = {}
         for did2, labs in labels_by_doc.items():
-            mapping = _fetch_sections_chunks_batch(did2, labs)
+            mapping = fetch_sections_chunks_batch(did2, labs)
             for lab, lst in mapping.items():
                 text = "\n\n".join((p.get("text") or "").strip() for p in lst if (p.get("text") or "").strip())
                 cand_texts[(did2, lab)] = text

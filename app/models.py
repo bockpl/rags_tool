@@ -119,6 +119,22 @@ class SearchQuery(BaseModel):
     rep_alpha: Optional[float] = Field(None, description="Redundancy alpha in hybrid MMR (dense contribution). Defaults to dense_weight.")
     mmr_stage1: bool = Field(True, description="Apply hybrid MMR already at Stage-1 (summaries).")
     summary_mode: str = Field("first", description="Document summary duplication: none|first|all. 'first' shows once per doc.")
+    # Entities-aware controls for LLM callers
+    entities: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "List of entities extracted from the user intent (names/IDs/years/quoted phrases). "
+            "When omitted and AUTO_EXTRACT_QUERY_ENTITIES=true, backend applies heuristics."
+        ),
+    )
+    entity_strategy: str = Field(
+        default="auto",
+        description=(
+            "How to use entities: 'auto' (backend decides; typically soft boost), "
+            "'boost' (soft bonus only), 'must_any' (filter: any entity present), "
+            "'must_all' (filter: all entities present), 'exclude' (exclude docs/chunks with these entities)."
+        ),
+    )
     # Runtime chunk-merging removed in 2.0.0. Blocks are built directly
     # from section-aware chunks generated at ingest time.
     result_format: str = Field(
@@ -317,6 +333,61 @@ class DocsListResponse(BaseModel):
     """Response envelope for documents list endpoint."""
 
     docs: List[DocListItem]
+
+
+# --- Browse/analytics models ---
+
+class BrowseQuery(BaseModel):
+    """Lightweight browse request over Stage-1 candidates."""
+
+    query: object
+    top_m: int = 100
+    mode: str = "auto"  # auto|current|archival|all
+    use_hybrid: bool = True
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def _normalize_query(cls, v):  # type: ignore[override]
+        def to_list_of_str(x) -> List[str]:
+            if x is None:
+                return []
+            if isinstance(x, str):
+                s = x.strip()
+                return [s] if s else []
+            if isinstance(x, (list, tuple, set)):
+                acc: List[str] = []
+                for item in x:
+                    acc.extend(to_list_of_str(item))
+                return acc
+            s = str(x).strip()
+            return [s] if s else []
+
+        out = to_list_of_str(v)
+        return out if out else v
+
+
+class BrowseCountResponse(BaseModel):
+    took_ms: int
+    total: int
+    approx: bool = False
+
+
+class BrowseIdsResponse(BaseModel):
+    took_ms: int
+    total: int
+    approx: bool = False
+    docs: List[DocListItem]
+
+
+class BrowseFacetsRequest(BrowseQuery):
+    fields: List[str] = Field(default_factory=lambda: ["is_active", "year"])
+
+
+class BrowseFacetsResponse(BaseModel):
+    took_ms: int
+    approx: bool = False
+    total_docs: int
+    facets: dict
 
 
 # --- Multi-query debug models (mirror /search/query with step-by-step outputs) ---
