@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.27.0"
+    app_version: str = "2.27.1"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -64,7 +64,7 @@ class SummRAGSettings(BaseSettings):
             " w formacie 'YYYY-MM-DD' lub 'YYYY-MM' lub 'YYYY'; jeśli brak informacji wpisz dokładnie 'brak'), "
             " 'replacement' (string; krótkie tytuły aktów zastępowanych, zawsze w mianowniku; może składać się jedynie z krótkich tytułów aktów "
             " zastępowanych, jeśli tekst jednolity wypisz wszystkie tytuły aktów które ujednolica, separator ';'; wpisz dokładnie 'brak', jeśli brak informacji), "
-            " 'is_active' (bool; oceń WYŁĄCZNIE na podstawie kontekstu PATH, czy dokument jest obowiązujący. Jeżeli PATH sugeruje archiwum, ustaw false; w przeciwnym razie true)."
+            " 'is_active' (bool; oceń WYŁĄCZNIE na podstawie kontekstu PATH, czy dokument jest obowiązujący. USTAW false TYLKO, gdy PATH zawiera jednoznaczne słowa-klucze wskazujące archiwum (np. 'archiwum', 'archiwal', 'archive', 'archives', 'archival', 'old', 'stare', 'stary', 'history', 'deprecated', 'zarchiwizowane'). NIE traktuj samych lat/dat w PATH jako oznaki archiwalności; w przeciwnym razie ustaw true)."
         ),
         alias="SUMMARY_PROMPT_JSON",
     )

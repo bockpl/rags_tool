@@ -1,6 +1,9 @@
-# rags_tool (2.27.0)
+# rags_tool (2.27.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.27.1
+- Prompt (summary): doprecyzowano regułę ustalania `is_active` na podstawie `PATH` — sama obecność roku/daty w ścieżce nie oznacza archiwalności. `is_active=false` ustawiaj wyłącznie wtedy, gdy `PATH` zawiera jednoznaczne słowa‑klucze (np. `archiwum`, `archiwal`, `archive`, `archives`, `archival`, `old`, `stare`, `stary`, `history`, `deprecated`, `zarchiwizowane`).
 
 ## Nowości w 2.27.0
 - Ingest: LLM ocenia pole `is_active` podczas streszczenia na podstawie ścieżki pliku (`PATH`). Jeśli ścieżka sugeruje archiwum (np. `archiwum/`, `archive/`, `stare/`, `old/`), model powinien zwrócić `is_active=false`; w przeciwnym razie `true`. Gdy model nie zwróci pola, przyjmujemy `true`.
