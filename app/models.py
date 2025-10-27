@@ -90,9 +90,9 @@ class SearchQuery(BaseModel):
         ),
     )
     top_m: int = Field(
-        100,
+        60,
         description=(
-            "Stage‑1 candidate document count (summaries). Default 100; typical 50–200. "
+            "Stage‑1 candidate document count (summaries). Default 60; typical 50–200. "
             "Increase for broad topics, decrease for precise queries."
         ),
     )

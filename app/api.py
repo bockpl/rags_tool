@@ -581,8 +581,10 @@ def docs_list(mode: str = Query(..., description="Tryb: current|archival")):
 @app.post(
     "/browse/count",
     response_model=BrowseCountResponse,
-    summary="Ile dokumentów pasuje do zapytania (Stage‑1)",
-    description="Zwraca liczbę dokumentów-kandydatów (unikalne doc_id) dla zapytań w trybie Stage‑1 (streszczenia).",
+    summary="Ile dokumentów pasuje do zapytania (treść)",
+    description="Zwraca liczbę dokumentów-kandydatów (unikalne doc_id) wyłonionych wyłącznie na podstawie treści (chunków).",
+    operation_id="rags_tool_browse_count",
+    tags=["tools"],
 )
 def browse_count(req: BrowseQuery) -> BrowseCountResponse:
     t0 = time.time()
@@ -609,8 +611,10 @@ def browse_count(req: BrowseQuery) -> BrowseCountResponse:
 @app.post(
     "/browse/doc-ids",
     response_model=BrowseIdsResponse,
-    summary="Lista doc_id i metadanych (Stage‑1)",
-    description="Zwraca listę doc_id (z tytułem, datą, is_active) dla kandydatów Stage‑1. Dane uporządkowane stabilnie.",
+    summary="Lista doc_id i metadanych (treść)",
+    description="Zwraca listę doc_id (z tytułem, datą, is_active) dla kandydatów wybranych po treści. Dane uporządkowane stabilnie.",
+    operation_id="rags_tool_browse_doc_ids",
+    tags=["tools"],
 )
 def browse_doc_ids(req: BrowseQuery, limit: int = Query(200, ge=1, le=2000)) -> BrowseIdsResponse:
     t0 = time.time()
@@ -637,8 +641,10 @@ def browse_doc_ids(req: BrowseQuery, limit: int = Query(200, ge=1, le=2000)) -> 
 @app.post(
     "/browse/facets",
     response_model=BrowseFacetsResponse,
-    summary="Facety po dokumentach-kandydatach (Stage‑1)",
-    description="Zwraca proste rozkłady (np. is_active, year) dla kandydatów Stage‑1.",
+    summary="Facety po dokumentach-kandydatach (treść)",
+    description="Zwraca proste rozkłady (np. is_active, year) dla kandydatów wybranych po treści.",
+    operation_id="rags_tool_browse_facets",
+    tags=["tools"],
 )
 def browse_facets(req: BrowseFacetsRequest) -> BrowseFacetsResponse:
     t0 = time.time()

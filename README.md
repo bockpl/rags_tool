@@ -1,6 +1,15 @@
-# rags_tool (2.25.0)
+# rags_tool (2.26.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.26.0
+- Browse po treści: `POST /browse/count`, `POST /browse/doc-ids`, `POST /browse/facets` selekcjonują kandydatów wyłącznie na podstawie treści (chunków), bez przeszukiwania streszczeń. Streszczenia mogą być użyte jedynie do wzbogacenia metadanych (tytuł/data) po selekcji.
+- OpenAPI: ustalone `operation_id` dla endpointów browse (tag `tools`):
+  - `POST /browse/count` → `rags_tool_browse_count`,
+  - `POST /browse/doc-ids` → `rags_tool_browse_doc_ids`,
+  - `POST /browse/facets` → `rags_tool_browse_facets`.
+- Wyszukiwanie: przywrócono dotychczasowe zachowanie — `search` zwraca streszczenie raz na dokument (zgodnie z `summary_mode`), a snippety mają fallback do streszczenia tylko gdy brak tekstu chunku.
+- Zasada podsumowań: funkcje podsumowujące nie tworzą „streszczeń streszczeń”. Dozwolone jest korzystanie z `entities` i `signatures`.
 
 ## Nowości w 2.25.0
 - Domyślny zakres wyszukiwania dla `mode=auto` to teraz dokumenty obowiązujące (`current`). Tylko gdy kontekst wyraźnie wskazuje inaczej używamy `archival` (np. słowa „archiwalne”, „stara”, konkretne lata, „wersja z …”) lub `all` (np. „wszystkie”, „cała historia”).

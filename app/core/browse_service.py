@@ -1,12 +1,14 @@
 """Lightweight browse/analytics over the corpus (LLM-friendly).
 
 Provides simple operations without MMR/rerank/shaping, such as:
-- count how many candidate documents match a query (Stage-1 scope),
+- count how many candidate documents match a query (content scope),
 - list candidate doc ids and basic metadata,
 - facet counts over candidate documents.
 
-The implementation reuses Stage-1 selection primitives to keep semantics
-consistent with answer-oriented retrieval while remaining cheap to compute.
+Implementation note:
+- Selection operates on document content (chunk-level points) and does not
+  search through summaries. Summaries may be fetched only to enrich metadata
+  (title/doc_date) after candidate selection.
 """
 
 from __future__ import annotations
@@ -20,8 +22,9 @@ from app.core.embedding import embed_query
 from app.core.search import (
     _build_sparse_queries_for_query,
     _classify_mode,
-    _stage1_select_documents,
 )
+from app.core.constants import CONTENT_VECTOR_NAME, CONTENT_SPARSE_NAME, SPARSE_ENABLED
+from app.qdrant_utils import qdrant
 from app.core.store_access import fetch_doc_summaries
 from app.settings import get_settings
 
@@ -67,39 +70,96 @@ def _unified_mode_and_filter(queries: List[str], mode: str) -> Tuple[str, Option
 
 
 def stage1_candidates(params: BrowseParams) -> Tuple[Set[str], Dict[str, Dict[str, Any]], bool]:
-    """Return union of candidate document ids across queries and a metadata map.
+    """Return union of candidate document ids across queries (content-based).
 
-    Returns (doc_ids, doc_map, approx) where `approx` is True when any per-query
-    candidate list hit the `top_m` cap (indicating the union may be truncated
-    w.r.t. the full corpus).
+    Selection is performed over chunk-level content vectors (dense + optional
+    TF-IDF). Summaries are not used for searching. Returns (doc_ids, doc_map,
+    approx) where `approx` is True when any per-query unique doc_id list hit the
+    `top_m` cap.
     """
     if not params.queries:
         return set(), {}, False
-    unified_mode, flt = _unified_mode_and_filter(params.queries, params.mode)
+
+    _, flt = _unified_mode_and_filter(params.queries, params.mode)
     approx = False
     union: Set[str] = set()
     merged_map: Dict[str, Dict[str, Any]] = {}
+
+    # Base filter: point_type == chunk plus optional is_active condition
+    base_must = [qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk"))]
+    if flt and getattr(flt, "must", None):
+        base_must = list(flt.must) + base_must
+    flt_chunks = qm.Filter(must=base_must)
+
     for q in params.queries:
         q_vec = embed_query([q])[0]
-        content_sparse_query, summary_sparse_query = _build_sparse_queries_for_query(q, params.use_hybrid)
-        req_like = type("_Req", (), {
-            "top_m": params.top_m,
-            "score_norm": "minmax",
-            "dense_weight": 0.6,
-            "sparse_weight": 0.4,
-            "mmr_stage1": True,
-            "mmr_lambda": 0.3,
-            "rep_alpha": None,
-            "use_hybrid": params.use_hybrid,
-            "entity_strategy": "auto",
-        })()
-        doc_ids, doc_map = _stage1_select_documents(q, q_vec, flt, summary_sparse_query, req_like)
-        if len(doc_ids) >= max(1, params.top_m):
+        content_sparse_query, _ = _build_sparse_queries_for_query(q, params.use_hybrid)
+
+        per_query_doc_ids: List[str] = []
+        seen_local: Set[str] = set()
+
+        # Dense search over content
+        try:
+            dense_hits = qdrant.search(
+                collection_name=settings.qdrant_content_collection,
+                query_vector=(CONTENT_VECTOR_NAME, q_vec),
+                query_filter=flt_chunks,
+                limit=max(50, params.top_m * 3),
+                with_payload=["doc_id", "is_active"],
+                with_vectors=False,
+                search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+            )
+        except Exception:
+            dense_hits = []
+
+        for hit in dense_hits:
+            payload = hit.payload or {}
+            did = str(payload.get("doc_id") or "")
+            if not did or did in seen_local:
+                continue
+            seen_local.add(did)
+            per_query_doc_ids.append(did)
+            # Record minimal metadata that we can derive without summaries
+            merged_map.setdefault(did, {})
+            if merged_map[did].get("is_active") is None and payload.get("is_active") is not None:
+                merged_map[did]["is_active"] = bool(payload.get("is_active"))
+            if len(per_query_doc_ids) >= params.top_m:
+                break
+
+        # Optional TF-IDF sparse over content to supplement recall
+        if len(per_query_doc_ids) < params.top_m and params.use_hybrid and SPARSE_ENABLED and content_sparse_query is not None:
+            try:
+                c_idx, c_val = content_sparse_query
+                sparse_hits = qdrant.search(
+                    collection_name=settings.qdrant_content_collection,
+                    query_vector=(CONTENT_SPARSE_NAME, qm.SparseVector(indices=c_idx, values=c_val)),
+                    query_filter=flt_chunks,
+                    limit=max(50, params.top_m * 3),
+                    with_payload=["doc_id", "is_active"],
+                    with_vectors=False,
+                    search_params=qm.SearchParams(exact=False, hnsw_ef=128),
+                )
+            except Exception:
+                sparse_hits = []
+            for hit in sparse_hits:
+                payload = hit.payload or {}
+                did = str(payload.get("doc_id") or "")
+                if not did or did in seen_local:
+                    continue
+                seen_local.add(did)
+                per_query_doc_ids.append(did)
+                merged_map.setdefault(did, {})
+                if merged_map[did].get("is_active") is None and payload.get("is_active") is not None:
+                    merged_map[did]["is_active"] = bool(payload.get("is_active"))
+                if len(per_query_doc_ids) >= params.top_m:
+                    break
+
+        if len(per_query_doc_ids) >= params.top_m:
             approx = True
-        for did in doc_ids:
+
+        for did in per_query_doc_ids:
             union.add(did)
-            if did not in merged_map and did in doc_map:
-                merged_map[did] = doc_map[did]
+
     return union, merged_map, approx
 
 
@@ -164,4 +224,3 @@ def facet_counts(params: BrowseParams, fields: Iterable[str]) -> Tuple[Dict[str,
                 year = dd[:4] if len(dd) >= 4 and dd[:4].isdigit() else "brak"
                 out.setdefault("year", {})[year] = out.get("year", {}).get(year, 0) + 1
     return out, approx
-
