@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.27.1"
+    app_version: str = "2.33.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -82,6 +82,13 @@ class SummRAGSettings(BaseSettings):
     # Prefer JSON responses for summaries (OpenAI JSON mode). Fallback to text parser if unsupported.
     summary_json_mode: bool = Field(default=True, alias="SUMMARY_JSON_MODE")
 
+    # Browse search limits (controls for /browse/doc-ids and /browse/facets)
+    # Oversample factor for Qdrant search limit relative to top_m. Higher when
+    # text_match is enabled to reduce false negatives of literal filters.
+    browse_search_oversample: int = Field(default=10, alias="BROWSE_SEARCH_OVERSAMPLE")
+    # Absolute cap for Qdrant search limit to avoid pathological queries.
+    browse_search_limit_max: int = Field(default=4000, alias="BROWSE_SEARCH_LIMIT_MAX")
+
     # Chunking defaults (token-based). Tune per embedding model.
     chunk_tokens: int = Field(default=400, alias="CHUNK_TOKENS")
     chunk_overlap: int = Field(default=64, alias="CHUNK_OVERLAP")
@@ -108,9 +115,8 @@ class SummRAGSettings(BaseSettings):
             "- Jeśli masz encje (nazwy/ID/lata/cytaty), przekaż w 'entities' i wybierz 'entity_strategy' (auto/boost/must_any/must_all/exclude).\n\n"
             "Czego NIE robić tym endpointem:\n"
             "- Nie proś o liczbę dokumentów ani same listy doc_id/tytułów. Do tego używaj: \n"
-            "  • POST /browse/count — liczba dokumentów‑kandydatów (Stage‑1),\n"
-            "  • POST /browse/doc-ids — lista doc_id + meta (tytuł, data, is_active),\n"
-            "  • POST /browse/facets — proste rozkłady (is_active, rok).\n\n"
+            "  • POST /browse/doc-ids — lista doc_id + meta (tytuł, data, is_active, doc_kind) oraz candidates_total,\n"
+            "  • POST /browse/facets — proste rozkłady (is_active, rok, doc_kind).\n\n"
             "Używaj wyłącznie języka polskiego. Cały korpus oraz metadane są po polsku."
         ),
         alias="SEARCH_TOOL_DESCRIPTION",

@@ -1,6 +1,51 @@
-# rags_tool (2.27.1)
+# rags_tool (2.32.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.31.0
+- Browse: dodano `text_match` — wymaganie literalnego dopasowania zapytania w treści chunków. Wartości: `none` (domyślnie), `phrase` (cała fraza jako substring), `any` (dowolny token), `all` (wszystkie tokeny). Działa w `POST /browse/doc-ids` i `POST /browse/facets`.
+- Opis: `entities` + `entity_strategy='optional'` łączy wyniki po treści ORAZ encjach; w strategiach ścisłych encje działają jak filtr (AND) już podczas wektorowego wyszukiwania.
+
+## Nowości w 2.30.0
+- Browse: jawny filtr aktywności dokumentów (`status`): `active` (domyślnie), `inactive`, `all`. Ma pierwszeństwo wobec heurystyki `mode`.
+- Browse: encje — dodano strategię `optional` (logika OR): dokument wejdzie jako kandydat, jeśli pasuje po treści LUB ma wskazane encje. Dostępne strategie: `auto` (=must_any), `must_any`, `must_all`, `exclude`, `optional`.
+- Browse: przypomnienie — zapytania domyślnie wyszukują po treści (wektory + TF‑IDF). Encje są używane tylko, gdy przekażesz `entities`/`entity_strategy`.
+
+## Nowości w 2.29.1
+- Browse: poprawka filtrów encji — dopasowanie obejmuje zarówno oryginalny zapis, jak i wersję casefold (w celu łagodzenia różnic wielkości liter w payloadach). Dodano też fallback „entities‑only” (scroll), gdy połączenie filtra encji i wyszukiwania wektorowego/TF‑IDF nie zwróci wystarczającej liczby kandydatów.
+
+## Nowości w 2.29.0
+- Browse: dodano filtry po encjach (entities) na poziomie treści (chunków).
+  - Nowe pola w `BrowseQuery`: `entities` (lista stringów) oraz `entity_strategy` (`auto`=must_any, `must_any`, `must_all`, `exclude`).
+  - Działa w: `POST /browse/doc-ids`, `POST /browse/facets`.
+- doc_kind: klasyfikacja rodzaju dokumentu oparta wyłącznie o tytuł (title). Sygnatury/keywords nie wpływają na rozpoznanie rodzaju.
+- Admin UI: przykłady browse z `entities`.
+
+## Nowości w 2.28.2
+- Poprawka: inferencja `doc_kind` preferuje teraz dopasowanie w tytule, a dopiero potem sprawdza sygnaturę/keywords. Zapobiega to błędnym klasyfikacjom (np. „Regulamin …”/„Uchwała …” rozpoznane jako `order` z powodu słowa „zarządzenie” w sygnaturze).
+
+## Nowości w 2.28.1
+- Poprawka: w browse uzupełnianie metadanych (title/date/signature) dla kandydatów odbywa się także, gdy `doc_map` zawierało wcześniej tylko `is_active` (z chunków). Dzięki temu inferencja `doc_kind` korzysta z tytułu i nie zwraca błędnie `other`.
+
+## Nowości w 2.28.0
+- Browse: dodano inferencję rodzaju dokumentu (doc_kind) „w locie” z tytułów/sygnatur bez zmiany schematu Qdrant.
+  - Filtrowanie po `kinds` (np. `order`, `resolution`, `regulation`) wspierane w:
+    - `POST /browse/doc-ids` (odpowiedź zawiera pole `doc_kind` i `candidates_total`),
+    - `POST /browse/facets` (nowy facet `doc_kind`).
+  - Obsługiwane identyfikatory: `resolution`, `order`, `announcement`, `notice`, `decision`, `regulation`, `policy`, `procedure`, `instruction`, `statute`, `other`.
+- Admin UI: dodano operacje testowe dla browse (`browse-count`, `browse-doc-ids`, `browse-facets`).
+
+Przykłady:
+
+```
+POST /browse/facets
+{
+  "query": ["uchwała senatu"],
+  "fields": ["is_active", "year", "doc_kind"]
+}
+```
+
+Uwaga: filtrowanie `kinds` wykonywane jest post‑selekcyjnie (bez zmian w schemacie), więc nie wpływa na etap wyszukiwania po chunkach — zawęża wynik kandydatów i facety.
 
 ## Nowości w 2.27.1
 - Prompt (summary): doprecyzowano regułę ustalania `is_active` na podstawie `PATH` — sama obecność roku/daty w ścieżce nie oznacza archiwalności. `is_active=false` ustawiaj wyłącznie wtedy, gdy `PATH` zawiera jednoznaczne słowa‑klucze (np. `archiwum`, `archiwal`, `archive`, `archives`, `archival`, `old`, `stare`, `stary`, `history`, `deprecated`, `zarchiwizowane`).
@@ -10,10 +55,8 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
 - Sidecar: `is_active` jest zapisywane dodatkowo w pliku cache streszczenia. Starsze cache bez tego pola pozostają ważne — ich `is_active` domyślnie traktujemy jako `true`.
 - Zasady istniejące (REPLACEMENT): dotychczasowy mechanizm ustawiania `is_active=false` dla dokumentów zastępowanych nadal działa i ma zastosowanie po ingestcie, niezależnie od powyższej oceny LLM.
 
-## Nowości w 2.26.0
-- Browse po treści: `POST /browse/count`, `POST /browse/doc-ids`, `POST /browse/facets` selekcjonują kandydatów wyłącznie na podstawie treści (chunków), bez przeszukiwania streszczeń. Streszczenia mogą być użyte jedynie do wzbogacenia metadanych (tytuł/data) po selekcji.
+- Browse po treści: `POST /browse/doc-ids`, `POST /browse/facets` selekcjonują kandydatów wyłącznie na podstawie treści (chunków), bez przeszukiwania streszczeń. Streszczenia mogą być użyte jedynie do wzbogacenia metadanych (tytuł/data) po selekcji.
 - OpenAPI: ustalone `operation_id` dla endpointów browse (tag `tools`):
-  - `POST /browse/count` → `rags_tool_browse_count`,
   - `POST /browse/doc-ids` → `rags_tool_browse_doc_ids`,
   - `POST /browse/facets` → `rags_tool_browse_facets`.
 - Wyszukiwanie: przywrócono dotychczasowe zachowanie — `search` zwraca streszczenie raz na dokument (zgodnie z `summary_mode`), a snippety mają fallback do streszczenia tylko gdy brak tekstu chunku.
@@ -25,8 +68,7 @@ Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokume
  
 ## Nowości w 2.24.0
 - Wydzielenie funkcji przeglądowych (LLM‑friendly) od wyszukiwania odpowiedzi:
-  - Nowe endpointy browse (Stage‑1, działa na streszczeniach, bez MMR/rerank/shaping):
-    - `POST /browse/count` — zwraca liczbę dokumentów‑kandydatów; pole `approx=true` oznacza, że osiągnięto limit `top_m`.
+  - Endpointy browse:
     - `POST /browse/doc-ids` — lista `doc_id` z podstawowymi metadanymi (tytuł, `doc_date`, `is_active`).
     - `POST /browse/facets` — proste rozkłady (facety) po kandydatach; obsługiwane pola: `is_active`, `year` (z `doc_date`).
   - Wspólne helpery dostępu do magazynu przeniesione do `app/core/store_access.py` i używane m.in. przez analizę sprzeczności.
@@ -797,7 +839,7 @@ Wartości `SECTION_LEVELS` to unia poziomów znalezionych we wszystkich dokument
 
 To narzędzie służy wyłącznie do wyszukiwania RAG i zwracania bloków dowodowych (`blocks`) do cytowania. Nie używaj go do liczenia ani listowania dokumentów — do tego służą:
 
-- `POST /browse/count` — policz kandydatów (unikalne `doc_id`) na Etapie 1,
+<!-- count endpoint usunięty -->
 - `POST /browse/doc-ids` — lista `doc_id` + `title` + `doc_date` + `is_active`,
 - `POST /browse/facets` — proste rozkłady (np. `is_active`, rok z `doc_date`).
 
@@ -931,3 +973,10 @@ PY
   - `/search/query` dołącza `entities` do minimalnego payloadu dla Etapu 1 i propaguje je do wyników (flat/grouped/blocks) — tak jak `signature`.
   - W JSON‑mode prompt streszczeń oczekuje teraz `entities` jako listy stringów.
   - Zgodność wsteczna: istniejące pliki sidecar bez `entities` pozostają ważne; pole pojawi się po kolejnej regeneracji streszczeń.
+## Nowości w 2.33.0
+- /browse/doc-ids: uproszczone parametry (query, match=phrase|any|all, status=active|inactive|all, kinds) i pełny korpus dzięki lokalnemu indeksowi FTS (SQLite FTS5). Zwraca `candidates_total` przed przycięciem do `limit`.
+- Indeks FTS buduje się automatycznie przy pierwszym użyciu (źródło: Qdrant, kolekcja chunków). Plik: `<VECTOR_STORE_DIR>/chunks_fts.sqlite`.
+ - Nowy endpoint: `GET /docs/stats` — szybka statystyka liczby dokumentów w korpusie (aktywnych/nieaktywnych/łącznie) na podstawie FTS (distinct doc_id).
+
+## Nowości w 2.32.1
+- doc_kind: wzorce wyrażeń regularnych są kotwiczone na początku tytułu (^) — tytuły zawsze zaczynają się słowem określającym rodzaj. Zmniejsza to fałszywe dopasowania.

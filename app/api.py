@@ -50,10 +50,11 @@ from app.models import (
     ContradictionAnalysisResponse,
     DocsListResponse,
     BrowseQuery,
-    BrowseCountResponse,
     BrowseIdsResponse,
     BrowseFacetsRequest,
     BrowseFacetsResponse,
+    DocIdsQuery,
+    DocStatsResponse,
 )
 from app.qdrant_utils import (
     build_and_upsert_points,
@@ -77,6 +78,7 @@ from app.core.summary_cache import (
 from app.core.embedding import embed_passage
 from app.core.contradictions import analyze_contradictions
 from app.core import browse_service
+from app.core.fts import fts_doc_counts, rebuild_fts_from_qdrant, fts_count, ensure_fts_ready
 
 
 settings = get_settings()
@@ -442,6 +444,12 @@ def _startup_ensure_collections() -> None:
             logger.info("TF-IDF vectorizers pre-warmed at startup")
         except Exception as exc:
             logger.warning("TF-IDF pre-warm skipped: %s", exc)
+        # Ensure local FTS index exists (may rebuild on first start)
+        try:
+            ensure_fts_ready(min_rows=1)
+            logger.info("FTS index ready at startup | rows=%d", int(fts_count()))
+        except Exception as exc:
+            logger.warning("FTS ensure failed at startup: %s", exc)
         # Log key runtime switches for clarity
         logger.info(
             "Startup config | skip_stage1=%s dual_query_sparse=%s minimal_payload=%s batch_section_fetch=%s rrf_k=%d oversample=%d dense_for_mmr=%s",
@@ -582,45 +590,21 @@ def docs_list(mode: str = Query(..., description="Tryb: current|archival")):
 # --- Browse/analytics (LLM-friendly) ---
 
 
-@app.post(
-    "/browse/count",
-    response_model=BrowseCountResponse,
-    summary="Ile dokumentów pasuje do zapytania (treść)",
-    description="Zwraca liczbę dokumentów-kandydatów (unikalne doc_id) wyłonionych wyłącznie na podstawie treści (chunków).",
-    operation_id="rags_tool_browse_count",
-    tags=["tools"],
-)
-def browse_count(req: BrowseQuery) -> BrowseCountResponse:
-    t0 = time.time()
-    if not _qdrant_available_or_log("/browse/count"):
-        took_ms = int((time.time() - t0) * 1000)
-        return BrowseCountResponse(took_ms=took_ms, total=0, approx=False)
-    try:
-        _ensure_collections_cached()
-    except Exception as exc:
-        logger.error(
-            "Qdrant ensure_collections failed | context=/browse/count url=%s error=%s",
-            getattr(settings, "qdrant_url", ""),
-            exc,
-        )
-        took_ms = int((time.time() - t0) * 1000)
-        return BrowseCountResponse(took_ms=took_ms, total=0, approx=False)
-    queries = req.query if isinstance(req.query, list) else [str(req.query)]
-    params = browse_service.BrowseParams(queries=queries, top_m=int(req.top_m), use_hybrid=bool(req.use_hybrid), mode=str(req.mode))
-    total, approx = browse_service.count_documents(params)
-    took_ms = int((time.time() - t0) * 1000)
-    return BrowseCountResponse(took_ms=took_ms, total=total, approx=bool(approx))
 
 
 @app.post(
     "/browse/doc-ids",
     response_model=BrowseIdsResponse,
-    summary="Lista doc_id i metadanych (treść)",
-    description="Zwraca listę doc_id (z tytułem, datą, is_active) dla kandydatów wybranych po treści. Dane uporządkowane stabilnie.",
+    summary="Lista doc_id i metadanych (FTS)",
+    description=(
+        "Zwraca listę doc_id (z tytułem, datą, is_active) dla całego korpusu na podstawie pełnotekstowego dopasowania w chunkach (FTS). "
+        "Parametry uproszczone: query, match (phrase|any|all), status (active|inactive|all), kinds. "
+        "Pole 'candidates_total' zwraca liczbę kandydatów przed limitem (po filtrach)."
+    ),
     operation_id="rags_tool_browse_doc_ids",
     tags=["tools"],
 )
-def browse_doc_ids(req: BrowseQuery, limit: int = Query(200, ge=1, le=2000)) -> BrowseIdsResponse:
+def browse_doc_ids(req: DocIdsQuery, limit: int = Query(200, ge=0, le=5000)) -> BrowseIdsResponse:
     t0 = time.time()
     if not _qdrant_available_or_log("/browse/doc-ids"):
         took_ms = int((time.time() - t0) * 1000)
@@ -636,17 +620,72 @@ def browse_doc_ids(req: BrowseQuery, limit: int = Query(200, ge=1, le=2000)) -> 
         took_ms = int((time.time() - t0) * 1000)
         return BrowseIdsResponse(took_ms=took_ms, total=0, approx=False, docs=[])
     queries = req.query if isinstance(req.query, list) else [str(req.query)]
-    params = browse_service.BrowseParams(queries=queries, top_m=int(req.top_m), use_hybrid=bool(req.use_hybrid), mode=str(req.mode))
-    docs, approx = browse_service.list_document_minimal(params, limit=int(limit))
+    docs, approx, candidates_total = browse_service.list_doc_ids_via_fts(
+        [q for q in queries if str(q or "").strip()],
+        match=str(getattr(req, "match", "phrase")),
+        status=str(getattr(req, "status", "active")),
+        kinds=getattr(req, "kinds", None),
+        limit=int(limit),
+    )
     took_ms = int((time.time() - t0) * 1000)
-    return BrowseIdsResponse(took_ms=took_ms, total=len(docs), approx=bool(approx), docs=docs)
+    # If limit == 0, do not return docs list; only totals
+    if int(limit) <= 0:
+        return BrowseIdsResponse(took_ms=took_ms, total=0, approx=False, candidates_total=int(candidates_total), docs=[])
+    return BrowseIdsResponse(took_ms=took_ms, total=len(docs), approx=bool(approx), candidates_total=int(candidates_total), docs=docs)
+
+
+@app.get(
+    "/docs/stats",
+    response_model=DocStatsResponse,
+    include_in_schema=False,
+    summary="Statystyka dokumentów (FTS)",
+    description="Zwraca liczbę dokumentów w korpusie (aktywnych/nieaktywnych/w sumie) w oparciu o indeks FTS (distinct doc_id).",
+)
+def docs_stats() -> DocStatsResponse:
+    t0 = time.time()
+    if not _qdrant_available_or_log("/docs/stats"):
+        return DocStatsResponse(total_docs=0, active_docs=0, inactive_docs=0)
+    try:
+        _ensure_collections_cached()
+    except Exception:
+        return DocStatsResponse(total_docs=0, active_docs=0, inactive_docs=0)
+    total, active, inactive = fts_doc_counts()
+    return DocStatsResponse(total_docs=int(total), active_docs=int(active), inactive_docs=int(inactive))
+
+
+@app.post(
+    "/fts/rebuild",
+    include_in_schema=False,
+    summary="Odbuduj lokalny indeks FTS",
+    description="Przebudowuje lokalny indeks FTS (SQLite FTS5) na podstawie kolekcji chunków w Qdrant.",
+)
+def fts_rebuild():
+    t0 = time.time()
+    if not _qdrant_available_or_log("/fts/rebuild"):
+        return {"ok": False, "inserted": 0, "took_ms": 0}
+    try:
+        _ensure_collections_cached()
+    except Exception:
+        pass
+    before = 0
+    try:
+        before = int(fts_count())
+    except Exception:
+        before = 0
+    inserted = int(rebuild_fts_from_qdrant())
+    after = int(fts_count())
+    took_ms = int((time.time() - t0) * 1000)
+    return {"ok": True, "inserted": inserted, "before": before, "after": after, "took_ms": took_ms}
 
 
 @app.post(
     "/browse/facets",
     response_model=BrowseFacetsResponse,
     summary="Facety po dokumentach-kandydatach (treść)",
-    description="Zwraca proste rozkłady (np. is_active, year) dla kandydatów wybranych po treści.",
+    description=(
+        "Zwraca proste rozkłady (np. is_active, year, doc_kind) dla kandydatów wybranych po treści. "
+        "Obsługuje 'kinds', 'entities' oraz 'text_match' (literalne dopasowanie w chunku)."
+    ),
     operation_id="rags_tool_browse_facets",
     tags=["tools"],
 )
@@ -666,9 +705,18 @@ def browse_facets(req: BrowseFacetsRequest) -> BrowseFacetsResponse:
         took_ms = int((time.time() - t0) * 1000)
         return BrowseFacetsResponse(took_ms=took_ms, approx=False, total_docs=0, facets={})
     queries = req.query if isinstance(req.query, list) else [str(req.query)]
-    params = browse_service.BrowseParams(queries=queries, top_m=int(req.top_m), use_hybrid=bool(req.use_hybrid), mode=str(req.mode))
-    facets, approx = browse_service.facet_counts(params, req.fields or [])
-    total, _ = browse_service.count_documents(params)
+    params = browse_service.BrowseParams(
+        queries=queries,
+        top_m=int(req.top_m),
+        use_hybrid=bool(req.use_hybrid),
+        mode=str(req.mode),
+        kinds=getattr(req, "kinds", None),
+        entities=getattr(req, "entities", None),
+        entity_strategy=str(getattr(req, "entity_strategy", "auto")),
+        status=str(getattr(req, "status", "active")),
+        text_match=str(getattr(req, "text_match", "none")),
+    )
+    facets, approx, total = browse_service.facet_counts(params, req.fields or [])
     took_ms = int((time.time() - t0) * 1000)
     return BrowseFacetsResponse(took_ms=took_ms, approx=bool(approx), total_docs=int(total), facets=facets)
 
@@ -1000,9 +1048,9 @@ def search_query(req: SearchQuery):
 
     Important
     ---------
-    This endpoint is for answer retrieval only. Do not use it to count or list
-    documents. For counts/lists/facets use the browse endpoints: POST /browse/count,
-    POST /browse/doc-ids, POST /browse/facets.
+    This endpoint is for answer retrieval only. Do not use it to list or facet
+    documents. For lists/facets use the browse endpoints: POST /browse/doc-ids,
+    POST /browse/facets.
 
     Default scope
     -------------

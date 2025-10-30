@@ -327,6 +327,7 @@ class DocListItem(BaseModel):
     title: Optional[str] = Field(default=None, description="Document title extracted during ingest.")
     doc_date: Optional[str] = Field(default=None, description="Document date (YYYY, YYYY-MM, or YYYY-MM-DD) or 'brak'.")
     is_active: Optional[bool] = Field(default=None, description="Whether the document is marked as current (true) or archival (false).")
+    doc_kind: Optional[str] = Field(default=None, description="Coarse document kind inferred from title/signature (e.g., order, resolution, regulation).")
 
 
 class DocsListResponse(BaseModel):
@@ -344,6 +345,39 @@ class BrowseQuery(BaseModel):
     top_m: int = 100
     mode: str = "auto"  # auto|current|archival|all
     use_hybrid: bool = True
+    status: str = Field(
+        "active",
+        description=(
+            "Document activity filter: 'active' (default), 'inactive', or 'all'. "
+            "Applies a chunk-level is_active filter accordingly."
+        ),
+    )
+    kinds: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional post-selection filter by inferred document kind. "
+            "Accepts ASCII identifiers such as: resolution, order, announcement, notice, decision, regulation, policy, procedure, instruction, statute, other."
+        ),
+    )
+    # Entities-aware (chunk-level) filters for browse
+    entities: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional list of entities for chunk-level filtering. Entities are propagated to chunk payloads during ingest."
+        ),
+    )
+    entity_strategy: str = Field(
+        "auto",
+        description=(
+            "How to use entities: 'auto' (same as must_any), 'must_any' (at least one), 'must_all' (all required), 'exclude' (exclude docs/chunks with these entities), 'optional' (OR logic: content match OR entity match)."
+        ),
+    )
+    text_match: str = Field(
+        "none",
+        description=(
+            "Literal text requirement in chunk content: 'none' (default), 'phrase' (query substring), 'any' (any token from query), 'all' (all tokens from query)."
+        ),
+    )
 
     @field_validator("query", mode="before")
     @classmethod
@@ -366,21 +400,16 @@ class BrowseQuery(BaseModel):
         return out if out else v
 
 
-class BrowseCountResponse(BaseModel):
-    took_ms: int
-    total: int
-    approx: bool = False
-
-
 class BrowseIdsResponse(BaseModel):
     took_ms: int
     total: int
     approx: bool = False
+    candidates_total: Optional[int] = None
     docs: List[DocListItem]
 
 
 class BrowseFacetsRequest(BrowseQuery):
-    fields: List[str] = Field(default_factory=lambda: ["is_active", "year"])
+    fields: List[str] = Field(default_factory=lambda: ["is_active", "year", "doc_kind"])
 
 
 class BrowseFacetsResponse(BaseModel):
@@ -388,6 +417,42 @@ class BrowseFacetsResponse(BaseModel):
     approx: bool = False
     total_docs: int
     facets: dict
+
+
+# --- Simplified doc-ids params (FTS-based) ---
+
+class DocIdsQuery(BaseModel):
+    """Simplified request for /browse/doc-ids (FTS over chunks)."""
+
+    query: object
+    match: str = Field("phrase", description="FTS match: phrase|any|all")
+    status: str = Field("active", description="active|inactive|all (filters is_active)")
+    kinds: Optional[List[str]] = None
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def _norm_query(cls, v):
+        def to_list_of_str(x):
+            if x is None:
+                return []
+            if isinstance(x, str):
+                s = x.strip()
+                return [s] if s else []
+            if isinstance(x, (list, tuple, set)):
+                acc: List[str] = []
+                for it in x:
+                    acc.extend(to_list_of_str(it))
+                return acc
+            s = str(x).strip()
+            return [s] if s else []
+        out = to_list_of_str(v)
+        return out if out else v
+
+
+class DocStatsResponse(BaseModel):
+    total_docs: int
+    active_docs: int
+    inactive_docs: int
 
 
 # --- Multi-query debug models (mirror /search/query with step-by-step outputs) ---
