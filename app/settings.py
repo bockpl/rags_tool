@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.37.0"
+    app_version: str = "2.37.1"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -122,7 +122,7 @@ class SummRAGSettings(BaseSettings):
             "- Jeśli masz encje (nazwy/ID/lata/cytaty), przekaż w 'entities' i wybierz 'entity_strategy' (optional/auto/boost/must_any/must_all/exclude). Domyślnie 'optional'.\n\n"
             "Czego NIE robić tym endpointem:\n"
             "- Nie proś o liczbę dokumentów ani same listy doc_id/tytułów. Do tego używaj: \n"
-            "  • POST /browse/doc-ids — lista doc_id + meta (tytuł, data, is_active, doc_kind) oraz candidates_total,\n"
+            "  • POST /browse/doc-ids — lista doc_id + meta (tytuł, data, is_active, doc_kind) oraz 'candidates_total'; dla samej liczby ustaw 'limit=0' i zaufaj 'candidates_total' (nie stosuj sond 'limit:1'),\n"
             "  • POST /browse/facets — proste rozkłady (is_active, rok, doc_kind).\n\n"
             "Używaj wyłącznie języka polskiego. Cały korpus oraz metadane są po polsku."
         ),

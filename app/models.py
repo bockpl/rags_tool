@@ -435,10 +435,10 @@ class BrowseFacetsResponse(BaseModel):
 # --- Simplified doc-ids params (FTS-based) ---
 
 class DocIdsQuery(BaseModel):
-    """Simplified request for /browse/doc-ids (FTS over chunks)."""
+    """Simplified request for /browse/doc-ids."""
 
     query: object
-    match: str = Field("phrase", description="FTS match: phrase|any|all")
+    match: str = Field("phrase", description="Match mode: phrase|any|all (default: 'phrase'; prefer 'phrase' for single keywords).")
     status: str = Field("active", description="active|inactive|all (filters is_active)")
     kinds: Optional[List[str]] = None
 

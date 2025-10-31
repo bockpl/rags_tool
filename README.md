@@ -111,7 +111,7 @@ Uwaga: filtrowanie `kinds` wykonywane jest post‑selekcyjnie (bez zmian w schem
 ## Nowości w 2.24.0
 - Wydzielenie funkcji przeglądowych (LLM‑friendly) od wyszukiwania odpowiedzi:
   - Endpointy browse:
-    - `POST /browse/doc-ids` — lista `doc_id` z podstawowymi metadanymi (tytuł, `doc_date`, `is_active`).
+    - `POST /browse/doc-ids` — lista `doc_id` z metadanymi (tytuł, `doc_date`, `is_active`, `doc_kind`) oraz pole `candidates_total` (liczba kandydatów po filtrach, niezależna od `limit`). Dla samej liczby ustaw `limit=0` i zaufaj `candidates_total` (nie stosuj sond `limit:1`).
     - `POST /browse/facets` — proste rozkłady (facety) po kandydatach; obsługiwane pola: `is_active`, `year` (z `doc_date`).
   - Wspólne helpery dostępu do magazynu przeniesione do `app/core/store_access.py` i używane m.in. przez analizę sprzeczności.
   - Bez zmian w istniejącym endpointzie `POST /search/query` — podział dotyczy struktury i nowych tras.

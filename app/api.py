@@ -601,11 +601,13 @@ def docs_list(mode: str = Query(..., description="Tryb: current|archival")):
 @app.post(
     "/browse/doc-ids",
     response_model=BrowseIdsResponse,
-    summary="Lista doc_id i metadanych (FTS)",
+    summary="Lista doc_id i metadanych",
     description=(
-        "Zwraca listę doc_id (z tytułem, datą, is_active) dla całego korpusu na podstawie pełnotekstowego dopasowania w chunkach (FTS). "
-        "Parametry uproszczone: query, match (phrase|any|all), status (active|inactive|all), kinds. "
-        "Pole 'candidates_total' zwraca liczbę kandydatów przed limitem (po filtrach)."
+        "Zwraca listę dokumentów (doc_id, tytuł, data, is_active, doc_kind) spełniających zapytanie. "
+        "'candidates_total' to całkowita liczba kandydatów po filtrach i nie zależy od 'limit'. "
+        "Aby odpowiedzieć na „ile/czy istnieje…”, ustaw 'limit=0' i zwróć wyłącznie 'candidates_total'. "
+        "Gdy 'approx=false', traktuj wartości jako dokładne — nie wykonuj sond (np. 'limit:1'). "
+        "Parametry: query, match=phrase|any|all (domyślnie phrase), status=active|inactive|all, kinds."
     ),
     operation_id="rags_tool_browse_doc_ids",
     tags=["tools"],
@@ -689,8 +691,9 @@ def fts_rebuild():
     response_model=BrowseFacetsResponse,
     summary="Facety po dokumentach-kandydatach (treść)",
     description=(
-        "Zwraca proste rozkłady (np. is_active, year, doc_kind) dla kandydatów wybranych po treści. "
-        "Obsługuje 'kinds', 'entities' oraz 'text_match' (literalne dopasowanie w chunku)."
+        "Zwraca rozkłady (np. is_active, year, doc_kind) obliczone na zbiorze kandydatów wybranych po treści. "
+        "'total_docs' to liczba kandydatów po filtrach. Flaga 'approx' sygnalizuje przybliżenie listy, nie wpływa na 'total_docs'. "
+        "Obsługuje 'kinds', 'entities', 'entity_strategy' oraz 'text_match'."
     ),
     operation_id="rags_tool_browse_facets",
     tags=["tools"],
