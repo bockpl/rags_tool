@@ -561,7 +561,7 @@ def _stage1_select_documents(
                 if isinstance(sig, list):
                     s = (s + "\n\n" + ", ".join(map(str, sig))) if s else ", ".join(map(str, sig))
                 passages.append(_truncate_head_tail(s, settings.ranker_max_length))
-            score_map = _rerank_indices(q_text, passages, settings.rerank_top_n)
+            score_map = _rerank_indices(q_text, passages, getattr(settings, "rerank_top_n_max", 50))
             # Posortuj ocenione na początku; nieocenione zachowaj w oryginalnej kolejności za nimi
             scored = [(i, score_map[i2]) for i, i2 in enumerate(range(len(order_idx))) if i2 in score_map]
             # scored to (local_pos, score); przemapuj na globalne indeksy

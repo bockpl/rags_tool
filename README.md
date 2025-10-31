@@ -1,6 +1,48 @@
-# rags_tool (2.32.1)
+# rags_tool (2.36.2)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.37.0
+- Reranker: dodano twardy próg `RANKER_HARD_THRESHOLD` (domyślnie 0.65). Elementy poniżej tego progu nie są nigdy zwracane (brak dopełniania do K). Wciąż działa miękki próg `RANKER_SCORE_THRESHOLD` (domyślnie 0.9): najpierw wybierane są elementy ≥ soft‑progu, a jeśli brakuje — dopełniane są elementy z przedziału [HARD, SOFT).
+
+## Nowości w 2.36.2
+- Dokumentacja: doprecyzowano heurystyki `restrict_doc_ids` (minima: `top_m≥500`, `top_k≥50`, `per_doc_limit≥15`) – zgodnie z implementacją.
+
+## Nowości w 2.36.0
+- Reranker: synchronizacja limitów z parametrami żądania. `top_k` z requestu jest teraz respektowane (z limitem serwerowym). Zmieniono ustawienia na limity maksymalne:
+  - `RERANK_TOP_N_MAX` (zamiast `RERANK_TOP_N`) — górny limit kandydatów dla rerankera,
+  - `RETURN_TOP_K_MAX` (zamiast `RETURN_TOP_K`) — górny limit zwracanych bloków. 
+  Backend tnie do `min(req.top_k, RETURN_TOP_K_MAX)`. Wciąż honorowane są stare zmienne środowiskowe jako fallback.
+
+## Nowości w 2.35.0
+- Domyślna strategia encji dla `/search/query`: `entity_strategy=optional` (miękki boost bez twardego filtra). Ułatwia to uzyskanie wyników, gdy encje bywają różnie zapisywane lub nie są kompletne w payloadzie.
+
+## Nowości w 2.34.3
+- Search: poprawka filtra encji w `/search/query` — dopasowanie `entities` działa teraz bezpiecznie względem wielkości liter (uwzględnia formy raw + casefold). Ułatwia to wyszukiwanie typu `entity_strategy=must_any` dla skrótów wielkimi literami.
+
+## Nowości w 2.34.2
+- Admin UI: dodano gotowy przykład „Search (restricted by doc_ids)” wywołujący `/search/query` z polem `restrict_doc_ids` i podniesionymi limitami.
+
+## Nowości w 2.34.1
+- Search: możliwość zawężenia wyszukiwania do zadanego podzbioru dokumentów poprzez `restrict_doc_ids` (lista `doc_id`).
+  - Używaj TYLKO, gdy wcześniej pozyskałeś listę doc_id z `POST /browse/doc-ids` (np. po filtrowaniu/kindach/encjach).
+  - W przeciwnym razie nie ustawiaj tego pola — przeszukiwanie obejmie cały korpus zgodnie z trybem (`mode`).
+  - Wydajność: filtr wykonuje się pre‑search w Qdrant (indeks `keyword` na `doc_id`), działa szybko dla setek–tysięcy wartości.
+  - Heurystyka serwera dla `restrict_doc_ids`: aby nie ucinać cytatów, backend automatycznie podnosi minimalne limity:
+    - `top_m ≥ 500`,
+    - `top_k ≥ 50`,
+    - `per_doc_limit ≥ 15`.
+
+Przykład (POST /search/query):
+
+```
+{
+  "query": ["regulamin bezpieczeństwa danych"],
+  "top_k": 5,
+  "result_format": "blocks",
+  "restrict_doc_ids": ["<doc_id_1>", "<doc_id_2>", "<doc_id_3>"]
+}
+```
 
 ## Nowości w 2.31.0
 - Browse: dodano `text_match` — wymaganie literalnego dopasowania zapytania w treści chunków. Wartości: `none` (domyślnie), `phrase` (cała fraza jako substring), `any` (dowolny token), `all` (wszystkie tokeny). Działa w `POST /browse/doc-ids` i `POST /browse/facets`.
@@ -365,7 +407,7 @@ PY
 ## Nowości w 2.3.0
 - Globalny rerank po fuzji (RRF) i twarde cięcie do K, gdy reranker jest włączony:
   - Po zebraniu kandydatów z wielu zapytań i deduplikacji (po `(doc_id, section, chunk_id)`), wykonywany jest jeden globalny rerank wszystkich bloków.
-  - Zwracane są najwyżej `RETURN_TOP_K` bloków (konfigurowalne w `.env`; domyślnie 5). Parametry `RERANK_TOP_N` oraz `RETURN_TOP_K` są kontrolowane tylko po stronie serwera.
+  - Zwracane są najwyżej `min(top_k, RETURN_TOP_K_MAX)` bloków (cap konfigurowalny w `.env`). Parametry kapujące: `RERANK_TOP_N_MAX`, `RETURN_TOP_K_MAX`.
   - Jeżeli reranker jest wyłączony, zachowanie bez zmian: wynik jest ucinany do `top_k` z żądania.
   - Dzięki temu, niezależnie od liczby wariantów zapytania, klient otrzymuje „te kilka najlepszych” bloków.
 
@@ -440,8 +482,8 @@ PY
 ## Nowości w 1.7.0
 
 - Reranker (OpenAI‑compatible): dodano opcjonalny krok rerankingu po wyszukiwaniu wektorowym.
-  - Minimalne zmienne w `.env`: `RANKER_BASE_URL`, `RANKER_API_KEY`, `RANKER_MODEL`,
-    `RERANK_TOP_N`, `RETURN_TOP_K`, `RANKER_SCORE_THRESHOLD`, `RANKER_MAX_LENGTH`.
+- Minimalne zmienne w `.env`: `RANKER_BASE_URL`, `RANKER_API_KEY`, `RANKER_MODEL`,
+    `RERANK_TOP_N_MAX`, `RETURN_TOP_K_MAX`, `RANKER_SCORE_THRESHOLD`, `RANKER_MAX_LENGTH`.
   - Integracja w endpointzie `/search/query`: jeżeli ranker jest włączony, wyniki w formacie `blocks`
     są sortowane i filtrowane wg `ranker_score` po wywołaniu `POST {RANKER_BASE_URL}/v1/rerank`.
   - Wielozapytaniowość: lista zapytań jest łączona w jeden ciąg (separator ` || `) na potrzeby rankera.
@@ -643,8 +685,8 @@ export DEBUG="false"  # ustaw na "true", aby włączyć logi debugujące
 export RANKER_BASE_URL="http://127.0.0.1:8002"
 export RANKER_API_KEY="sk-ranker-xxx"
 export RANKER_MODEL="sdadas/polish-reranker-roberta-v3"
-export RERANK_TOP_N="50"           # ilu kandydatów przekazać do rankera
-export RETURN_TOP_K="5"            # ilu wyników zwrócić po rankingu
+export RERANK_TOP_N_MAX="50"       # maks. ilu kandydatów przekazać do rankera
+export RETURN_TOP_K_MAX="50"       # maks. ilu wyników zwrócić po rankingu
 export RANKER_SCORE_THRESHOLD="0.2"# próg minimalnego score
 export RANKER_MAX_LENGTH="2048"    # przybliżony limit znaków na jeden passage
 ```

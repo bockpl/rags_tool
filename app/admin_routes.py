@@ -44,6 +44,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
     {"id": "docs-stats", "path": "/docs/stats", "method": "GET", "label": "Statystyka dokumentów (FTS)"},
     {"id": "fts-rebuild", "path": "/fts/rebuild", "method": "POST", "label": "Odbuduj FTS (chunki → SQLite)", "body": "{}"},
     {"id": "browse-facets", "path": "/browse/facets", "method": "POST", "label": "Browse: facety (is_active, year, doc_kind)", "body": "{\n  \"query\": [\n    \"uchwała senatu\"\n  ],\n  \"top_m\": 100,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"fields\": [\"is_active\", \"year\", \"doc_kind\"]\n}"},
+    {"id": "search-query-restricted", "path": "/search/query", "method": "POST", "label": "Search (restricted by doc_ids)", "body": "{\n  \"query\": [\n    \"cytaty dla skrótu\"\n  ],\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"top_m\": 1200,\n  \"top_k\": 100,\n  \"per_doc_limit\": 50,\n  \"result_format\": \"blocks\",\n  \"restrict_doc_ids\": [\n    \"<doc_id_1>\",\n    \"<doc_id_2>\"\n  ]\n}"},
     {"id": "analysis-contradictions", "path": "/analysis/contradictions", "method": "POST", "label": "Analiza sprzeczności (sekcjami)", "body": "{\n  \"title\": \"Tytuł dokumentu\",\n  \"mode\": \"current\",\n  \"section_level\": \"ust\",\n  \"max_candidates_per_section\": 6,\n  \"include_archival_conflicts\": false,\n  \"confidence_threshold\": 0.6\n}"},
     # Multi-query flow mirroring /search/query
     {"id": "search-debug-embed-multi", "path": "/search/debug/embed_multi", "method": "POST", "label": "Search Debug (multi): 1) embed", "body": "{\n  \"query\": [\n    \"pierwsze zapytanie\",\n    \"drugie zapytanie\"\n  ],\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"top_m\": 100,\n  \"top_k\": 10,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"mmr_stage1\": true,\n  \"result_format\": \"blocks\",\n  \"summary_mode\": \"first\"\n}"},
@@ -485,7 +486,7 @@ def attach_admin_routes(app) -> None:
 
         # Settings parity with /search/query
         ranker_enabled = bool(settings.ranker_base_url and settings.ranker_model)
-        RERANK_TOP_N = max(1, int(settings.rerank_top_n))
+        RERANK_TOP_N_MAX = max(1, int(getattr(settings, "rerank_top_n_max", 50)))
         RRF_K = 60
         OVERSAMPLE = 2
 
@@ -509,7 +510,7 @@ def attach_admin_routes(app) -> None:
                 self.summary_mode = "first"
 
         for i, (q, qv) in enumerate(zip(req.queries, req.q_vecs)):
-            per_query_limit = RERANK_TOP_N if ranker_enabled else max(1, int(req.top_k) * OVERSAMPLE)
+            per_query_limit = (max(1, min(int(RERANK_TOP_N_MAX), max(int(req.top_k), int(req.top_k) * OVERSAMPLE)))) if ranker_enabled else max(1, int(req.top_k) * OVERSAMPLE)
             cand_ids = None
             doc_map = {}
             if req.cand_doc_ids_list is not None and i < len(req.cand_doc_ids_list):

@@ -423,6 +423,12 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
         "method": "POST",
         "body": "{\n  \"query\": [\n    \"Jak działa rags_tool?\",\n    \"architektura rags_tool\"\n  ],\n  \"top_m\": 10,\n  \"top_k\": 5,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"dense_weight\": 0.6,\n  \"sparse_weight\": 0.4,\n  \"mmr_lambda\": 0.3,\n  \"per_doc_limit\": 2,\n  \"score_norm\": \"minmax\",\n  \"rep_alpha\": 0.6,\n  \"mmr_stage1\": true,\n  \"summary_mode\": \"first\",\n  \"result_format\": \"blocks\"\n}",
     },
+    {
+        "id": "search-query-restricted",
+        "path": "/search/query",
+        "method": "POST",
+        "body": "{\n  \"query\": [\n    \"cytaty dla skrótu\"\n  ],\n  \"top_m\": 1200,\n  \"top_k\": 100,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"per_doc_limit\": 50,\n  \"result_format\": \"blocks\",\n  \"restrict_doc_ids\": [\n    \"<doc_id_1>\",\n    \"<doc_id_2>\"\n  ]\n}",
+    },
 ]
 
 app = FastAPI(title=f"{settings.app_name} OpenAPI Tool", version=settings.app_version)
@@ -1075,7 +1081,8 @@ def search_query(req: SearchQuery):
     - **summary_mode** (str): `"none" | "first" | "all"` (summary duplication strategy).
     - **result_format** (str): `"flat" | "grouped" | "blocks"` (`"blocks"` is default and recommended for tools).
     - **entities** (List[str], optional): encje wydobyte z intencji (nazwy/ID/lata/cytowane frazy). Gdy pominięte i `AUTO_EXTRACT_QUERY_ENTITIES=true`, backend użyje heurystyk dla boostingu.
-    - **entity_strategy** (str): `"auto" | "boost" | "must_any" | "must_all" | "exclude"`. Filtry `must_*`/`exclude` ograniczają pulę na Etapie 1 (i Etapie 2 w trybie skip Stage‑1); `boost`/`auto` dodają miękki bonus do rankingów.
+    - **restrict_doc_ids** (List[str], optional): lista doc_id zawężająca zakres wyszukiwania. UŻYWAJ TYLKO, gdy wcześniej pobrałeś kandydatów z POST /browse/doc-ids; w przeciwnym razie pozostaw puste.
+    - **entity_strategy** (str): `"optional" | "auto" | "boost" | "must_any" | "must_all" | "exclude"` (domyślnie `optional`). Filtry `must_*`/`exclude` ograniczają pulę na Etapie 1 (i Etapie 2 w trybie skip Stage‑1); `optional`/`auto`/`boost` dodają miękki bonus do rankingów bez twardego filtra.
 
     Recommendations for LLM callers
     --------------------------------
@@ -1130,8 +1137,8 @@ def search_query(req: SearchQuery):
     # Włączony wtedy, gdy podano zarówno BASE_URL, jak i MODEL.
     ranker_enabled = bool(settings.ranker_base_url and settings.ranker_model)
     # Minimalne parametry sterowane z .env (LLM nie może ich nadpisać):
-    RERANK_TOP_N = max(1, int(settings.rerank_top_n))
-    RETURN_TOP_K = max(1, int(settings.return_top_k))
+    RERANK_TOP_N_MAX = max(1, int(getattr(settings, "rerank_top_n_max", 50)))
+    RETURN_TOP_K_MAX = max(1, int(getattr(settings, "return_top_k_max", 50)))
     RANKER_THRESHOLD = float(settings.ranker_score_threshold)
     RANKER_MAX_LEN = max(1, int(settings.ranker_max_length))
     # Internal fusion defaults (hidden from tool schema/LLM)
@@ -1178,30 +1185,81 @@ def search_query(req: SearchQuery):
         strat = "auto"
     if strat in {"must_any", "must_all", "exclude"}:
         raw_list = getattr(req, "entities", None) or []
-        ents = []
-        seen = set()
+        # Build union of raw and casefolded forms to mitigate case-sensitive KEYWORD matching.
+        ordered_raw: List[str] = []
+        seen_raw: Set[str] = set()
         for v in raw_list:
-            s = str(v or "").casefold().strip()
-            s = " ".join(s.split())
-            if not s or s in seen:
+            s = str(v or "").strip()
+            if not s or s in seen_raw:
                 continue
-            seen.add(s)
-            ents.append(s)
-        if ents:
+            seen_raw.add(s)
+            ordered_raw.append(s)
+        ents_union: List[str] = []
+        seen_all: Set[str] = set()
+        for v in ordered_raw:
+            for cand in (v, v.casefold()):
+                if cand and cand not in seen_all:
+                    seen_all.add(cand)
+                    ents_union.append(cand)
+        if ents_union:
             base_must = list(getattr(flt, "must", []) or []) if flt else []
             base_must_not = list(getattr(flt, "must_not", []) or []) if flt else []
             if strat == "must_any":
-                base_must.append(qm.FieldCondition(key="entities", match=qm.MatchAny(any=ents)))
+                # Any of raw/casefold may match
+                base_must.append(qm.FieldCondition(key="entities", match=qm.MatchAny(any=ents_union)))
             elif strat == "must_all":
-                for e in ents:
-                    base_must.append(qm.FieldCondition(key="entities", match=qm.MatchValue(value=e)))
+                # For each original token require (raw OR casefold) using MatchAny
+                for v in ordered_raw:
+                    variants = [x for x in (v, v.casefold()) if x]
+                    base_must.append(qm.FieldCondition(key="entities", match=qm.MatchAny(any=variants)))
             elif strat == "exclude":
-                base_must_not.append(qm.FieldCondition(key="entities", match=qm.MatchAny(any=ents)))
+                base_must_not.append(qm.FieldCondition(key="entities", match=qm.MatchAny(any=ents_union)))
             flt = qm.Filter(
                 must=base_must or None,
                 must_not=base_must_not or None,
                 should=(getattr(flt, "should", None) if flt else None),
             )
+
+    # Optional restriction by explicit doc_id allowlist (use only with prior /browse/doc-ids)
+    restrict_ids_raw = getattr(req, "restrict_doc_ids", None) or []
+    if restrict_ids_raw:
+        seen: Set[str] = set()
+        restrict_ids: List[str] = []
+        for v in restrict_ids_raw:
+            s = str(v or "").strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            restrict_ids.append(s)
+            if len(restrict_ids) >= 2000:  # safety cap to keep filter manageable
+                break
+        if restrict_ids:
+            base_must = list(getattr(flt, "must", []) or []) if flt else []
+            base_must.append(qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=restrict_ids)))
+            flt = qm.Filter(
+                must=base_must or None,
+                must_not=(getattr(flt, "must_not", None) if flt else None),
+                should=(getattr(flt, "should", None) if flt else None),
+            )
+            # Heuristics: when search is restricted to a small allowlist, raise limits generously.
+            try:
+                n_ids = len(restrict_ids)
+                # Target limits scale with the size of the subset; clamp to safe caps.
+                target_top_m = min(500, max(500, 50 * n_ids))
+                target_top_k = min(50, max(50, 5 * n_ids))
+                target_per_doc = max(15, int(getattr(req, "per_doc_limit", 0) or 0))
+                upd: Dict[str, Any] = {}
+                if int(getattr(req, "top_m", 0) or 0) < target_top_m:
+                    upd["top_m"] = int(target_top_m)
+                if int(getattr(req, "top_k", 0) or 0) < target_top_k:
+                    upd["top_k"] = int(target_top_k)
+                if int(getattr(req, "per_doc_limit", 0) or 0) < target_per_doc:
+                    upd["per_doc_limit"] = int(target_per_doc)
+                if upd:
+                    req = req.model_copy(update=upd)
+            except Exception:
+                # Best-effort only; proceed with client-provided values on any error
+                pass
 
     # Batch-embed queries (with model-specific query prefix)
     q_vecs = embed_query(queries)
@@ -1213,8 +1271,11 @@ def search_query(req: SearchQuery):
 
     # Oversampled per-query limit to keep enough candidates after dedup/fusion
     # Jeśli ranker jest włączony, budżetujemy kandydatów pod rerank zamiast polegać na top_k z API.
+    # Final output size respects req.top_k but is capped by RETURN_TOP_K_MAX
+    final_k = min(max(1, int(req.top_k)), int(RETURN_TOP_K_MAX))
     if ranker_enabled:
-        per_query_limit = max(1, int(RERANK_TOP_N))
+        # Keep enough candidates per query for fusion/rerank, but respect server caps
+        per_query_limit = max(1, min(int(RERANK_TOP_N_MAX), max(final_k, int(req.top_k) * OVERSAMPLE)))
     else:
         per_query_limit = max(1, int(req.top_k) * OVERSAMPLE)
 
@@ -1287,28 +1348,50 @@ def search_query(req: SearchQuery):
                     for b in (blocks_payload or [])
                 ]
                 q_joined = " | ".join(queries)
-                top_n = min(max(1, int(settings.return_top_k)), len(passages))
+                top_n = min(len(passages), max(1, final_k))
                 rr = client.rerank(query=q_joined, documents=passages, top_n=top_n)
                 # Zamapuj ranking rankera do bloków (po indeksie wejściowym)
                 idx_to_block = {i: b for i, b in enumerate(blocks_payload or [])}
                 rr_sorted = sorted(rr, key=lambda r: float(r.get("relevance_score", 0.0)), reverse=True)
-                # Uzupełnij ranker_score i zastosuj per_doc_limit w kolejności rankera
+
+                # Gating progów rankera: miękki (RANKER_SCORE_THRESHOLD) i twardy (RANKER_HARD_THRESHOLD)
+                soft_thr = float(getattr(settings, "ranker_score_threshold", 0.0) or 0.0)
+                hard_thr = float(getattr(settings, "ranker_hard_threshold", 0.0) or 0.0)
+
+                def _score(r) -> float:
+                    try:
+                        return float(r.get("relevance_score", 0.0))
+                    except Exception:
+                        return 0.0
+
+                above_soft = [r for r in rr_sorted if _score(r) >= soft_thr]
+                mid_band = [r for r in rr_sorted if _score(r) >= hard_thr and _score(r) < soft_thr]
+
                 counts: Dict[str, int] = {}
-                selected_blocks = []
-                for r in rr_sorted:
-                    i = int(r.get("index", -1))
-                    if i < 0 or i >= len(idx_to_block):
-                        continue
-                    b = dict(idx_to_block[i])
-                    b["ranker_score"] = float(r.get("relevance_score", 0.0))
-                    did = str(b.get("doc_id", ""))
-                    if did:
-                        if counts.get(did, 0) >= max(1, int(req.per_doc_limit)):
+                selected_blocks: List[Dict[str, Any]] = []
+
+                def add_from(results_list):
+                    nonlocal selected_blocks
+                    for r in results_list:
+                        i = int(r.get("index", -1))
+                        if i < 0 or i >= len(idx_to_block):
                             continue
-                        counts[did] = counts.get(did, 0) + 1
-                    selected_blocks.append(b)
-                    if len(selected_blocks) >= top_n:
-                        break
+                        b = dict(idx_to_block[i])
+                        b["ranker_score"] = _score(r)
+                        did = str(b.get("doc_id", ""))
+                        if did:
+                            if counts.get(did, 0) >= max(1, int(req.per_doc_limit)):
+                                continue
+                            counts[did] = counts.get(did, 0) + 1
+                        selected_blocks.append(b)
+                        if len(selected_blocks) >= top_n:
+                            break
+
+                # Najpierw elementy ≥ soft_thr; jeśli za mało, dopełnij tylko elementami ≥ hard_thr
+                add_from(above_soft)
+                if len(selected_blocks) < top_n and mid_band:
+                    add_from(mid_band)
+                # Nigdy nie dokładamy elementów < hard_thr — wynik może być krótszy niż top_n
                 blocks_payload = selected_blocks
             except Exception as exc:
                 logger.warning("Ranker failed on merged blocks: %s", exc)
@@ -1322,7 +1405,7 @@ def search_query(req: SearchQuery):
                             continue
                         counts[did] = counts.get(did, 0) + 1
                     trimmed.append(b)
-                    if len(trimmed) >= max(1, int(req.top_k)):
+                    if len(trimmed) >= max(1, final_k):
                         break
                 blocks_payload = trimmed
         else:
@@ -1336,7 +1419,7 @@ def search_query(req: SearchQuery):
                         continue
                     counts[did] = counts.get(did, 0) + 1
                 trimmed.append(b)
-                if len(trimmed) >= max(1, int(req.top_k)):
+                if len(trimmed) >= max(1, final_k):
                     break
             blocks_payload = trimmed
 

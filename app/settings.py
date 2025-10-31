@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.33.0"
+    app_version: str = "2.37.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -104,6 +104,13 @@ class SummRAGSettings(BaseSettings):
             "- Gdy 'mode' = 'auto', traktuj zapytanie jako 'current' (obowiązujące akty), chyba że kontekst wyraźnie wskazuje inaczej: \n"
             "  • 'archiwal*', 'stara', 'wersja z ...' lub konkretne lata → użyj 'archival',\n"
             "  • 'wszystkie', 'cała historia', 'pełen zakres' → użyj 'all'.\n\n"
+            "Zawężanie po doc_id (ważne):\n"
+            "- Jeśli WCZEŚNIEJ pobrałeś listę kandydatów przez POST /browse/doc-ids, przekaż ją w polu 'restrict_doc_ids' (lista doc_id), aby ograniczyć zakres wyszukiwania.\n"
+            "- W przeciwnym razie nie ustawiaj 'restrict_doc_ids' — wyszukiwanie obejmuje cały korpus zgodnie z trybem.\n"
+            "- Heurystyka po stronie serwera (dla 'restrict_doc_ids'): automatycznie podnosimy N do minimalnych wartości, aby nie urywać cytatów:\n"
+            "  • top_m ≥ 500,\n"
+            "  • top_k ≥ 50,\n"
+            "  • per_doc_limit ≥ 15.\n\n"
             "Zachowanie:\n"
             "- Etap 1 selekcjonuje dokumenty po streszczeniach (hybryda dense + TF‑IDF, opcjonalny MMR).\n"
             "- Etap 2 wyszukuje w chunkach wybranych dokumentów i buduje zmergowane sekcje ('blocks').\n"
@@ -112,7 +119,7 @@ class SummRAGSettings(BaseSettings):
             "- Podawaj 2–8 zwięzłych wariantów 'query' (tytuły/sygnatury/datacje/słowa kluczowe).\n"
             "- Preferuj wynik 'result_format' = 'blocks' (domyślnie).\n"
             "- Utrzymuj 'top_k' w zakresie 5–10; kontroluj dominację jednego dokumentu 'per_doc_limit'.\n"
-            "- Jeśli masz encje (nazwy/ID/lata/cytaty), przekaż w 'entities' i wybierz 'entity_strategy' (auto/boost/must_any/must_all/exclude).\n\n"
+            "- Jeśli masz encje (nazwy/ID/lata/cytaty), przekaż w 'entities' i wybierz 'entity_strategy' (optional/auto/boost/must_any/must_all/exclude). Domyślnie 'optional'.\n\n"
             "Czego NIE robić tym endpointem:\n"
             "- Nie proś o liczbę dokumentów ani same listy doc_id/tytułów. Do tego używaj: \n"
             "  • POST /browse/doc-ids — lista doc_id + meta (tytuł, data, is_active, doc_kind) oraz candidates_total,\n"
@@ -235,12 +242,45 @@ class SummRAGSettings(BaseSettings):
     ranker_base_url: Optional[str] = Field(default=None, alias="RANKER_BASE_URL")
     ranker_api_key: Optional[str] = Field(default=None, alias="RANKER_API_KEY")
     ranker_model: Optional[str] = Field(default=None, alias="RANKER_MODEL")
-    rerank_top_n: int = Field(default=50, alias="RERANK_TOP_N")
-    return_top_k: int = Field(default=5, alias="RETURN_TOP_K")
+    # MAX caps (synchronised with request params at runtime). Legacy env names
+    # RERANK_TOP_N and RETURN_TOP_K are still accepted as fallbacks.
+    rerank_top_n_max: int = Field(default=50, alias="RERANK_TOP_N_MAX")
+    return_top_k_max: int = Field(default=50, alias="RETURN_TOP_K_MAX")
     ranker_score_threshold: float = Field(default=0.2, alias="RANKER_SCORE_THRESHOLD")
     # Długość kontekstu dla pojedynczego passage wysyłanego do rankera (znaki, przybliżenie).
     # Jeśli model ma twardy limit tokenów, rekomendujemy ustawić konserwatywnie (np. 2048 znaków).
     ranker_max_length: int = Field(default=2048, alias="RANKER_MAX_LENGTH")
+    # Absolute minimum score; items below are never returned (no backfill)
+    ranker_hard_threshold: float = Field(default=0.65, alias="RANKER_HARD_THRESHOLD")
+
+    # Backwards-compatibility: accept legacy env vars when MAX variants are not provided
+    @field_validator("rerank_top_n_max", mode="before")
+    @classmethod
+    def _fallback_rerank_top_n_max(cls, v):  # type: ignore[override]
+        if isinstance(v, str) and v.strip() != "":
+            return v
+        try:
+            import os
+            legacy = os.getenv("RERANK_TOP_N")
+            if legacy is not None and legacy.strip() != "":
+                return int(legacy)
+        except Exception:
+            pass
+        return v
+
+    @field_validator("return_top_k_max", mode="before")
+    @classmethod
+    def _fallback_return_top_k_max(cls, v):  # type: ignore[override]
+        if isinstance(v, str) and v.strip() != "":
+            return v
+        try:
+            import os
+            legacy = os.getenv("RETURN_TOP_K")
+            if legacy is not None and legacy.strip() != "":
+                return int(legacy)
+        except Exception:
+            pass
+        return v
 
     @property
     def qdrant_summary_collection(self) -> str:

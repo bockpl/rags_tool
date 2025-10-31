@@ -128,11 +128,12 @@ class SearchQuery(BaseModel):
         ),
     )
     entity_strategy: str = Field(
-        default="auto",
+        default="optional",
         description=(
-            "How to use entities: 'auto' (backend decides; typically soft boost), "
-            "'boost' (soft bonus only), 'must_any' (filter: any entity present), "
-            "'must_all' (filter: all entities present), 'exclude' (exclude docs/chunks with these entities)."
+            "How to use entities: 'optional' (soft bonus only; no hard filter and default), "
+            "'auto' (backend decides; typically similar to optional), 'boost' (soft bonus only), "
+            "'must_any' (filter: any entity present), 'must_all' (filter: all entities present), "
+            "'exclude' (exclude docs/chunks with these entities)."
         ),
     )
     # Runtime chunk-merging removed in 2.0.0. Blocks are built directly
@@ -141,6 +142,18 @@ class SearchQuery(BaseModel):
         "blocks",
         description=(
             "Response shape: flat|grouped|blocks. Default 'blocks' (recommended for tools). When 'blocks', merged evidence blocks are returned (text + path + score)."
+        ),
+    )
+
+    # Optional restriction to a known subset of documents by doc_id.
+    # LLM guidance: Use this ONLY when you have previously retrieved
+    # the candidate list via POST /browse/doc-ids. Otherwise leave it empty.
+    restrict_doc_ids: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional allowlist of doc_id to restrict search scope. "
+            "Use only when you already have a prior list of interesting documents (e.g., from POST /browse/doc-ids). "
+            "When omitted or empty, the whole corpus is considered."
         ),
     )
 
