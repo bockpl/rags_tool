@@ -371,13 +371,31 @@ def _apply_kind_filter(ids: Iterable[str], doc_map: Dict[str, Dict[str, Any]], k
 def list_document_minimal(params: BrowseParams, limit: int = 200) -> Tuple[List[Dict[str, Any]], bool, int]:
     """List up to `limit` candidate documents with minimal metadata.
 
-    Returns (docs, approx, candidates_total). Ordering is stable by title then doc_id.
+    Returns (docs, approx, candidates_total). Ordering by doc_date DESC (then doc_id).
     """
     ids, doc_map, approx = stage1_candidates(params)
     # Enrich with summaries (title/date) and infer kind
     _ensure_doc_meta_with_kind(ids, doc_map)
     # Apply kind filter post-selection
     selected = _apply_kind_filter(sorted(ids), doc_map, params.kinds)
+    # Order by doc_date DESC before applying limit
+    def _date_ord_from_map(did: str) -> int:
+        s = str((doc_map.get(did, {}) or {}).get("doc_date") or "").strip()
+        if not s or s.lower() == "brak":
+            return 0
+        try:
+            parts = s.split("-")
+            y = int(parts[0]) if len(parts) >= 1 and parts[0].isdigit() else 0
+            m = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+            d = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 0
+            if y <= 0:
+                return 0
+            m = max(0, min(12, m))
+            d = max(0, min(31, d))
+            return y * 10000 + m * 100 + d
+        except Exception:
+            return 0
+    selected.sort(key=lambda did: (_date_ord_from_map(did), did), reverse=True)
     candidates_total = len(selected)
     if limit and len(selected) > limit:
         approx = True
@@ -392,7 +410,7 @@ def list_document_minimal(params: BrowseParams, limit: int = 200) -> Tuple[List[
         }
         for did in selected
     ]
-    docs.sort(key=lambda x: ((x.get("title") or "").lower(), x.get("doc_id") or ""))
+    # Docs already follow selected order by date desc; no further sort needed
     return docs, approx, candidates_total
 
 
@@ -460,7 +478,7 @@ def list_doc_ids_via_fts(
         # No kind filter: we can use COUNT DISTINCT in FTS
         return [], False, int(fts_search_doc_count(queries, match=m, status=st))
 
-    ids = fts_search_doc_ids(queries, match=m, status=st, limit=max(1, int(limit)))
+    ids = fts_search_doc_ids(queries, match=m, status=st, limit=max(1, int(limit)), order="date_desc")
     # Enrich summaries and infer kind
     doc_map = fetch_doc_summaries(ids)
     # Attach inferred kind and filter
@@ -488,5 +506,5 @@ def list_doc_ids_via_fts(
         }
         for did in ids
     ]
-    docs.sort(key=lambda x: ((x.get("title") or "").lower(), x.get("doc_id") or ""))
+    # Preserve FTS order (date DESC). Do not resort by title.
     return docs, approx, candidates_total

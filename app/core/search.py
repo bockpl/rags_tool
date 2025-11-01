@@ -183,6 +183,71 @@ def _truncate_head_tail(text: str, limit: int) -> str:
     return (t[:head] + "\n...\n" + t[-tail:]).strip()
 
 
+# --- Date helpers ---
+def _doc_date_ord(value: Optional[str]) -> int:
+    """Convert doc_date string (YYYY, YYYY-MM, YYYY-MM-DD, or 'brak') to sortable ordinal.
+
+    Returns an integer YYYYMMDD where missing month/day are treated as 00.
+    Unknown/invalid values return 0 (oldest).
+    """
+    if not isinstance(value, str):
+        return 0
+    s = value.strip()
+    if not s or s.lower() == "brak":
+        return 0
+    try:
+        parts = s.split("-")
+        y = int(parts[0]) if len(parts) >= 1 and parts[0].isdigit() else 0
+        m = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+        d = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 0
+        if y <= 0:
+            return 0
+        m = max(0, min(12, m))
+        d = max(0, min(31, d))
+        return int(y) * 10000 + int(m) * 100 + int(d)
+    except Exception:
+        return 0
+
+
+def _apply_date_tiebreak_by_score(
+    ids_in_order: List[str],
+    primary_scores: List[float],
+    doc_map: Dict[str, Any],
+    *,
+    epsilon: float = 1e-9,
+) -> List[str]:
+    """Apply secondary ordering by doc_date (DESC) within near-equal score groups.
+
+    - `ids_in_order` corresponds positionally to `primary_scores`.
+    - Groups consecutive items where |score[i] - score[first]| <= epsilon and sorts
+      each group by doc_date DESC, then doc_id ASC for stability.
+    """
+    if not ids_in_order:
+        return ids_in_order
+    out: List[str] = []
+    i = 0
+    while i < len(ids_in_order):
+        j = i + 1
+        base = float(primary_scores[i] if i < len(primary_scores) else 0.0)
+        while j < len(ids_in_order):
+            sj = float(primary_scores[j] if j < len(primary_scores) else 0.0)
+            if abs(sj - base) <= float(epsilon):
+                j += 1
+            else:
+                break
+        group = ids_in_order[i:j]
+        group.sort(
+            key=lambda did: (
+                _doc_date_ord((doc_map.get(did, {}) or {}).get("doc_date")),
+                str(did),
+            ),
+            reverse=True,
+        )
+        out.extend(group)
+        i = j
+    return out
+
+
 # Call external reranker and map input index to score.
 def _rerank_indices(query: str, passages: List[str], top_n: int) -> Dict[int, float]:
     """Call the reranker and return a map index->score for scored items.
@@ -566,16 +631,56 @@ def _stage1_select_documents(
             scored = [(i, score_map[i2]) for i, i2 in enumerate(range(len(order_idx))) if i2 in score_map]
             # scored to (local_pos, score); przemapuj na globalne indeksy
             scored_global = [(order_idx[pos], sc) for (pos, sc) in scored]
-            scored_global.sort(key=lambda x: float(x[1]), reverse=True)
-            scored_ids = [list(doc_map.keys())[i] for (i, _) in scored_global]
-            not_scored_ids = [list(doc_map.keys())[i] for i in order_idx if i not in {idx for (idx, _) in scored_global}]
-            cand_doc_ids = scored_ids + not_scored_ids
-            cand_doc_ids = cand_doc_ids[: min(req.top_m, len(cand_doc_ids))]
+            # Build base score map from hybrid_rel for tie-break of unscored items
+            base_ids = list(doc_map.keys())
+            base_scores_map: Dict[str, float] = {base_ids[i]: float(hybrid_rel[i]) for i in range(len(base_ids))}
+
+            # Apply date tie-break within near-equal reranker scores
+            # Map reranked items back to doc_ids and scores
+            scored_pairs: List[Tuple[str, float]] = [
+                (base_ids[idx], float(sc)) for (idx, sc) in scored_global
+            ]
+            # Original order for not-scored (fallback to hybrid order)
+            not_scored_ids = [base_ids[i] for i in order_idx if i not in {idx for (idx, _) in scored_global}]
+
+            # Prepare epsilon from settings or default
+            try:
+                eps = float(getattr(settings, "score_tie_epsilon", 1e-9) or 1e-9)
+            except Exception:
+                eps = 1e-9
+
+            # Tie-break scored part
+            scored_ids_in_order = [p[0] for p in sorted(scored_pairs, key=lambda x: x[1], reverse=True)]
+            scored_scores = [p[1] for p in sorted(scored_pairs, key=lambda x: x[1], reverse=True)]
+            scored_ids_tiebroken = _apply_date_tiebreak_by_score(scored_ids_in_order, scored_scores, doc_map, epsilon=eps)
+
+            # Tie-break not scored part by base hybrid score
+            not_scores = [base_scores_map.get(d, 0.0) for d in not_scored_ids]
+            not_ids_tiebroken = _apply_date_tiebreak_by_score(not_scored_ids, not_scores, doc_map, epsilon=eps)
+
+            cand_doc_ids = (scored_ids_tiebroken + not_ids_tiebroken)[: min(req.top_m, len(scored_ids_tiebroken) + len(not_ids_tiebroken))]
         except Exception:
             # W przypadku błędu rankera, fallback do bazowego porządku
-            cand_doc_ids = [list(doc_map.keys())[i] for i in order_idx[: min(req.top_m, len(order_idx))]]
+            base_ids = list(doc_map.keys())
+            # Apply tie-break by date on hybrid_rel within epsilon
+            ids_in_order = [base_ids[i] for i in order_idx]
+            scores_in_order = [float(hybrid_rel[i]) for i in order_idx]
+            try:
+                eps = float(getattr(settings, "score_tie_epsilon", 1e-9) or 1e-9)
+            except Exception:
+                eps = 1e-9
+            ids_tiebroken = _apply_date_tiebreak_by_score(ids_in_order, scores_in_order, doc_map, epsilon=eps)
+            cand_doc_ids = ids_tiebroken[: min(req.top_m, len(ids_tiebroken))]
     else:
-        cand_doc_ids = [list(doc_map.keys())[i] for i in order_idx[: min(req.top_m, len(order_idx))]]
+        base_ids = list(doc_map.keys())
+        ids_in_order = [base_ids[i] for i in order_idx]
+        scores_in_order = [float(hybrid_rel[i]) for i in order_idx]
+        try:
+            eps = float(getattr(settings, "score_tie_epsilon", 1e-9) or 1e-9)
+        except Exception:
+            eps = 1e-9
+        ids_tiebroken = _apply_date_tiebreak_by_score(ids_in_order, scores_in_order, doc_map, epsilon=eps)
+        cand_doc_ids = ids_tiebroken[: min(req.top_m, len(ids_tiebroken))]
 
     return cand_doc_ids, doc_map
 

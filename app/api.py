@@ -78,7 +78,7 @@ from app.core.summary_cache import (
 from app.core.embedding import embed_passage
 from app.core.contradictions import analyze_contradictions
 from app.core import browse_service
-from app.core.fts import fts_doc_counts, rebuild_fts_from_qdrant, fts_count, ensure_fts_ready
+from app.core.fts import fts_doc_counts, rebuild_fts_from_qdrant, fts_count
 
 
 settings = get_settings()
@@ -446,16 +446,26 @@ def _startup_ensure_collections() -> None:
         _ensure_collections_cached()
         # Pre-warm TF-IDF vectorizers (content + summaries) to avoid cold-start latency
         try:
-            prepare_tfidf(force_rebuild=False)
+            # Load existing TF-IDF vectorizers if present (no fitting at startup)
+            prepare_tfidf(
+                all_chunks=None,
+                summary_corpus=None,
+                enable_sparse=True,
+                rebuild_tfidf=False,
+            )
             logger.info("TF-IDF vectorizers pre-warmed at startup")
         except Exception as exc:
             logger.warning("TF-IDF pre-warm skipped: %s", exc)
-        # Ensure local FTS index exists (may rebuild on first start)
+        # FTS index at startup: rebuild only if missing/empty; otherwise keep as-is
         try:
-            ensure_fts_ready(min_rows=1)
-            logger.info("FTS index ready at startup | rows=%d", int(fts_count()))
+            cnt_before = int(fts_count())
+            if cnt_before <= 0:
+                inserted = int(rebuild_fts_from_qdrant())
+                logger.info("FTS index rebuilt at startup | rows=%d", inserted)
+            else:
+                logger.info("FTS index present at startup | rows=%d", cnt_before)
         except Exception as exc:
-            logger.warning("FTS ensure failed at startup: %s", exc)
+            logger.warning("FTS init at startup failed: %s", exc)
         # Log key runtime switches for clarity
         logger.info(
             "Startup config | skip_stage1=%s dual_query_sparse=%s minimal_payload=%s batch_section_fetch=%s rrf_k=%d oversample=%d dense_for_mmr=%s",

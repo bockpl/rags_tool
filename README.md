@@ -1,6 +1,16 @@
-# rags_tool (2.36.2)
+# rags_tool (2.38.1)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.38.0
+- Search: zawsze włączone sortowanie wtórne po dacie dokumentu (`doc_date` DESC) jako tie‑break po score Etapu 1 (i ewentualnym rerankerze). Stosowane przed przycięciem listy kandydatów. Braki/„brak” traktowane jako najstarsze.
+- FTS5: rozszerzony schemat o `doc_date` i `doc_date_ord` (UNINDEXED) oraz zapytania z grupowaniem po `doc_id` i sortowaniem po `MAX(doc_date_ord)` dla wydajnego `ORDER BY` po dacie.
+- Migracja: przy starcie usługi, jeśli brakuje lokalnego indeksu FTS5 (lub jest pusty), zostanie on zbudowany od nowa (drop+create + zasilenie z Qdrant). Jeśli indeks istnieje, nie jest dotykany — zawsze możesz go przebudować ręcznie w Admin UI.
+- Browse: `POST /browse/doc-ids` zwraca listę dokumentów posortowaną malejąco po `doc_date` (gdy `limit>0`). Dla `limit=0` nadal zwracane jest wyłącznie dokładne `candidates_total`.
+
+## Nowości w 2.38.1
+- Startup: wyeliminowano ostrzeżenie przy pre‑warm TF‑IDF (dopasowano wywołanie `prepare_tfidf`).
+- FTS5: dodano okresowe logi postępu podczas przebudowy indeksu na starcie (np. „FTS rebuild: progress | rows=… pages=… elapsed=…s”), aby było jasne, dlaczego serwis chwilowo „wisi”.
 
 ## Nowości w 2.37.0
 - Reranker: dodano twardy próg `RANKER_HARD_THRESHOLD` (domyślnie 0.65). Elementy poniżej tego progu nie są nigdy zwracane (brak dopełniania do K). Wciąż działa miękki próg `RANKER_SCORE_THRESHOLD` (domyślnie 0.9): najpierw wybierane są elementy ≥ soft‑progu, a jeśli brakuje — dopełniane są elementy z przedziału [HARD, SOFT).
