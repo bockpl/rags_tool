@@ -49,6 +49,7 @@ def _naive_local_summary(text: str, max_sentences: int = 5) -> Dict[str, Any]:
         summary = summary[:600]
     return {
         "title": title,
+        "subtitle": "brak",
         "summary": summary,
         "signature": [],
         "entities": [],
@@ -95,6 +96,15 @@ def llm_summary(
                 title_str = " ".join(str(s).strip() for s in title_val if str(s).strip())
             else:
                 title_str = str(title_val or "").strip()
+            # subtitle (string; max 100 chars; default 'brak')
+            subtitle_val = data.get("subtitle", "")
+            if isinstance(subtitle_val, list):
+                subtitle_str = " ".join(str(s).strip() for s in subtitle_val if str(s).strip())
+            else:
+                subtitle_str = str(subtitle_val or "").strip()
+            subtitle_str = subtitle_str or "brak"
+            if len(subtitle_str) > 100:
+                subtitle_str = subtitle_str[:100]
             summary_val = str(data.get("summary", "")).strip()
             signature_val = data.get("signature", [])
             if isinstance(signature_val, str):
@@ -145,6 +155,7 @@ def llm_summary(
             if summary_val:
                 return {
                     "title": title_str,
+                    "subtitle": subtitle_str,
                     "summary": summary_val,
                     "signature": signature_list,
                     "entities": entities_list,
@@ -180,12 +191,18 @@ def llm_summary(
     entities_list: List[str] = []
     replacement_str = "brak"
     doc_date_str = "brak"
+    subtitle = "brak"
     for line in out.splitlines():
         m = re.match(r"^\s*title\s*:\s*(.*)$", line, re.IGNORECASE)
         if m:
             title_candidate = m.group(1).strip()
             if title_candidate:
                 title = title_candidate
+            continue
+        m = re.match(r"^\s*subtitle\s*:\s*(.*)$", line, re.IGNORECASE)
+        if m:
+            s = (m.group(1) or "").strip()
+            subtitle = s if s else "brak"
             continue
         m = re.match(r"^\s*summary\s*:\s*(.*)$", line, re.IGNORECASE)
         if m:
@@ -217,8 +234,13 @@ def llm_summary(
     if replacement_str.lower() == "brak":
         replacement_str = "brak"
     title = title or _default_title_from_text(text)
+    if not subtitle:
+        subtitle = "brak"
+    if len(subtitle) > 100:
+        subtitle = subtitle[:100]
     return {
         "title": title,
+        "subtitle": subtitle,
         "summary": summary,
         "signature": signature_list,
         "entities": entities_list,

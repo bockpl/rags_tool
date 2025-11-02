@@ -1,4 +1,4 @@
-# rags_tool (2.38.1)
+# rags_tool (2.39.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
@@ -1032,3 +1032,15 @@ PY
 
 ## Nowości w 2.32.1
 - doc_kind: wzorce wyrażeń regularnych są kotwiczone na początku tytułu (^) — tytuły zawsze zaczynają się słowem określającym rodzaj. Zmniejsza to fałszywe dopasowania.
+## Nowości w 2.39.0
+- Streszczenia: dodano pole `subtitle` (podtytuł) generowane przez LLM.
+  - JSON: nowy klucz `'subtitle'` (string; krótki jednoznaczny podtytuł, max 100 znaków, zawsze w mianowniku; jeśli nie można ustalić, wpisz dokładnie `'brak'`).
+  - Tryb tekstowy: nowa sekcja `SUBTITLE: ...` zaraz pod `TITLE:`.
+  - Sidecar (`.summary/*.json.gz`): zapis/odczyt `subtitle`.
+- Qdrant (kolekcja streszczeń): zapis pól `subtitle`, `subtitle_norm` (znormalizowany, do porównań), `doc_date_ord` (YYYYMMDD), `ingested_ts` (unix epoch). Dodano indeksy payload dla tych pól.
+- Ingest: wykrywanie konfliktów podtytułów — jeżeli istnieje kilka dokumentów z tym samym `subtitle_norm`, starsze zostają oznaczone `is_active=false`. Jako „najnowszy” wybierany jest dokument z największym `doc_date_ord`, a w razie remisu z większym `ingested_ts`.
+- Addytywność decyzji i logi:
+  - decyzje z `replacement` i `subtitle` są agregowane w jednym przebiegu; system stosuje wyłącznie przejścia 1→0 (nigdy nie re‑aktywuje),
+  - log zbiorczy: `Aggregated is_active updates | deactivate=… changed=… (rep=…, sub=…, sub_groups=…)`.
+ - Sidecar: podniesiono wersję schematu do `2.0.0` (tryb ścisły). Starsze pliki cache (1.x) są ignorowane.
+   - Jeśli chcesz odświeżyć cache, uruchom ingest z `force_regen_summary=true` lub usuń katalogi `.summary/` obok plików.

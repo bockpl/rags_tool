@@ -253,6 +253,7 @@ def _iter_document_records(
             vectors_block = sidecar.get("vectors", {})
             doc_sum = {
                 "title": str(summ_block.get("title") or ""),
+                "subtitle": str(summ_block.get("subtitle") or "brak") or "brak",
                 "summary": str(summ_block.get("summary") or ""),
                 "signature": list(summ_block.get("signature") or []),
                 "entities": [str(x).strip() for x in list(summ_block.get("entities") or []) if str(x).strip()],
@@ -272,6 +273,7 @@ def _iter_document_records(
                     path,
                     content_sha256=content_sha256,
                     title=str(doc_sum.get("title", "") or ""),
+                    subtitle=str(doc_sum.get("subtitle", "brak") or "brak"),
                     summary=summary_text,
                     signature=list(doc_sum.get("signature", []) or []),
                     entities=[str(x).strip() for x in list(doc_sum.get("entities", []) or []) if str(x).strip()],
@@ -296,6 +298,7 @@ def _iter_document_records(
             replacement_info = "brak"
         summary_sparse_parts = [
             doc_title,
+            str(doc_sum.get("subtitle", "")),
             doc_sum.get("summary", ""),
             " ".join(summary_signature),
         ]
@@ -315,6 +318,7 @@ def _iter_document_records(
             "path": str(path.resolve()),
             "chunks": chunks,
             "doc_title": doc_title,
+            "subtitle": str(doc_sum.get("subtitle", "brak") or "brak"),
             "doc_summary": doc_sum.get("summary", ""),
             "doc_signature": summary_signature,
             "doc_entities": entities_list,

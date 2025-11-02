@@ -50,6 +50,45 @@ qdrant = QdrantClient(
 )
 
 
+def _strip_diacritics(s: str) -> str:
+    import unicodedata
+    norm = unicodedata.normalize("NFD", s)
+    return "".join(ch for ch in norm if unicodedata.category(ch) != "Mn")
+
+
+def _normalize_subtitle(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return "brak"
+    text = _strip_diacritics(text).lower()
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "brak"
+    if len(text) > 100:
+        text = text[:100]
+    return text
+
+
+def _doc_date_ord(value: Optional[str]) -> int:
+    if not isinstance(value, str):
+        return 0
+    s = value.strip()
+    if not s or s.lower() == "brak":
+        return 0
+    try:
+        parts = s.split("-")
+        y = int(parts[0]) if len(parts) >= 1 and parts[0].isdigit() else 0
+        m = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+        d = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 0
+        if y <= 0:
+            return 0
+        m = max(0, min(12, m))
+        d = max(0, min(31, d))
+        return int(y) * 10000 + int(m) * 100 + int(d)
+    except Exception:
+        return 0
+
+
 def find_path_by_content_sha256(content_sha256: str, collection_base: Optional[str]) -> Optional[str]:
     """Return existing document path for a given content SHA-256, if present.
 
@@ -146,8 +185,12 @@ DEFAULT_PAYLOAD_INDEXES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("section_path", {"type": "keyword"}),
     ("section_path_prefixes", {"type": "keyword"}),
     ("doc_date", {"type": "keyword"}),
+    ("doc_date_ord", {"type": "integer"}),
     ("content_sha256", {"type": "keyword"}),
     ("entities", {"type": "keyword"}),
+    ("subtitle", {"type": "keyword"}),
+    ("subtitle_norm", {"type": "keyword"}),
+    ("ingested_ts", {"type": "integer"}),
 )
 
 
@@ -1075,6 +1118,8 @@ def build_and_upsert_points(
     replacement_relations: Dict[str, List[str]] = {}
     doc_paths: Dict[str, str] = {}
     doc_titles: Dict[str, str] = {}
+    seen_subtitle_norms: Set[str] = set()
+    now_ts = int(time.time())
 
     for rec in doc_records:
         doc_id = rec["doc_id"]
@@ -1097,6 +1142,9 @@ def build_and_upsert_points(
         if replacement_info.lower() == "brak":
             replacement_info = "brak"
         doc_title = str(rec.get("doc_title") or rec.get("title") or "").strip()
+        subtitle_raw = str(rec.get("subtitle", "") or "").strip()
+        subtitle = subtitle_raw if subtitle_raw else "brak"
+        subtitle_norm = _normalize_subtitle(subtitle)
         if not doc_title:
             try:
                 doc_title = pathlib.Path(path).stem
@@ -1106,6 +1154,8 @@ def build_and_upsert_points(
         doc_paths[doc_id] = path
         if doc_title:
             doc_titles[doc_id] = doc_title
+        if subtitle_norm and subtitle_norm != "brak":
+            seen_subtitle_norms.add(subtitle_norm)
         normalized_refs = _parse_replacement_list(replacement_info)
         if normalized_refs:
             replacement_relations[doc_id] = normalized_refs
@@ -1167,6 +1217,8 @@ def build_and_upsert_points(
             "is_active": is_active_flag,
             "point_type": "summary",
             "title": doc_title,
+            "subtitle": subtitle,
+            "subtitle_norm": subtitle_norm,
             "summary": doc_summary,
             "signature": doc_signature,
             "entities": doc_entities,
@@ -1181,6 +1233,8 @@ def build_and_upsert_points(
         summary_payload["replacement"] = replacement_info
         if doc_date_val:
             summary_payload["doc_date"] = doc_date_val
+            summary_payload["doc_date_ord"] = _doc_date_ord(doc_date_val)
+        summary_payload["ingested_ts"] = now_ts
         summary_vectors: Dict[str, Any] = {
             SUMMARY_VECTOR_NAME: summary_dense_vec,
         }
@@ -1251,13 +1305,59 @@ def build_and_upsert_points(
     if content_points:
         qdrant.upsert(collection_name=content_collection, points=content_points)
 
-    _apply_replacement_statuses(
-        summary_collection,
-        content_collection,
-        replacement_relations,
-        doc_paths,
-        doc_titles,
+    # Aggregate deactivation decisions from all rules to ensure additivity (only 1->0 changes).
+    deactivate_total: Set[str] = set()
+    # Replacement-based deactivations
+    rep_deactivate, rep_keep_active = _decisions_replacement(
+        replacement_relations, doc_paths, doc_titles
     )
+    deactivate_total |= rep_deactivate
+    # Per-rule preview log (replacement)
+    if rep_deactivate:
+        try:
+            curr_rep = _fetch_is_active_for_docs(summary_collection, list(rep_deactivate))
+            rep_changed = sum(1 for did in rep_deactivate if bool(curr_rep.get(did)) is True)
+        except Exception:
+            rep_changed = 0
+        logger.info(
+            "Replacement decisions | deactivate=%d changed_if_applied=%d",
+            len(rep_deactivate),
+            rep_changed,
+        )
+    # Subtitle-conflict deactivations
+    sub_deactivate, sub_keep_active, sub_groups = _decisions_subtitle(
+        summary_collection, seen_subtitle_norms
+    ) if seen_subtitle_norms else (set(), set(), 0)
+    deactivate_total |= sub_deactivate
+    # Per-rule preview log (subtitle)
+    if sub_deactivate or sub_groups:
+        try:
+            curr_sub = _fetch_is_active_for_docs(summary_collection, list(sub_deactivate)) if sub_deactivate else {}
+            sub_changed = sum(1 for did in sub_deactivate if bool(curr_sub.get(did)) is True)
+        except Exception:
+            sub_changed = 0
+        logger.info(
+            "Subtitle decisions | groups=%d deactivate=%d changed_if_applied=%d",
+            int(sub_groups),
+            len(sub_deactivate),
+            sub_changed,
+        )
+
+    # Compute how many flags will actually change (1->0)
+    changed = 0
+    if deactivate_total:
+        current = _fetch_is_active_for_docs(summary_collection, list(deactivate_total))
+        changed = sum(1 for did in deactivate_total if bool(current.get(did)) is True)
+        logger.info(
+            "Aggregated is_active updates | deactivate=%d changed=%d (rep=%d, sub=%d, sub_groups=%d)",
+            len(deactivate_total),
+            changed,
+            len(rep_deactivate),
+            len(sub_deactivate),
+            int(sub_groups),
+        )
+        for did in deactivate_total:
+            _set_is_active_flag(summary_collection, content_collection, did, False)
 
     return point_count
 
@@ -1328,13 +1428,23 @@ def _apply_replacement_statuses(
                     ref,
                 )
 
-    for doc_id in deactivate:
-        _set_is_active_flag(summary_collection, content_collection, doc_id, False)
-
-    for doc_id in keep_active:
-        if doc_id in deactivate:
-            continue
-        _set_is_active_flag(summary_collection, content_collection, doc_id, True)
+    # Summarize planned changes vs current state
+    # Legacy method retained for potential callers; now only logs an intention summary.
+    desired: Dict[str, bool] = {did: False for did in deactivate}
+    for did in keep_active:
+        if did not in deactivate:
+            desired[did] = True
+    if desired:
+        current = _fetch_is_active_for_docs(summary_collection, list(desired.keys()))
+        # Only count 1->0 as changes to keep semantics aligned with additivity
+        changes = sum(1 for did, want in desired.items() if want is False and bool(current.get(did)) is True)
+        logger.info(
+            "Replacement decisions (preview) | deactivate=%d activate=%d changed_if_applied=%d",
+            len(deactivate),
+            len([d for d in keep_active if d not in deactivate]),
+            changes,
+        )
+    # Do not mutate state here (aggregated application happens in build_and_upsert_points)
 
 
 def _set_is_active_flag(
@@ -1399,3 +1509,168 @@ def _collect_point_ids(collection: str, flt: qm.Filter) -> List[int]:
         )
         return []
     return ids
+
+
+def _fetch_is_active_for_docs(summary_collection: str, doc_ids: List[str]) -> Dict[str, Optional[bool]]:
+    """Fetch current is_active flags for provided doc_ids from summaries collection.
+
+    Returns a map doc_id -> is_active (or None when not found).
+    """
+    out: Dict[str, Optional[bool]] = {str(d): None for d in doc_ids}
+    if not doc_ids:
+        return out
+    try:
+        flt = qm.Filter(
+            must=[
+                qm.FieldCondition(key="doc_id", match=qm.MatchAny(any=list(out.keys()))),
+                qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary")),
+            ]
+        )
+        offset = None
+        while True:
+            res = qdrant.scroll(
+                collection_name=summary_collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=["doc_id", "is_active"],
+                with_vectors=False,
+            )
+            if isinstance(res, tuple):
+                records, offset = res
+            else:
+                records = getattr(res, "points", None)
+                offset = getattr(res, "next_page_offset", None)
+                if records is None:
+                    records = []
+            if not records:
+                break
+            for rec in records:
+                payload = getattr(rec, "payload", None) or {}
+                did = str(payload.get("doc_id") or "")
+                if did in out:
+                    out[did] = bool(payload.get("is_active")) if payload.get("is_active") is not None else None
+            if offset is None:
+                break
+    except Exception:
+        return out
+    return out
+
+
+def _decisions_subtitle(
+    summary_collection: str,
+    subtitle_norms: Set[str],
+) -> Tuple[Set[str], Set[str], int]:
+    """Return (deactivate_set, keep_active_set, groups_count) for subtitle conflicts.
+
+    Winner per group determined by doc_date_ord desc, then ingested_ts desc, then doc_id desc.
+    No side‑effects here; application is aggregated by the caller.
+    """
+    if not subtitle_norms:
+        return set(), set(), 0
+    deactivate: Set[str] = set()
+    keep_active: Set[str] = set()
+    groups = 0
+    for norm in subtitle_norms:
+        if not norm or norm == "brak":
+            continue
+        groups += 1
+        try:
+            flt = qm.Filter(
+                must=[
+                    qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary")),
+                    qm.FieldCondition(key="subtitle_norm", match=qm.MatchValue(value=norm)),
+                ]
+            )
+            records: List[Any] = []
+            offset = None
+            while True:
+                res = qdrant.scroll(
+                    collection_name=summary_collection,
+                    scroll_filter=flt,
+                    limit=256,
+                    offset=offset,
+                    with_payload=["doc_id", "doc_date", "ingested_ts"],
+                    with_vectors=False,
+                )
+                if isinstance(res, tuple):
+                    page, offset = res
+                else:
+                    page = getattr(res, "points", None)
+                    offset = getattr(res, "next_page_offset", None)
+                    if page is None:
+                        page = []
+                if not page:
+                    break
+                records.extend(page)
+                if offset is None:
+                    break
+            if not records:
+                continue
+            candidates: List[Tuple[int, int, str]] = []
+            for rec in records:
+                p = getattr(rec, "payload", None) or {}
+                did = str(p.get("doc_id") or "")
+                if not did:
+                    continue
+                dd = str(p.get("doc_date") or "").strip()
+                dd_ord = _doc_date_ord(dd)
+                its = 0
+                try:
+                    its = int(p.get("ingested_ts") or 0)
+                except Exception:
+                    its = 0
+                candidates.append((dd_ord, its, did))
+            if not candidates:
+                continue
+            candidates.sort(reverse=True)
+            winner = candidates[0][2]
+            keep_active.add(winner)
+            for _, __, did in candidates[1:]:
+                deactivate.add(did)
+        except Exception as exc:
+            logger.warning("Subtitle conflict scan failed | norm=%s error=%s", norm, exc)
+    return deactivate, keep_active, groups
+
+
+def _decisions_replacement(
+    replacements: Dict[str, List[str]],
+    doc_paths: Dict[str, str],
+    doc_titles: Optional[Dict[str, str]] = None,
+) -> Tuple[Set[str], Set[str]]:
+    """Return (deactivate_set, keep_active_set) for replacement relations.
+
+    No side‑effects here; application is aggregated by the caller.
+    """
+    if not replacements:
+        return set(), set()
+    name_to_doc: Dict[str, str] = {}
+    titles = doc_titles or {}
+    for doc_id, path in doc_paths.items():
+        norm_path = _normalize_reference(path)
+        name_to_doc[norm_path] = doc_id
+        path_obj = pathlib.Path(path)
+        name_to_doc[_normalize_reference(path_obj.name)] = doc_id
+        name_to_doc[_normalize_reference(path_obj.stem)] = doc_id
+        name_to_doc[doc_id] = doc_id
+        title_val = titles.get(doc_id)
+        if title_val:
+            name_to_doc[_normalize_reference(title_val)] = doc_id
+
+    deactivate: Set[str] = set()
+    keep_active: Set[str] = set(replacements.keys())
+    for replacer_id, refs in replacements.items():
+        for ref in refs:
+            norm_ref = _normalize_reference(ref)
+            candidate = name_to_doc.get(norm_ref)
+            if not candidate and norm_ref:
+                matches = {
+                    doc
+                    for name, doc in name_to_doc.items()
+                    if norm_ref in name and doc != replacer_id
+                }
+                if len(matches) == 1:
+                    candidate = matches.pop()
+            if candidate and candidate != replacer_id:
+                deactivate.add(candidate)
+    return deactivate, keep_active

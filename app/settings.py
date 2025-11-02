@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.38.1"
+    app_version: str = "2.39.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -49,7 +49,10 @@ class SummRAGSettings(BaseSettings):
             " dokładnie 'brak', jeśli brak informacji) oraz 'REPLACEMENT' (krótka lista tytułów, "
             " zawsze w mianowniku; może składać się jedynie z krótkich tytułów aktów zastępowanych, "
             " jeśli tekst jednolity wypisz wszystkie tytuły aktów które ujednolica, rozdziel „;”; "
-            " wpisz dokładnie 'brak', jeżeli brak danych). Bez komentarzy.\\n\\nFORMAT:\\nTITLE: ...\\nSUMMARY: ...\\nSIGNATURE: "
+            " wpisz dokładnie 'brak', jeżeli brak danych). Dodatkowo podaj 'SUBTITLE' "
+            " (string; krótki jednoznaczny podtytuł, najczęściej określa funkcje dokumentu "
+            " i nie jest numerowany, max 100 znaków, zawsze w mianowniku; jeśli nie umiesz "
+            " zidentyfikować wpisz dokładnie 'brak'). Bez komentarzy.\\n\\nFORMAT:\\nTITLE: ...\\nSUBTITLE: ...\\nSUMMARY: ...\\nSIGNATURE: "
             " lemma1, lemma2, ...\\nENTITIES: ...\\nDATE: ...\\nREPLACEMENT: ...\\n\\nTEKST:\\n"
         ),
         alias="SUMMARY_PROMPT",
@@ -58,7 +61,10 @@ class SummRAGSettings(BaseSettings):
         default=(
             "Zwróć wyłącznie poprawny JSON bez komentarzy i bez kodu. Klucze: 'title' (string; "
             " krótki jednoznaczny tytuł, preferuj pierwszą linię lub numer dokumentu; max 200 znaków, "
-            " zawsze w mianowniku), 'summary' (string; max 5 zdań po polsku), 'signature' "
+            " zawsze w mianowniku), 'subtitle' (string; krótki jednoznaczny podtytuł, "
+            " najczęściej określa funkcje dokumentu i nie jest numerowany, max 100 znaków, "
+            " zawsze w mianowniku; jeśli nie umiesz zidentyfikować wpisz dokładnie 'brak'), "
+            " 'summary' (string; max 5 zdań po polsku), 'signature' "
             " (lista 10–20 lematów kluczowych jako strings), 'entities' (lista stringów z nazwami "
             " własnymi/ID/zakresami dat), 'doc_date' (string; data wprowadzenia/ogłoszenia dokumentu "
             " w formacie 'YYYY-MM-DD' lub 'YYYY-MM' lub 'YYYY'; jeśli brak informacji wpisz dokładnie 'brak'), "

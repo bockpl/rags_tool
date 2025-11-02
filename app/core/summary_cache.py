@@ -4,20 +4,22 @@ Stores gzipped JSON files next to source documents under a hidden
 `.summary/` subdirectory. Cache contains only what is necessary to
 skip expensive LLM summarization and dense embedding of the summary.
 
-Schema (versioned by SCHEMA_VERSION):
+Schema (STRICT since 2.0.0; older sidecars are ignored):
 
 {
-  "schema_version": "1.0.0",
+  "schema_version": "2.0.0",
   "document": {
     "content_sha256": "..."
   },
-    "summary": {
+  "summary": {
     "title": "...",
+    "subtitle": "...",
     "summary": "...",
     "signature": ["..."],
     "entities": ["..."],
     "replacement": "brak | ...",
-    "doc_date": "YYYY-MM-DD | YYYY | brak"
+    "doc_date": "YYYY-MM-DD | YYYY | brak",
+    "is_active": true
   },
   "vectors": {
     "summary_dense": [float, ...]
@@ -35,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "2.0.0"
 
 
 # Compute SHA256 digest over raw file bytes (stable w.r.t extractor changes).
@@ -83,13 +85,30 @@ def load_sidecar(source: Path, expected_sha256: Optional[str] = None) -> Optiona
         return None
     if str(data.get("schema_version")) != SCHEMA_VERSION:
         return None
-    doc = data.get("document") or {}
+    doc = data.get("document")
+    if not isinstance(doc, dict):
+        return None
     if expected_sha256 and doc.get("content_sha256") != expected_sha256:
         return None
-    # Basic shape validation
-    summ = data.get("summary") or {}
-    vecs = data.get("vectors") or {}
-    if not (isinstance(summ.get("summary", ""), str) and isinstance(vecs.get("summary_dense", []), list)):
+    # Strict shape validation for 2.x sidecars
+    summ = data.get("summary")
+    vecs = data.get("vectors")
+    if not isinstance(summ, dict) or not isinstance(vecs, dict):
+        return None
+    required_summary_keys = {
+        "title": str,
+        "subtitle": str,
+        "summary": str,
+        "signature": list,
+        "entities": list,
+        "replacement": str,
+        "doc_date": str,
+        "is_active": bool,
+    }
+    for key, typ in required_summary_keys.items():
+        if key not in summ or not isinstance(summ[key], typ):
+            return None
+    if "summary_dense" not in vecs or not isinstance(vecs["summary_dense"], list):
         return None
     return data
 
@@ -100,6 +119,7 @@ def save_sidecar(
     *,
     content_sha256: str,
     title: str,
+    subtitle: str,
     summary: str,
     signature: list[str],
     entities: list[str],
@@ -118,6 +138,7 @@ def save_sidecar(
         "document": {"content_sha256": content_sha256},
         "summary": {
             "title": title,
+            "subtitle": subtitle or "brak",
             "summary": summary,
             "signature": signature,
             "entities": entities,
