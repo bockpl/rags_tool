@@ -410,7 +410,9 @@ class BrowseQuery(BaseModel):
             return [s] if s else []
 
         out = to_list_of_str(v)
-        return out if out else v
+        # Always return a list (possibly empty) so callers don't accidentally
+        # treat None as a literal string.
+        return out
 
 
 class BrowseIdsResponse(BaseModel):

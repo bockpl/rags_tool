@@ -618,9 +618,10 @@ def docs_list(mode: str = Query(..., description="Tryb: current|archival")):
     summary="Lista doc_id i metadanych",
     description=(
         "Zwraca listę dokumentów (doc_id, tytuł, data, is_active, doc_kind) spełniających zapytanie. "
-        "'candidates_total' to całkowita liczba kandydatów po filtrach i nie zależy od 'limit'. "
-        "Aby odpowiedzieć na „ile/czy istnieje…”, ustaw 'limit=0' i zwróć wyłącznie 'candidates_total'. "
-        "Gdy 'approx=false', traktuj wartości jako dokładne — nie wykonuj sond (np. 'limit:1'). "
+        "'candidates_total' to całkowita liczba kandydatów po filtrach (niezależna od 'limit'). "
+        "Dla 'limit=0' zawsze zwracana jest dokładna wartość 'candidates_total'. Jeżeli podano zawężenie treścią (query) lub filtrem 'kinds', "
+        "odpowiedź zawiera także próbkę do 15 dokumentów (ORDER BY doc_date DESC); 'approx=true' oznacza próbkę niepełną. "
+        "Gdy brak takich zawężeń (pełny korpus), 'limit=0' zwraca wyłącznie 'candidates_total' (bez listy). "
         "Parametry: query, match=phrase|any|all (domyślnie phrase), status=active|inactive|all, kinds."
     ),
     operation_id="rags_tool_browse_doc_ids",
@@ -641,19 +642,27 @@ def browse_doc_ids(req: DocIdsQuery, limit: int = Query(200, ge=0, le=5000)) -> 
         )
         took_ms = int((time.time() - t0) * 1000)
         return BrowseIdsResponse(took_ms=took_ms, total=0, approx=False, docs=[])
-    queries = req.query if isinstance(req.query, list) else [str(req.query)]
+    # Normalize query to a list of non-empty strings; avoid implicit str(None)
+    queries_raw = req.query
+    if not isinstance(queries_raw, list):
+        queries_raw = [queries_raw]
+    queries = [str(q or "").strip() for q in queries_raw if str(q or "").strip()]
     docs, approx, candidates_total = browse_service.list_doc_ids_via_fts(
-        [q for q in queries if str(q or "").strip()],
+        queries,
         match=str(getattr(req, "match", "phrase")),
         status=str(getattr(req, "status", "active")),
         kinds=getattr(req, "kinds", None),
         limit=int(limit),
     )
     took_ms = int((time.time() - t0) * 1000)
-    # If limit == 0, do not return docs list; only totals
-    if int(limit) <= 0:
-        return BrowseIdsResponse(took_ms=took_ms, total=0, approx=False, candidates_total=int(candidates_total), docs=[])
-    return BrowseIdsResponse(took_ms=took_ms, total=len(docs), approx=bool(approx), candidates_total=int(candidates_total), docs=docs)
+    # For limit=0 we may return a small sample (when filters present) along with accurate candidates_total.
+    return BrowseIdsResponse(
+        took_ms=took_ms,
+        total=len(docs),
+        approx=bool(approx),
+        candidates_total=int(candidates_total),
+        docs=docs,
+    )
 
 
 @app.get(

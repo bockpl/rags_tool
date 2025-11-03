@@ -458,27 +458,54 @@ def list_doc_ids_via_fts(
 ) -> Tuple[List[Dict[str, Any]], bool, int]:
     m = str(match or "phrase").lower()
     st = str(status or "active").lower()
-    # When limit <= 0, do not return docs list; just compute candidates_total accurately
+    # When limit <= 0, compute candidates_total and optionally return a small sample.
+    # Sample is returned only when any filter is set (query non-empty OR kinds specified OR status != 'active').
     if int(limit) <= 0:
-        if kinds:
-            # Fetch all matching doc_ids and filter by kind to count accurately
-            ids_all = fts_search_doc_ids_all(queries, match=m, status=st)
-            doc_map = fetch_doc_summaries(ids_all)
-            # Infer kind and filter
-            filtered = []
-            allowed = {str(k).strip().lower() for k in kinds if str(k).strip()}
-            for did in ids_all:
-                meta = doc_map.get(did, {})
-                dk = meta.get("doc_kind")
-                if not dk:
-                    dk = infer_doc_kind(meta.get("doc_title") or "", [])
-                if str(dk or "").lower() in allowed:
-                    filtered.append(did)
-            return [], False, len(filtered)
-        # No kind filter: we can use COUNT DISTINCT in FTS
-        return [], False, int(fts_search_doc_count(queries, match=m, status=st))
+        total = int(fts_search_doc_count(queries, match=m, status=st, kinds=kinds))
+        # Treat sample-worthy narrowing as presence of query text or kinds filter.
+        # Status alone (including 'all' or 'inactive') does not trigger sampling to avoid large payloads
+        # for generic count questions.
+        has_narrowing = bool(queries) or (kinds and len(kinds) > 0)
+        if not has_narrowing or total <= 0:
+            return [], False, total
+        sample_n = min(15, total)
+        ids = fts_search_doc_ids(
+            queries,
+            match=m,
+            status=st,
+            limit=sample_n,
+            kinds=kinds,
+            order="date_desc",
+        )
+        doc_map = fetch_doc_summaries(ids)
+        # Infer kind if missing (should be rare now that FTS stores doc_kind, but summaries may not have it)
+        for did in ids:
+            meta = doc_map.get(did, {})
+            if "doc_kind" not in meta:
+                title = meta.get("doc_title") or ""
+                meta["doc_kind"] = infer_doc_kind(title, [])
+                doc_map[did] = meta
+        docs = [
+            {
+                "doc_id": did,
+                "title": (doc_map.get(did, {}) or {}).get("doc_title"),
+                "doc_date": (doc_map.get(did, {}) or {}).get("doc_date"),
+                "is_active": (doc_map.get(did, {}) or {}).get("is_active"),
+                "doc_kind": (doc_map.get(did, {}) or {}).get("doc_kind"),
+            }
+            for did in ids
+        ]
+        # approx=True when sample does not cover all candidates
+        return docs, (total > sample_n), total
 
-    ids = fts_search_doc_ids(queries, match=m, status=st, limit=max(1, int(limit)), order="date_desc")
+    ids = fts_search_doc_ids(
+        queries,
+        match=m,
+        status=st,
+        limit=max(1, int(limit)),
+        kinds=kinds,
+        order="date_desc",
+    )
     # Enrich summaries and infer kind
     doc_map = fetch_doc_summaries(ids)
     # Attach inferred kind and filter
@@ -488,9 +515,7 @@ def list_doc_ids_via_fts(
             title = meta.get("doc_title") or ""
             meta["doc_kind"] = infer_doc_kind(title, [])
             doc_map[did] = meta
-    if kinds:
-        allowed = {str(k).strip().lower() for k in kinds if str(k).strip()}
-        ids = [did for did in ids if str((doc_map.get(did, {}) or {}).get("doc_kind") or "").lower() in allowed]
+    # kinds filter already applied via FTS; no need to filter again
     candidates_total = len(ids)
     approx = False
     if limit and len(ids) > int(limit):

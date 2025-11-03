@@ -1,12 +1,26 @@
-# rags_tool (2.39.0)
+# rags_tool (2.41.2)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
+
+## Nowości w 2.41.1
+- Browse: poprawka — przy `limit=0` próbka dokumentów nie jest dołączana, gdy jedynym parametrem jest `status` (np. `status=all` lub `status=inactive`). Próbka pojawia się tylko, gdy podano `query` lub `kinds`.
+
+## Nowości w 2.41.0
+- Browse: `POST /browse/doc-ids` przy `limit=0` zwraca teraz próbkę do 15 dokumentów (ORDER BY doc_date DESC) RAZEM z dokładnym `candidates_total`, jeśli podano zawężenie treścią (`query`) lub filtrem `kinds`. Gdy brak takich zawężeń (pełny korpus), `limit=0` zwraca wyłącznie `candidates_total` (bez listy). Pole `approx=true` sygnalizuje próbkę niepełną.
+
+## Nowości w 2.40.1
+- FTS5: uproszczono kod — usunięto automatyczną detekcję/migrację schematu. Jeśli zmienisz schemat (np. po aktualizacji), usuń plik indeksu FTS lub wywołaj `POST /fts/rebuild` aby odbudować indeks.
+
+## Nowości w 2.40.0
+- FTS5: rozszerzony schemat o `doc_kind` (UNINDEXED). Indeks FTS przechowuje teraz także rodzaj dokumentu (ASCII: np. `resolution`, `order`, `regulation`), wyznaczany heurystycznie z tytułu.
+- Browse: `/browse/doc-ids` z filtrem `kinds` liczy kandydatów SQL‑owo (COUNT DISTINCT doc_id) także dla `limit=0` — szybciej i bez skanowania metadanych.
+- Migracja: po zmianie schematu FTS usuń plik indeksu lub wywołaj `POST /fts/rebuild`; automatyczna migracja między schematami nie jest wykonywana.
 
 ## Nowości w 2.38.0
 - Search: zawsze włączone sortowanie wtórne po dacie dokumentu (`doc_date` DESC) jako tie‑break po score Etapu 1 (i ewentualnym rerankerze). Stosowane przed przycięciem listy kandydatów. Braki/„brak” traktowane jako najstarsze.
 - FTS5: rozszerzony schemat o `doc_date` i `doc_date_ord` (UNINDEXED) oraz zapytania z grupowaniem po `doc_id` i sortowaniem po `MAX(doc_date_ord)` dla wydajnego `ORDER BY` po dacie.
 - Migracja: przy starcie usługi, jeśli brakuje lokalnego indeksu FTS5 (lub jest pusty), zostanie on zbudowany od nowa (drop+create + zasilenie z Qdrant). Jeśli indeks istnieje, nie jest dotykany — zawsze możesz go przebudować ręcznie w Admin UI.
-- Browse: `POST /browse/doc-ids` zwraca listę dokumentów posortowaną malejąco po `doc_date` (gdy `limit>0`). Dla `limit=0` nadal zwracane jest wyłącznie dokładne `candidates_total`.
+- Browse: `POST /browse/doc-ids` zwraca listę dokumentów posortowaną malejąco po `doc_date` (gdy `limit>0`). Od 2.41.0 dla `limit=0` zwracane jest zawsze dokładne `candidates_total`, a przy zawężeniach (query lub kinds) także próbka do 15 dokumentów.
 
 ## Nowości w 2.38.1
 - Startup: wyeliminowano ostrzeżenie przy pre‑warm TF‑IDF (dopasowano wywołanie `prepare_tfidf`).
@@ -121,7 +135,7 @@ Uwaga: filtrowanie `kinds` wykonywane jest post‑selekcyjnie (bez zmian w schem
 ## Nowości w 2.24.0
 - Wydzielenie funkcji przeglądowych (LLM‑friendly) od wyszukiwania odpowiedzi:
   - Endpointy browse:
-    - `POST /browse/doc-ids` — lista `doc_id` z metadanymi (tytuł, `doc_date`, `is_active`, `doc_kind`) oraz pole `candidates_total` (liczba kandydatów po filtrach, niezależna od `limit`). Dla samej liczby ustaw `limit=0` i zaufaj `candidates_total` (nie stosuj sond `limit:1`).
+    - `POST /browse/doc-ids` — lista `doc_id` z metadanymi (tytuł, `doc_date`, `is_active`, `doc_kind`) oraz pole `candidates_total` (liczba kandydatów po filtrach, niezależna od `limit`). Dla samej liczby ustaw `limit=0` i odczytaj `candidates_total` (nie stosuj sond `limit:1`). Gdy podano zawężenia treścią (query) lub `kinds`, odpowiedź może zawierać próbkę do 15 dokumentów (`approx=true` sygnalizuje próbkę niepełną).
     - `POST /browse/facets` — proste rozkłady (facety) po kandydatach; obsługiwane pola: `is_active`, `year` (z `doc_date`).
   - Wspólne helpery dostępu do magazynu przeniesione do `app/core/store_access.py` i używane m.in. przez analizę sprzeczności.
   - Bez zmian w istniejącym endpointzie `POST /search/query` — podział dotyczy struktury i nowych tras.
@@ -1044,3 +1058,5 @@ PY
   - log zbiorczy: `Aggregated is_active updates | deactivate=… changed=… (rep=…, sub=…, sub_groups=…)`.
  - Sidecar: podniesiono wersję schematu do `2.0.0` (tryb ścisły). Starsze pliki cache (1.x) są ignorowane.
    - Jeśli chcesz odświeżyć cache, uruchom ingest z `force_regen_summary=true` lub usuń katalogi `.summary/` obok plików.
+## Nowości w 2.41.2
+- Browse: twarda normalizacja pola `query` w `/browse/doc-ids` (po stronie endpointu) — unika sytuacji, w której `null` byłby traktowany jako string "None" i aktywował próbkowanie przy `limit=0`.

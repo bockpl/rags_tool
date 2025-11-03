@@ -38,17 +38,18 @@ def _connect() -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Ensure FTS5 table exists with the current schema.
-
-    Note: service rebuilds the index at startup, so no migration logic here.
-    """
+    """Ensure FTS5 table exists with the current schema (includes doc_kind)."""
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts "
         "USING fts5("
-        "text, ents, doc_id UNINDEXED, is_active UNINDEXED, doc_date UNINDEXED, doc_date_ord UNINDEXED, "
+        "text, ents, doc_id UNINDEXED, is_active UNINDEXED, doc_date UNINDEXED, doc_date_ord UNINDEXED, doc_kind UNINDEXED, "
         "tokenize='unicode61'"
         ");"
     )
+
+
+# No schema migration logic is kept intentionally: if schema changes,
+# drop the FTS database file or call /fts/rebuild to recreate from Qdrant.
 
 
 def _doc_date_ord(value: Optional[str]) -> int:
@@ -72,9 +73,13 @@ def _doc_date_ord(value: Optional[str]) -> int:
         return 0
 
 
-def _fetch_doc_dates_map() -> Dict[str, str]:
-    """Fetch a map doc_id -> doc_date from summaries collection."""
-    out: Dict[str, str] = {}
+def _fetch_doc_meta_map() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Fetch maps: doc_id->doc_date and doc_id->doc_kind from summaries.
+
+    doc_kind is inferred from title when not available in payload.
+    """
+    out_dates: Dict[str, str] = {}
+    out_kinds: Dict[str, str] = {}
     try:
         flt = qm.Filter(
             must=[qm.FieldCondition(key="point_type", match=qm.MatchValue(value="summary"))]
@@ -86,7 +91,7 @@ def _fetch_doc_dates_map() -> Dict[str, str]:
                 scroll_filter=flt,
                 limit=256,
                 offset=offset,
-                with_payload=["doc_id", "doc_date"],
+                with_payload=["doc_id", "doc_date", "title", "doc_kind"],
                 with_vectors=False,
             )
             if isinstance(res, tuple):
@@ -103,13 +108,20 @@ def _fetch_doc_dates_map() -> Dict[str, str]:
                 did = p.get("doc_id")
                 if not did:
                     continue
+                did_s = str(did)
                 dd = str(p.get("doc_date") or "").strip()
-                out[str(did)] = dd
+                out_dates[did_s] = dd
+                kind = p.get("doc_kind")
+                if not kind:
+                    from app.core.doc_kind import infer_doc_kind
+
+                    kind = infer_doc_kind(p.get("title") or "", [])
+                out_kinds[did_s] = str(kind or "other").strip().lower() or "other"
             if offset is None:
                 break
     except Exception:
-        return out
-    return out
+        return out_dates, out_kinds
+    return out_dates, out_kinds
 
 
 def fts_count(conn: Optional[sqlite3.Connection] = None) -> int:
@@ -142,15 +154,15 @@ def rebuild_fts_from_qdrant() -> int:
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts "
             "USING fts5("
-            "text, ents, doc_id UNINDEXED, is_active UNINDEXED, doc_date UNINDEXED, doc_date_ord UNINDEXED, "
+            "text, ents, doc_id UNINDEXED, is_active UNINDEXED, doc_date UNINDEXED, doc_date_ord UNINDEXED, doc_kind UNINDEXED, "
             "tokenize='unicode61'"
             ");"
         )
     inserted = 0
     pages = 0
-    # Preload document dates (per doc_id) from summaries
-    doc_dates = _fetch_doc_dates_map()
-    logger.info("FTS rebuild: loaded doc_dates | count=%d", len(doc_dates))
+    # Preload document meta (per doc_id) from summaries
+    doc_dates, doc_kinds = _fetch_doc_meta_map()
+    logger.info("FTS rebuild: loaded doc meta | dates=%d kinds=%d", len(doc_dates), len(doc_kinds))
     # Scroll all chunks
     base_must = [
         qm.FieldCondition(key="point_type", match=qm.MatchValue(value="chunk")),
@@ -176,7 +188,7 @@ def rebuild_fts_from_qdrant() -> int:
         if not records:
             break
         pages += 1
-        rows: List[Tuple[str, str, str, int, str, int]] = []
+        rows: List[Tuple[str, str, str, int, str, int, str]] = []
         for rec in records:
             p = rec.payload or {}
             did = p.get("doc_id")
@@ -191,13 +203,15 @@ def rebuild_fts_from_qdrant() -> int:
                 ents_text = ents_val
             else:
                 ents_text = ""
-            dd = doc_dates.get(str(did)) or ""
+            did_s = str(did)
+            dd = doc_dates.get(did_s) or ""
             dd_ord = _doc_date_ord(dd)
-            rows.append((str(txt), str(ents_text or ""), str(did), is_act, dd, dd_ord))
+            dk = doc_kinds.get(did_s) or "other"
+            rows.append((str(txt), str(ents_text or ""), did_s, is_act, dd, dd_ord, str(dk)))
         if rows:
             with conn:
                 conn.executemany(
-                    "INSERT INTO chunks_fts(text, ents, doc_id, is_active, doc_date, doc_date_ord) VALUES (?, ?, ?, ?, ?, ?);",
+                    "INSERT INTO chunks_fts(text, ents, doc_id, is_active, doc_date, doc_date_ord, doc_kind) VALUES (?, ?, ?, ?, ?, ?, ?);",
                     rows,
                 )
             inserted += len(rows)
@@ -214,18 +228,24 @@ def rebuild_fts_from_qdrant() -> int:
 
 
 def ensure_fts_ready(min_rows: int = 1) -> None:
+    """Ensure FTS exists and has at least `min_rows`; rebuild if empty.
+
+    No automatic schema migration is performed. If the schema changes,
+    remove the FTS file or call /fts/rebuild to recreate it.
+    """
+    conn: Optional[sqlite3.Connection] = None
     try:
         conn = _connect()
         cnt = fts_count(conn)
         if cnt >= int(min_rows):
-            conn.close()
             return
     except Exception:
         # Attempt rebuild on any error
         pass
     finally:
         try:
-            conn.close()
+            if conn is not None:
+                conn.close()
         except Exception:
             pass
     rebuild_fts_from_qdrant()
@@ -269,6 +289,7 @@ def fts_search_doc_ids(
     match: str = "phrase",
     status: str = "active",
     limit: int = 1000,
+    kinds: Optional[List[str]] = None,
     order: str = "none",  # none|date_desc
 ) -> List[str]:
     """Return distinct doc_ids matching queries according to FTS 'match' and status.
@@ -291,6 +312,12 @@ def fts_search_doc_ids(
             where += " AND is_active = 1"
         elif status == "inactive":
             where += " AND is_active = 0"
+        # Optional kind filter
+        kinds_list = [str(k).strip().lower() for k in (kinds or []) if str(k).strip()]
+        if kinds_list:
+            placeholders = ",".join(["?"] * len(kinds_list))
+            where += f" AND doc_kind IN ({placeholders})"
+            params.extend(kinds_list)
         if str(order or "none").lower() == "date_desc":
             sql = f"SELECT doc_id, MAX(doc_date_ord) as dd FROM chunks_fts WHERE {where} GROUP BY doc_id ORDER BY dd DESC LIMIT ?;"
             params.append(int(max(1, limit)))
@@ -340,7 +367,9 @@ def fts_doc_counts() -> Tuple[int, int, int]:
             pass
 
 
-def fts_search_doc_count(queries: List[str], *, match: str = "phrase", status: str = "active") -> int:
+def fts_search_doc_count(
+    queries: List[str], *, match: str = "phrase", status: str = "active", kinds: Optional[List[str]] = None
+) -> int:
     """Return COUNT(DISTINCT doc_id) for a query/status using FTS.
 
     When queries are empty, counts all documents under status filter.
@@ -360,6 +389,11 @@ def fts_search_doc_count(queries: List[str], *, match: str = "phrase", status: s
             where += " AND is_active = 1"
         elif status == "inactive":
             where += " AND is_active = 0"
+        kinds_list = [str(k).strip().lower() for k in (kinds or []) if str(k).strip()]
+        if kinds_list:
+            placeholders = ",".join(["?"] * len(kinds_list))
+            where += f" AND doc_kind IN ({placeholders})"
+            params.extend(kinds_list)
         sql = f"SELECT COUNT(DISTINCT doc_id) FROM chunks_fts WHERE {where};"
         cur = conn.execute(sql, params)
         row = cur.fetchone()
@@ -372,7 +406,7 @@ def fts_search_doc_count(queries: List[str], *, match: str = "phrase", status: s
 
 
 def fts_search_doc_ids_all(
-    queries: List[str], *, match: str = "phrase", status: str = "active", order: str = "none"
+    queries: List[str], *, match: str = "phrase", status: str = "active", kinds: Optional[List[str]] = None, order: str = "none"
 ) -> List[str]:
     """Return all distinct doc_ids for query/status (no limit).
 
@@ -393,6 +427,11 @@ def fts_search_doc_ids_all(
             where += " AND is_active = 1"
         elif status == "inactive":
             where += " AND is_active = 0"
+        kinds_list = [str(k).strip().lower() for k in (kinds or []) if str(k).strip()]
+        if kinds_list:
+            placeholders = ",".join(["?"] * len(kinds_list))
+            where += f" AND doc_kind IN ({placeholders})"
+            params.extend(kinds_list)
         if str(order or "none").lower() == "date_desc":
             sql = f"SELECT doc_id, MAX(doc_date_ord) as dd FROM chunks_fts WHERE {where} GROUP BY doc_id ORDER BY dd DESC;"
             cur = conn.execute(sql, params)
