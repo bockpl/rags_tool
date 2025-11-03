@@ -241,6 +241,74 @@ class MergedBlock(BaseModel):
 SearchResponse.model_rebuild()
 
 
+# --- Quotes (find occurrences in restricted documents) ---
+
+class QuotesFindRequest(BaseModel):
+    """Find exact occurrences of a query within a restricted set of documents.
+
+    Requires a prior list of doc_ids (e.g., from POST /browse/doc-ids). Enumerates
+    occurrences at the chosen granularity without using MMR/top_k. Always paginated.
+    """
+
+    restrict_doc_ids: List[str] = Field(..., description="List of doc_id to scan. Required.")
+    query: object = Field(..., description="Phrase or tokens to search for. Accepts string or list of strings.")
+    match: str = Field(
+        "phrase",
+        description="Match mode: phrase|any|all|regex. Default 'phrase' (exact substring, case-insensitive by default).",
+    )
+    case_sensitive: bool = Field(False, description="Case-sensitive matching. Default false (case-insensitive).")
+    granularity: str = Field(
+        "occurrence",
+        description="Result granularity: occurrence|chunk. 'occurrence' returns each match; 'chunk' deduplicates per chunk.",
+    )
+    context_chars: int = Field(80, ge=0, le=400, description="Left/right context size around a match (characters).")
+    limit: int = Field(200, ge=1, le=1000, description="Max items returned in one page.")
+    cursor: Optional[str] = Field(default=None, description="Opaque cursor for pagination; pass from previous response.")
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def _coerce_query(cls, v):
+        def to_list_of_str(x):
+            if x is None:
+                return []
+            if isinstance(x, str):
+                s = x.strip()
+                return [s] if s else []
+            if isinstance(x, (list, tuple, set)):
+                acc = []
+                for it in x:
+                    acc.extend(to_list_of_str(it))
+                return acc
+            s = str(x).strip()
+            return [s] if s else []
+        out = to_list_of_str(v)
+        return out if out else v
+
+
+class QuoteItem(BaseModel):
+    doc_id: str
+    path: str
+    title: Optional[str] = None
+    doc_date: Optional[str] = None
+    is_active: Optional[bool] = None
+    section: Optional[str] = None
+    chunk_id: int
+    start: int
+    end: int
+    left_context: Optional[str] = None
+    text: str
+    right_context: Optional[str] = None
+
+
+class QuotesFindResponse(BaseModel):
+    took_ms: int
+    total_quotes: int
+    returned: int
+    complete: bool
+    next_cursor: Optional[str] = None
+    quotes: List[QuoteItem]
+
+
 class SparseQuery(BaseModel):
     indices: List[int]
     values: List[float]

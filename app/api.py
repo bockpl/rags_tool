@@ -32,6 +32,9 @@ from app.core.search import (
     _stage2_select_chunks,
     _shape_results,
     _truncate_head_tail,
+    _fetch_doc_chunks,
+    _canonical_section_label,
+    _fetch_doc_summaries,
 )
 from app.core.summary import llm_summary
 from app.core.ranker_client import OpenAIReranker
@@ -55,6 +58,9 @@ from app.models import (
     BrowseFacetsResponse,
     DocIdsQuery,
     DocStatsResponse,
+    QuotesFindRequest,
+    QuotesFindResponse,
+    QuoteItem,
 )
 from app.qdrant_utils import (
     build_and_upsert_points,
@@ -166,6 +172,59 @@ def _qdrant_available_or_log(context: str) -> bool:
             exc,
         )
         return False
+
+
+# --- Quotes/find helpers ---
+
+def _decode_cursor(cur: Optional[str]) -> Optional[Dict[str, int]]:
+    if not cur:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(cur.encode("utf-8")).decode("utf-8")
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            return None
+        got = {k: int(obj.get(k, 0) or 0) for k in ("doc_index", "chunk_index", "occ_index")}
+        return got
+    except Exception:
+        return None
+
+
+def _encode_cursor(state: Dict[str, int]) -> str:
+    payload = json.dumps(state, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("utf-8")
+
+
+def _tokenize(s: str) -> List[str]:
+    return re.findall(r"\w+", s or "")
+
+
+def _find_all(text: str, needle: str, *, case_sensitive: bool) -> List[Tuple[int, int]]:
+    if not needle:
+        return []
+    if case_sensitive:
+        t = text
+        n = needle
+    else:
+        t = text.casefold()
+        n = needle.casefold()
+    out: List[Tuple[int, int]] = []
+    i = 0
+    L = len(n)
+    if L == 0:
+        return []
+    while True:
+        i = t.find(n, i)
+        if i == -1:
+            break
+        out.append((i, i + L))
+        i = i + L
+    return out
+
+
+def _merge_and_sort_occurrences(items: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Sort occurrences by start, then end; keep duplicates as separate entries."""
+    return sorted(items, key=lambda p: (int(p[0]), int(p[1])))
 
 
 # Scan filesystem for supported files matching pattern.
@@ -682,6 +741,233 @@ def docs_stats() -> DocStatsResponse:
         return DocStatsResponse(total_docs=0, active_docs=0, inactive_docs=0)
     total, active, inactive = fts_doc_counts()
     return DocStatsResponse(total_docs=int(total), active_docs=int(active), inactive_docs=int(inactive))
+
+
+@app.post(
+    "/quotes/find",
+    response_model=QuotesFindResponse,
+    summary="Quotes: znajdź wystąpienia w wybranych dokumentach",
+    description=(
+        "Enumeruje wystąpienia frazy/tokenów w treści dokumentów ograniczonych przez 'restrict_doc_ids'. "
+        "Nie używa MMR ani top_k; paginuje deterministycznie po doc_id→chunk_id→pozycja. "
+        "Wymaga wcześniejszego pozyskania listy doc_id (np. z POST /browse/doc-ids)."
+    ),
+    tags=["tools"],
+)
+def quotes_find(req: QuotesFindRequest) -> QuotesFindResponse:
+    t0 = time.time()
+    if not _qdrant_available_or_log("/quotes/find"):
+        took_ms = int((time.time() - t0) * 1000)
+        return QuotesFindResponse(took_ms=took_ms, total_quotes=0, returned=0, complete=True, next_cursor=None, quotes=[])
+    # Validate doc_ids
+    raw_ids = req.restrict_doc_ids or []
+    seen: Set[str] = set()
+    doc_ids: List[str] = []
+    for v in raw_ids:
+        s = str(v or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        doc_ids.append(s)
+    if not doc_ids:
+        raise HTTPException(status_code=422, detail="quotes/find wymaga niepustego 'restrict_doc_ids'.")
+
+    # Normalize queries
+    q_raw = req.query
+    if not isinstance(q_raw, list):
+        q_raw = [q_raw]
+    queries = [str(x or "").strip() for x in q_raw if str(x or "").strip()]
+    if not queries:
+        raise HTTPException(status_code=422, detail="Parametr 'query' musi zawierać frazę lub listę fraz.")
+
+    match = (req.match or "phrase").strip().lower()
+    if match not in {"phrase", "any", "all", "regex"}:
+        match = "phrase"
+    case_sensitive = bool(req.case_sensitive)
+    granularity = (req.granularity or "occurrence").strip().lower()
+    if granularity not in {"occurrence", "chunk"}:
+        granularity = "occurrence"
+    ctx = int(max(0, min(400, int(getattr(req, "context_chars", 80) or 80))))
+    limit = int(max(1, min(1000, int(getattr(req, "limit", 200) or 200))))
+
+    # Prepare search objects
+    tokens: List[str] = []
+    pattern: Optional[re.Pattern[str]] = None
+    if match == "phrase":
+        phrases = queries
+    elif match in {"any", "all"}:
+        for q in queries:
+            tokens.extend(_tokenize(q))
+        # stabilize and dedupe preserving order
+        seen_tok: Set[str] = set()
+        toks: List[str] = []
+        for t in tokens:
+            if t and t not in seen_tok:
+                seen_tok.add(t)
+                toks.append(t)
+        tokens = toks
+        if not tokens:
+            raise HTTPException(status_code=422, detail="Brak tokenów do wyszukania (match=any/all)")
+        phrases = []
+    else:  # regex
+        try:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            pattern = re.compile("|".join(f"({p})" for p in queries), flags)
+        except re.error as exc:
+            raise HTTPException(status_code=422, detail=f"Błędny regex: {exc}") from exc
+        phrases = []
+
+    # Optional: fetch doc metadata (titles/dates) once
+    try:
+        doc_meta = _fetch_doc_summaries(doc_ids)
+    except Exception:
+        doc_meta = {}
+
+    # Cursor decode
+    cur = _decode_cursor(req.cursor)
+    start_doc_i = int(cur.get("doc_index", 0)) if cur else 0
+    start_chunk_i = int(cur.get("chunk_index", 0)) if cur else 0
+    start_occ_i = int(cur.get("occ_index", 0)) if cur else 0
+
+    quotes: List[QuoteItem] = []
+    produced = 0
+    total_found = 0
+    next_cursor: Optional[str] = None
+
+    # Iterate documents deterministically in provided order
+    for di, did in enumerate(doc_ids):
+        if di < start_doc_i:
+            continue
+        chunks = _fetch_doc_chunks(did)
+        if not chunks:
+            continue
+        # Sort by chunk_id for stable order
+        try:
+            chunks.sort(key=lambda p: int(p.get("chunk_id", 0)))
+        except Exception:
+            pass
+
+        for ci, ch in enumerate(chunks):
+            if di == start_doc_i and ci < start_chunk_i:
+                continue
+            text = str(ch.get("text") or "")
+            if not text:
+                continue
+
+            occs: List[Tuple[int, int]] = []
+            if match == "phrase":
+                for ph in phrases:
+                    occs.extend(_find_all(text, ph, case_sensitive=case_sensitive))
+            elif match in {"any", "all"}:
+                found_map: Dict[str, List[Tuple[int, int]]] = {}
+                for tok in tokens:
+                    mm = _find_all(text, tok, case_sensitive=case_sensitive)
+                    if mm:
+                        found_map[tok] = mm
+                if match == "all" and (set(tokens) - set(found_map.keys())):
+                    occs = []
+                else:
+                    for lst in found_map.values():
+                        occs.extend(lst)
+            else:  # regex
+                assert pattern is not None
+                try:
+                    for m in pattern.finditer(text):
+                        s, e = int(m.start()), int(m.end())
+                        if e > s:
+                            occs.append((s, e))
+                except Exception:
+                    occs = []
+
+            occs = _merge_and_sort_occurrences(occs)
+            if not occs:
+                continue
+
+            # Resume within chunk if cursor points here
+            occ_start_index = start_occ_i if (di == start_doc_i and ci == start_chunk_i) else 0
+            if granularity == "chunk":
+                # One record per chunk: use first occurrence beyond cursor
+                if occ_start_index >= len(occs):
+                    continue
+                s, e = occs[occ_start_index]
+                total_found += len(occs)
+                # Produce exactly one item for this chunk
+                left = text[max(0, s - ctx):s]
+                mid = text[s:e]
+                right = text[e:min(len(text), e + ctx)]
+                meta = doc_meta.get(did, {})
+                section = _canonical_section_label(ch.get("section_path"), getattr(settings, "section_merge_level", "ust"))
+                quotes.append(
+                    QuoteItem(
+                        doc_id=did,
+                        path=str(ch.get("path") or ""),
+                        title=meta.get("doc_title"),
+                        doc_date=meta.get("doc_date"),
+                        is_active=meta.get("is_active"),
+                        section=section,
+                        chunk_id=int(ch.get("chunk_id", 0)),
+                        start=int(s),
+                        end=int(e),
+                        left_context=left,
+                        text=mid,
+                        right_context=right,
+                    )
+                )
+                produced += 1
+                if produced >= limit:
+                    next_cursor = _encode_cursor({"doc_index": di, "chunk_index": ci + 1, "occ_index": 0})
+                # We still continue scanning to compute total_found
+            else:
+                # occurrence-level items
+                total_found += len(occs)
+                for oi, (s, e) in enumerate(occs):
+                    if oi < occ_start_index:
+                        continue
+                    if produced < limit:
+                        left = text[max(0, s - ctx):s]
+                        mid = text[s:e]
+                        right = text[e:min(len(text), e + ctx)]
+                        meta = doc_meta.get(did, {})
+                        section = _canonical_section_label(ch.get("section_path"), getattr(settings, "section_merge_level", "ust"))
+                        quotes.append(
+                            QuoteItem(
+                                doc_id=did,
+                                path=str(ch.get("path") or ""),
+                                title=meta.get("doc_title"),
+                                doc_date=meta.get("doc_date"),
+                                is_active=meta.get("is_active"),
+                                section=section,
+                                chunk_id=int(ch.get("chunk_id", 0)),
+                                start=int(s),
+                                end=int(e),
+                                left_context=left,
+                                text=mid,
+                                right_context=right,
+                            )
+                        )
+                        produced += 1
+                        if produced >= limit:
+                            next_cursor = _encode_cursor({"doc_index": di, "chunk_index": ci, "occ_index": oi + 1})
+                    # continue to count total_found regardless of the limit
+
+            # Reset within-chunk cursor after first applicable chunk
+            if di == start_doc_i and ci == start_chunk_i:
+                start_occ_i = 0
+
+        # Reset start_chunk when moving to next doc
+        if di == start_doc_i:
+            start_chunk_i = 0
+
+    took_ms = int((time.time() - t0) * 1000)
+    complete = next_cursor is None
+    return QuotesFindResponse(
+        took_ms=took_ms,
+        total_quotes=int(total_found),
+        returned=len(quotes),
+        complete=bool(complete),
+        next_cursor=next_cursor,
+        quotes=quotes,
+    )
 
 
 @app.post(

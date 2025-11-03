@@ -1,4 +1,4 @@
-# rags_tool (2.41.2)
+# rags_tool (2.42.0)
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
@@ -1060,3 +1060,10 @@ PY
    - Jeśli chcesz odświeżyć cache, uruchom ingest z `force_regen_summary=true` lub usuń katalogi `.summary/` obok plików.
 ## Nowości w 2.41.2
 - Browse: twarda normalizacja pola `query` w `/browse/doc-ids` (po stronie endpointu) — unika sytuacji, w której `null` byłby traktowany jako string "None" i aktywował próbkowanie przy `limit=0`.
+## Nowości w 2.42.0
+- Nowy endpoint: `POST /quotes/find` — deterministyczna enumeracja cytatów (wystąpień frazy/wyrażeń) w wybranych dokumentach (`restrict_doc_ids`).
+  - Tryby dopasowania: `match=phrase|any|all|regex` (domyślnie `phrase`, bez rozróżniania wielkości liter).
+  - Granularność: `granularity=occurrence|chunk` (domyślnie `occurrence`).
+  - Stronicowanie: `limit` + `cursor`; odpowiedź zawiera `total_quotes`, `returned`, `complete`, `next_cursor`.
+  - Przeznaczenie: pełna lista cytatów dla już zawężonego zbioru dokumentów (np. po `POST /browse/doc-ids`). Endpoint nie używa `top_k` ani MMR i nie „tnie” wyników.
+- Admin UI: uporządkowano kolejność operacji i dodano gotowy przykład wywołania `Quotes: znajdź cytaty (restrict_doc_ids)`.
