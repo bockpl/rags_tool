@@ -491,15 +491,7 @@ class BrowseIdsResponse(BaseModel):
     docs: List[DocListItem]
 
 
-class BrowseFacetsRequest(BrowseQuery):
-    fields: List[str] = Field(default_factory=lambda: ["is_active", "year", "doc_kind"])
-
-
-class BrowseFacetsResponse(BaseModel):
-    took_ms: int
-    approx: bool = False
-    total_docs: int
-    facets: dict
+"""Facets models removed in 2.43.0. Use /browse/doc-ids and aggregate client-side."""
 
 
 # --- Simplified doc-ids params (FTS-based) ---

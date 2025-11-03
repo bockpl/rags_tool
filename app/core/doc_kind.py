@@ -2,9 +2,9 @@
 
 This module provides a heuristic function `infer_doc_kind` which classifies
 documents into a small, fixed set of ASCII identifiers based on Polish titles
-and signatures. Intended for on-the-fly use in browse/facets without changing
+and signatures. Intended for on-the-fly use in browse operations without changing
 the Qdrant schema. The output values are stable ASCII keys suitable for API
-filters and facets; UI may map them to localized labels.
+filters; UI may map them to localized labels.
 
 Kinds:
 - resolution   → uchwała

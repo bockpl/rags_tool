@@ -1,4 +1,7 @@
-# rags_tool (2.42.0)
+# rags_tool (2.43.0)
+
+## Nowości w 2.43.0
+- Usunięto endpoint `POST /browse/facets`. Dla list i liczby dokumentów korzystaj z `POST /browse/doc-ids` (pole `candidates_total`). Rozkłady/filtry twórz po stronie klienta na podstawie zwróconych metadanych (`is_active`, `doc_date`, `doc_kind`).
 
 Dwustopniowy serwis RAG zbudowany na FastAPI. System wspiera streszczanie dokumentów, indeksowanie w Qdrant oraz wyszukiwanie hybrydowe (dense + TF-IDF). Administrator może globalnie pominąć Etap 1 (streszczenia) i wyszukiwać bezpośrednio w całym korpusie chunków — patrz `SEARCH_SKIP_STAGE1_DEFAULT`.
 
@@ -69,7 +72,7 @@ Przykład (POST /search/query):
 ```
 
 ## Nowości w 2.31.0
-- Browse: dodano `text_match` — wymaganie literalnego dopasowania zapytania w treści chunków. Wartości: `none` (domyślnie), `phrase` (cała fraza jako substring), `any` (dowolny token), `all` (wszystkie tokeny). Działa w `POST /browse/doc-ids` i `POST /browse/facets`.
+- Browse: dodano `text_match` — wymaganie literalnego dopasowania zapytania w treści chunków. Wartości: `none` (domyślnie), `phrase` (cała fraza jako substring), `any` (dowolny token), `all` (wszystkie tokeny). Działa w `POST /browse/doc-ids`.
 - Opis: `entities` + `entity_strategy='optional'` łączy wyniki po treści ORAZ encjach; w strategiach ścisłych encje działają jak filtr (AND) już podczas wektorowego wyszukiwania.
 
 ## Nowości w 2.30.0
@@ -83,7 +86,7 @@ Przykład (POST /search/query):
 ## Nowości w 2.29.0
 - Browse: dodano filtry po encjach (entities) na poziomie treści (chunków).
   - Nowe pola w `BrowseQuery`: `entities` (lista stringów) oraz `entity_strategy` (`auto`=must_any, `must_any`, `must_all`, `exclude`).
-  - Działa w: `POST /browse/doc-ids`, `POST /browse/facets`.
+  - Działa w: `POST /browse/doc-ids`.
 - doc_kind: klasyfikacja rodzaju dokumentu oparta wyłącznie o tytuł (title). Sygnatury/keywords nie wpływają na rozpoznanie rodzaju.
 - Admin UI: przykłady browse z `entities`.
 
@@ -96,22 +99,11 @@ Przykład (POST /search/query):
 ## Nowości w 2.28.0
 - Browse: dodano inferencję rodzaju dokumentu (doc_kind) „w locie” z tytułów/sygnatur bez zmiany schematu Qdrant.
   - Filtrowanie po `kinds` (np. `order`, `resolution`, `regulation`) wspierane w:
-    - `POST /browse/doc-ids` (odpowiedź zawiera pole `doc_kind` i `candidates_total`),
-    - `POST /browse/facets` (nowy facet `doc_kind`).
+    - `POST /browse/doc-ids` (odpowiedź zawiera pole `doc_kind` i `candidates_total`).
   - Obsługiwane identyfikatory: `resolution`, `order`, `announcement`, `notice`, `decision`, `regulation`, `policy`, `procedure`, `instruction`, `statute`, `other`.
-- Admin UI: dodano operacje testowe dla browse (`browse-count`, `browse-doc-ids`, `browse-facets`).
+- Admin UI: dodano operacje testowe dla browse (`browse-count`, `browse-doc-ids`).
 
-Przykłady:
-
-```
-POST /browse/facets
-{
-  "query": ["uchwała senatu"],
-  "fields": ["is_active", "year", "doc_kind"]
-}
-```
-
-Uwaga: filtrowanie `kinds` wykonywane jest post‑selekcyjnie (bez zmian w schemacie), więc nie wpływa na etap wyszukiwania po chunkach — zawęża wynik kandydatów i facety.
+Uwaga: filtrowanie `kinds` wykonywane jest post‑selekcyjnie (bez zmian w schemacie), więc nie wpływa na etap wyszukiwania po chunkach — zawęża wynik kandydatów i listę kandydatów.
 
 ## Nowości w 2.27.1
 - Prompt (summary): doprecyzowano regułę ustalania `is_active` na podstawie `PATH` — sama obecność roku/daty w ścieżce nie oznacza archiwalności. `is_active=false` ustawiaj wyłącznie wtedy, gdy `PATH` zawiera jednoznaczne słowa‑klucze (np. `archiwum`, `archiwal`, `archive`, `archives`, `archival`, `old`, `stare`, `stary`, `history`, `deprecated`, `zarchiwizowane`).
@@ -121,10 +113,9 @@ Uwaga: filtrowanie `kinds` wykonywane jest post‑selekcyjnie (bez zmian w schem
 - Sidecar: `is_active` jest zapisywane dodatkowo w pliku cache streszczenia. Starsze cache bez tego pola pozostają ważne — ich `is_active` domyślnie traktujemy jako `true`.
 - Zasady istniejące (REPLACEMENT): dotychczasowy mechanizm ustawiania `is_active=false` dla dokumentów zastępowanych nadal działa i ma zastosowanie po ingestcie, niezależnie od powyższej oceny LLM.
 
-- Browse po treści: `POST /browse/doc-ids`, `POST /browse/facets` selekcjonują kandydatów wyłącznie na podstawie treści (chunków), bez przeszukiwania streszczeń. Streszczenia mogą być użyte jedynie do wzbogacenia metadanych (tytuł/data) po selekcji.
-- OpenAPI: ustalone `operation_id` dla endpointów browse (tag `tools`):
-  - `POST /browse/doc-ids` → `rags_tool_browse_doc_ids`,
-  - `POST /browse/facets` → `rags_tool_browse_facets`.
+- Browse po treści: `POST /browse/doc-ids` selekcjonuje kandydatów wyłącznie na podstawie treści (chunków), bez przeszukiwania streszczeń. Streszczenia mogą być użyte jedynie do wzbogacenia metadanych (tytuł/data) po selekcji.
+- OpenAPI: ustalone `operation_id` dla endpointu browse (tag `tools`):
+  - `POST /browse/doc-ids` → `rags_tool_browse_doc_ids`.
 - Wyszukiwanie: przywrócono dotychczasowe zachowanie — `search` zwraca streszczenie raz na dokument (zgodnie z `summary_mode`), a snippety mają fallback do streszczenia tylko gdy brak tekstu chunku.
 - Zasada podsumowań: funkcje podsumowujące nie tworzą „streszczeń streszczeń”. Dozwolone jest korzystanie z `entities` i `signatures`.
 
@@ -136,7 +127,7 @@ Uwaga: filtrowanie `kinds` wykonywane jest post‑selekcyjnie (bez zmian w schem
 - Wydzielenie funkcji przeglądowych (LLM‑friendly) od wyszukiwania odpowiedzi:
   - Endpointy browse:
     - `POST /browse/doc-ids` — lista `doc_id` z metadanymi (tytuł, `doc_date`, `is_active`, `doc_kind`) oraz pole `candidates_total` (liczba kandydatów po filtrach, niezależna od `limit`). Dla samej liczby ustaw `limit=0` i odczytaj `candidates_total` (nie stosuj sond `limit:1`). Gdy podano zawężenia treścią (query) lub `kinds`, odpowiedź może zawierać próbkę do 15 dokumentów (`approx=true` sygnalizuje próbkę niepełną).
-    - `POST /browse/facets` — proste rozkłady (facety) po kandydatach; obsługiwane pola: `is_active`, `year` (z `doc_date`).
+    - `POST /browse/facets` — (usunięty w 2.43.0) proste rozkłady po kandydatach.
   - Wspólne helpery dostępu do magazynu przeniesione do `app/core/store_access.py` i używane m.in. przez analizę sprzeczności.
   - Bez zmian w istniejącym endpointzie `POST /search/query` — podział dotyczy struktury i nowych tras.
 
@@ -907,7 +898,7 @@ To narzędzie służy wyłącznie do wyszukiwania RAG i zwracania bloków dowodo
 
 <!-- count endpoint usunięty -->
 - `POST /browse/doc-ids` — lista `doc_id` + `title` + `doc_date` + `is_active`,
-- `POST /browse/facets` — proste rozkłady (np. `is_active`, rok z `doc_date`).
+<!-- Endpoint `POST /browse/facets` został usunięty w 2.43.0. Używaj `/browse/doc-ids` i agreguj po stronie klienta. -->
 
 Najważniejsze pola `POST /search/query`:
 

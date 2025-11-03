@@ -2,8 +2,7 @@
 
 Provides simple operations without MMR/rerank/shaping, such as:
 - count how many candidate documents match a query (content scope),
-- list candidate doc ids and basic metadata,
-- facet counts over candidate documents.
+- list candidate doc ids and basic metadata.
 
 Implementation note:
 - Selection operates on document content (chunk-level points) and does not
@@ -414,36 +413,7 @@ def list_document_minimal(params: BrowseParams, limit: int = 200) -> Tuple[List[
     return docs, approx, candidates_total
 
 
-def facet_counts(params: BrowseParams, fields: Iterable[str]) -> Tuple[Dict[str, Dict[str, int]], bool, int]:
-    """Compute simple facets over candidate documents.
-
-    Supported fields:
-    - is_active
-    - year (derived from doc_date prefix YYYY)
-    - doc_kind
-    Returns (facets, approx, total_candidates) after applying kind filter.
-    """
-    ids, doc_map, approx = stage1_candidates(params)
-    _ensure_doc_meta_with_kind(ids, doc_map)
-    # Apply kind filter to the candidate set for consistent totals
-    ids = _apply_kind_filter(sorted(ids), doc_map, params.kinds)
-    fields_norm = [str(f).strip().lower() for f in fields]
-    out: Dict[str, Dict[str, int]] = {}
-    for did in ids:
-        meta = doc_map.get(did, {})
-        for f in fields_norm:
-            if f == "is_active":
-                key = "true" if bool(meta.get("is_active")) else "false"
-                out.setdefault("is_active", {})[key] = out.get("is_active", {}).get(key, 0) + 1
-            elif f == "year":
-                dd = str(meta.get("doc_date") or "")
-                year = dd[:4] if len(dd) >= 4 and dd[:4].isdigit() else "brak"
-                out.setdefault("year", {})[year] = out.get("year", {}).get(year, 0) + 1
-            elif f in ("doc_kind", "kind"):
-                kind = str(meta.get("doc_kind") or "other").lower()
-                out.setdefault("doc_kind", {})[kind] = out.get("doc_kind", {}).get(kind, 0) + 1
-    total_candidates = len(ids)
-    return out, approx, total_candidates
+"""Facets aggregation removed in 2.43.0. Use client-side grouping over /browse/doc-ids results."""
 
 
 # --- Simplified FTS-based doc-ids (full corpus) ---

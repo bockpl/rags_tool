@@ -45,7 +45,7 @@ ADMIN_OPERATION_SPECS: List[Dict[str, Any]] = [
     {"id": "fts-rebuild", "path": "/fts/rebuild", "method": "POST", "label": "Odbuduj FTS (chunki → SQLite)", "body": "{}"},
     # Przeglądanie korpusu (wybór dokumentów)
     {"id": "browse-doc-ids", "path": "/browse/doc-ids", "method": "POST", "label": "Browse: doc-ids (FTS, uproszczone)", "body": "{\n  \"query\": [\n    \"regulamin\"\n  ],\n  \"match\": \"phrase\",\n  \"status\": \"active\",\n  \"kinds\": [\"regulation\"]\n}"},
-    {"id": "browse-facets", "path": "/browse/facets", "method": "POST", "label": "Browse: facety (is_active, year, doc_kind)", "body": "{\n  \"query\": [\n    \"uchwała senatu\"\n  ],\n  \"top_m\": 100,\n  \"mode\": \"auto\",\n  \"use_hybrid\": true,\n  \"fields\": [\"is_active\", \"year\", \"doc_kind\"]\n}"},
+    # NOTE: /browse/facets removed in 2.43.0
     # Cytaty (enumeracja w wybranych dokumentach)
     {"id": "quotes-find", "path": "/quotes/find", "method": "POST", "label": "Quotes: znajdź cytaty (restrict_doc_ids)", "body": "{\n  \"restrict_doc_ids\": [\n    \"<doc_id_1>\",\n    \"<doc_id_2>\"\n  ],\n  \"query\": \"fraza do znalezienia\",\n  \"match\": \"phrase\",\n  \"granularity\": \"occurrence\",\n  \"limit\": 50\n}"},
     # Search (dowody do odpowiedzi)

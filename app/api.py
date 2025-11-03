@@ -54,8 +54,6 @@ from app.models import (
     DocsListResponse,
     BrowseQuery,
     BrowseIdsResponse,
-    BrowseFacetsRequest,
-    BrowseFacetsResponse,
     DocIdsQuery,
     DocStatsResponse,
     QuotesFindRequest,
@@ -995,48 +993,8 @@ def fts_rebuild():
     return {"ok": True, "inserted": inserted, "before": before, "after": after, "took_ms": took_ms}
 
 
-@app.post(
-    "/browse/facets",
-    response_model=BrowseFacetsResponse,
-    summary="Facety po dokumentach-kandydatach (treść)",
-    description=(
-        "Zwraca rozkłady (np. is_active, year, doc_kind) obliczone na zbiorze kandydatów wybranych po treści. "
-        "'total_docs' to liczba kandydatów po filtrach. Flaga 'approx' sygnalizuje przybliżenie listy, nie wpływa na 'total_docs'. "
-        "Obsługuje 'kinds', 'entities', 'entity_strategy' oraz 'text_match'."
-    ),
-    operation_id="rags_tool_browse_facets",
-    tags=["tools"],
-)
-def browse_facets(req: BrowseFacetsRequest) -> BrowseFacetsResponse:
-    t0 = time.time()
-    if not _qdrant_available_or_log("/browse/facets"):
-        took_ms = int((time.time() - t0) * 1000)
-        return BrowseFacetsResponse(took_ms=took_ms, approx=False, total_docs=0, facets={})
-    try:
-        _ensure_collections_cached()
-    except Exception as exc:
-        logger.error(
-            "Qdrant ensure_collections failed | context=/browse/facets url=%s error=%s",
-            getattr(settings, "qdrant_url", ""),
-            exc,
-        )
-        took_ms = int((time.time() - t0) * 1000)
-        return BrowseFacetsResponse(took_ms=took_ms, approx=False, total_docs=0, facets={})
-    queries = req.query if isinstance(req.query, list) else [str(req.query)]
-    params = browse_service.BrowseParams(
-        queries=queries,
-        top_m=int(req.top_m),
-        use_hybrid=bool(req.use_hybrid),
-        mode=str(req.mode),
-        kinds=getattr(req, "kinds", None),
-        entities=getattr(req, "entities", None),
-        entity_strategy=str(getattr(req, "entity_strategy", "auto")),
-        status=str(getattr(req, "status", "active")),
-        text_match=str(getattr(req, "text_match", "none")),
-    )
-    facets, approx, total = browse_service.facet_counts(params, req.fields or [])
-    took_ms = int((time.time() - t0) * 1000)
-    return BrowseFacetsResponse(took_ms=took_ms, approx=bool(approx), total_docs=int(total), facets=facets)
+# NOTE: /browse/facets endpoint was removed in 2.43.0. Use /browse/doc-ids for
+# listing and counts (via candidates_total) and aggregate on the client if needed.
 
 
 # --- Search debug: step-by-step endpoints ---
@@ -1366,9 +1324,8 @@ def search_query(req: SearchQuery):
 
     Important
     ---------
-    This endpoint is for answer retrieval only. Do not use it to list or facet
-    documents. For lists/facets use the browse endpoints: POST /browse/doc-ids,
-    POST /browse/facets.
+    This endpoint is for answer retrieval only. Do not use it to list
+    documents. For lists/counts use the browse endpoint: POST /browse/doc-ids.
 
     Default scope
     -------------

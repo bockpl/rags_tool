@@ -12,7 +12,7 @@ class SummRAGSettings(BaseSettings):
     """Centralised configuration for the rags_tool service."""
 
     app_name: str = "rags_tool"
-    app_version: str = "2.42.0"
+    app_version: str = "2.43.0"
 
     qdrant_url: str = Field(default="http://127.0.0.1:6333", alias="QDRANT_URL")
     qdrant_api_key: Optional[str] = Field(default=None, alias="QDRANT_API_KEY")
@@ -88,7 +88,7 @@ class SummRAGSettings(BaseSettings):
     # Prefer JSON responses for summaries (OpenAI JSON mode). Fallback to text parser if unsupported.
     summary_json_mode: bool = Field(default=True, alias="SUMMARY_JSON_MODE")
 
-    # Browse search limits (controls for /browse/doc-ids and /browse/facets)
+    # Browse search limits (controls for /browse/doc-ids)
     # Oversample factor for Qdrant search limit relative to top_m. Higher when
     # text_match is enabled to reduce false negatives of literal filters.
     browse_search_oversample: int = Field(default=10, alias="BROWSE_SEARCH_OVERSAMPLE")
@@ -128,8 +128,7 @@ class SummRAGSettings(BaseSettings):
             "- Jeśli masz encje (nazwy/ID/lata/cytaty), przekaż w 'entities' i wybierz 'entity_strategy' (optional/auto/boost/must_any/must_all/exclude). Domyślnie 'optional'.\n\n"
             "Czego NIE robić tym endpointem:\n"
             "- Nie proś o liczbę dokumentów ani same listy doc_id/tytułów. Do tego używaj: \n"
-            "  • POST /browse/doc-ids — lista doc_id + meta (tytuł, data, is_active, doc_kind) oraz 'candidates_total'; dla samej liczby ustaw 'limit=0' i zaufaj 'candidates_total' (nie stosuj sond 'limit:1'),\n"
-            "  • POST /browse/facets — proste rozkłady (is_active, rok, doc_kind).\n\n"
+            "  • POST /browse/doc-ids — lista doc_id + meta (tytuł, data, is_active, doc_kind) oraz 'candidates_total'; dla samej liczby ustaw 'limit=0' i zaufaj 'candidates_total' (nie stosuj sond 'limit:1').\n\n"
             "Używaj wyłącznie języka polskiego. Cały korpus oraz metadane są po polsku."
         ),
         alias="SEARCH_TOOL_DESCRIPTION",
